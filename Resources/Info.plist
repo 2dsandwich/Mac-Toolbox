@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>MONEY!</string>
+	<key>CFBundleExecutable</key>
+	<string>MONEY</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.masashik.flick</string>
+	<key>CFBundleName</key>
+	<string>MONEY!</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>27.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>MONEY! transcribes the other people in your meetings.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocationUsageDescription</key>
+	<string>MONEY! uses your rough location to show the weather when you type “weather”.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>MONEY! uses your rough location to show the weather when you type “weather”.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>MONEY! asks Finder and System Events to run the search bar actions you choose, like Empty Trash or Dark Mode.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MONEY! listens while you dictate or record a meeting, and turns your speech into text on this Mac.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MONEY! turns your speech into text on this Mac.</string>
+</dict>
+</plist>
