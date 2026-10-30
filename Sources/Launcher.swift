@@ -48,13 +48,14 @@ enum Scope: Equatable {
 }
 
 enum Builtin: String, CaseIterable {
-    case clipboard, switcher, pomodoro, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, settings, quit
+    case clipboard, switcher, pomodoro, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
+         allApps, settings, quit
 
     var title: String {
         switch self {
         case .clipboard: "Clipboard History"
         case .switcher: "Switch Apps"
-        case .pomodoro: "Pomodoro"
+        case .pomodoro: "Clock"
         case .calculator: "Calculator"
         case .timer: "Timer"
         case .stopwatch: "Stopwatch"
@@ -63,6 +64,9 @@ enum Builtin: String, CaseIterable {
         case .translate: "Translate"
         case .notes: "Sticky Notes"
         case .weather: "Weather Anywhere"
+        case .meeting: "Meetings"
+        case .screenText: "Text from Screen"
+        case .allApps: "All Apps"
         case .settings: "MONEY! Settings"
         case .quit: "Quit MONEY!"
         }
@@ -81,6 +85,9 @@ enum Builtin: String, CaseIterable {
         case .translate: "character.bubble.fill"
         case .notes: "note.text"
         case .weather: "cloud.sun.fill"
+        case .meeting: "waveform"
+        case .screenText: "text.viewfinder"
+        case .allApps: "square.grid.3x3.fill"
         case .settings: "gearshape"
         case .quit: "power"
         }
@@ -97,6 +104,9 @@ enum Builtin: String, CaseIterable {
         case .translate: .translate
         case .notes: .notes
         case .weather: .weather
+        case .meeting: .meeting
+        case .screenText: .text
+        case .allApps: .library
         default: nil
         }
     }
@@ -610,7 +620,7 @@ enum Metrics {
         switch b {
         case .clipboard: [s.clipboardKeyword.lowercased(), "clipboard", "history", "paste"]
         case .switcher: [s.switcherKeyword.lowercased(), "running", "switch"]
-        case .pomodoro: ["pomodoro", "pomo", "focus", "ポモドーロ", "集中"]
+        case .pomodoro: ["clock", "clocks", "pomodoro", "pomo", "focus", "時計", "ポモドーロ", "集中"]
         case .calculator: ["calc", "calculator", "keypad", "電卓", "計算機"]
         case .timer: ["timer", "countdown", "タイマー"]
         case .stopwatch: ["stopwatch", "stop watch", "lap", "ストップウォッチ"]
@@ -619,8 +629,11 @@ enum Metrics {
         case .translate: ["translate", "translator", "翻訳"]
         case .notes: ["notes", "sticky", "sticky notes", "memo", "board", "付箋", "メモ"]
         case .weather: ["weather", "forecast", "天気", "天気予報"]
-        case .settings: ["settings", "preferences", "flick"]
-        case .quit: ["quit flick"]
+        case .meeting: ["meeting", "meetings", "record meeting", "会議", "議事録"]
+        case .screenText: ["text from screen", "scan", "ocr", "screen text", "qr scan", "文字認識"]
+        case .allApps: ["all apps", "library", "launchpad", "アプリ一覧"]
+        case .settings: ["settings", "preferences", "money"]
+        case .quit: ["quit money", "quit"]
         }
     }
 
@@ -1017,16 +1030,29 @@ enum Metrics {
             if !rest.isEmpty { model.setQuery(rest) }
             return
         }
-        if model.scope == .apps, let item = model.selected, case .builtin(let b) = item.kind, let scope = b.scope,
-           model.keywords(b, store.settings).contains(where: { $0.hasPrefix(lower) }) || model.ghost.isEmpty {
-            // "cl" + Tab → Clipboard, "sw" + Tab → Switch (like site scopes in the browser bar).
+        if model.scope == .apps, let b = modeToEnter(lower), let scope = b.scope {
+            // "cl" + Tab → Clipboard, "wea" + Tab → Weather (like site scopes in the browser bar), even when an app
+            // with the same name sits above it.
             if let m = b.clockMode { model.clockMode = m }
-            enter(scope)
+            tab(scope)
         } else if !model.ghost.isEmpty {
             model.setQuery(model.query + model.ghost)
         } else {
             model.move(1)
         }
+    }
+
+    /// The mode Tab opens: the selected row if it's one, otherwise the first listed mode whose word starts with
+    /// what's typed.
+    private func modeToEnter(_ lower: String) -> Builtin? {
+        func mode(_ item: ResultItem?) -> Builtin? {
+            if case .builtin(let b)? = item?.kind, b.scope != nil { b } else { nil }
+        }
+        let matches = { (b: Builtin) in !lower.isEmpty && self.model.keywords(b, self.store.settings).contains { $0.hasPrefix(lower) } }
+        if let b = mode(model.selected), matches(b) || model.ghost.isEmpty { return b }
+        if let b = model.items.lazy.compactMap(mode).first(where: matches) { return b }
+        // Modes left out of the results still open by their whole word.
+        return Builtin.allCases.first { $0.scope != nil && model.keywords($0, store.settings).contains(lower) }
     }
 
     /// A mode's word at the start of what's typed, and the rest ("weather in tokyo" → Weather, "tokyo").
@@ -1407,6 +1433,7 @@ enum Metrics {
             case .translate: enter(.translate)
             case .notes: enter(.notes)
             case .weather: enter(.weather)
+            case .meeting, .screenText, .allApps: if let scope = b.scope { tab(scope) }
             case .settings: hide(animated: false); openSettings()
             case .quit: NSApp.terminate(nil)
             }
@@ -1565,7 +1592,11 @@ enum Metrics {
         model.scope = model.resolve(scope)
         model.query = query
         if scope != .text { model.recompute() }
-        if scope == .weather || (scope == .apps && !query.isEmpty) {
+        if CommandLine.arguments.contains("--tab") {
+            tab()
+            print("tab →", model.scope, "query:", model.query)
+        }
+        if model.scope == .weather || (model.scope == .apps && !model.query.isEmpty) {
             // Let network answers (weather: place, then forecast) arrive.
             for _ in 0..<3 {
                 RunLoop.main.run(until: Date().addingTimeInterval(2.5))

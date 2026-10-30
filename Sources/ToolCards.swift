@@ -94,7 +94,7 @@ enum ToolCard {
     /// The heights below were measured with a 14 pt inset and a 9 pt gap under the header.
     private var content: CGFloat {
         switch self {
-        case .weather: 312
+        case .weather: 341
         case .rain: 156
         case .big(let b): 98 + (b.caption == nil ? 0 : 21) + (b.detail == nil ? 0 : 20) + (b.chips.isEmpty ? 0 : 40)
         case .clocks: 138
