@@ -338,7 +338,13 @@ import SwiftUI
             for _ in 0..<60 where !NSEvent.modifierFlags.intersection([.option, .control, .shift, .command, .function]).isEmpty {
                 try? await Task.sleep(for: .milliseconds(25))
             }
-            Paster.pasteText(text)
+            let how = await Paster.deliver(text, pid: (app ?? front)?.processIdentifier)
+            Log.write("dictation \(how.rawValue)")
+            // Nothing took it: on the clipboard for ⌘V, and say so.
+            if how == .failed {
+                clipboard.copy(text: text, source: mode == .command ? "Voice Edit" : "Dictation")
+                onNote?("On clipboard")
+            }
         }
         if let p = (app ?? front)?.processIdentifier {
             lastTyped = ((before ?? "") + text, p, targetTitle, Date())
@@ -455,12 +461,11 @@ import SwiftUI
     /// Whether the focused thing takes typing: true for text fields, false for things that clearly don't (a button,
     /// a list, nothing focused at all), nil when it can't tell (terminals and some web views don't say).
     static func focusTakesText() -> Bool? {
-        let system = AXUIElementCreateSystemWide()
-        var focused: AnyObject?
-        let err = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused)
-        if err == .noValue { return false }
-        guard err == .success, let el = focused, CFGetTypeID(el) == AXUIElementGetTypeID() else { return nil }
-        let e = el as! AXUIElement
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let (el, err) = Paster.focusedElement(pid)
+        // Nothing focused. An Electron app still building its tree says the same, so with a window open it can't tell.
+        if err == .noValue { return Paster.hasFocusedWindow(pid) ? nil : false }
+        guard let e = el else { return nil }
         var role: AnyObject?
         AXUIElementCopyAttributeValue(e, kAXRoleAttribute as CFString, &role)
         let r = role as? String ?? ""
