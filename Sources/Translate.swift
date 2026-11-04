@@ -121,7 +121,7 @@ struct TranslateView: View {
 
     static let barHeight: CGFloat = 44
     static let resultHeight: CGFloat = 176
-    static var height: CGFloat { PanelLayout.inset * 2 + PanelLayout.gap + barHeight + resultHeight }
+    static var height: CGFloat { PanelLayout.vertical + PanelLayout.gap + barHeight + resultHeight }
 
     var body: some View {
         let text = model.query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -180,7 +180,7 @@ struct TranslateView: View {
             }
             .frame(height: Self.resultHeight)
         }
-        .padding(PanelLayout.inset)
+        .padding(PanelLayout.edges)
         .onChange(of: translator.source) { _, _ in translator.request(model.query, now: true) }
         .onChange(of: translator.target) { _, _ in translator.request(model.query, now: true) }
     }
@@ -202,7 +202,7 @@ struct TranslateView: View {
                 Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(Color.primary.opacity(0.08)))
+            .background(RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(cardFill))
             .contentShape(Rectangle())
         }
         .menuStyle(.button)

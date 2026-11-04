@@ -290,7 +290,7 @@ enum Metrics {
         if scope == .library {
             guard !items.isEmpty else { return 44 }
             let rows = (items.count + libraryColumns - 1) / libraryColumns
-            return CGFloat(min(rows, Metrics.libraryRows)) * Metrics.libraryCell.height + Metrics.listInset * 2
+            return CGFloat(min(rows, Metrics.libraryRows)) * Metrics.libraryCell.height + Metrics.rowGap + Metrics.listInset
         }
         if scope == .text {
             if screenText != nil { return textDisplaySize.height + Metrics.listInset }

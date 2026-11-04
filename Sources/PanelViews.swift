@@ -268,6 +268,11 @@ private struct LanguageToggle: View {
     }
 }
 
+/// Room under a meeting's text for the chat button, so the text stops above it instead of running under it.
+private func chatRoom(_ chat: MeetingCopilot?, _ s: Settings) -> CGFloat {
+    chat == nil ? 0 : ExpandingChat.buttonSize(outerRadius: s.scopedCornerRadius, inset: Metrics.listInset) + PanelLayout.gap
+}
+
 struct MeetingView: View {
     let meeting: MeetingRecorder
     let query: String
@@ -285,18 +290,20 @@ struct MeetingView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .done:
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
                         if !meeting.summary.isEmpty { NotesView(markdown: meeting.summary) }
                         if !meeting.lines.isEmpty {
-                            Text("TRANSCRIPT").font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
-                            transcript
+                            // Styled like the notes' own headings (Summary, Action items).
+                            Text("Transcript").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 8)
+                            VStack(alignment: .leading, spacing: 12) { transcript }
                         }
                     }
-                    .padding(.horizontal, 22)
-                    .padding(.top, 8)
-                    .padding(.bottom, 72) // room above the chat button
+                    .padding(.leading, 22)
+                    .padding(.trailing, Metrics.listInset) // the bar's buttons end here too
+                    .padding(.vertical, 8)
                 }
                 .scrollIndicators(.automatic)
+                .padding(.bottom, chatRoom(chat, s))
                 .overlay(alignment: .bottomTrailing) {
                         if let chat { ExpandingChat(copilot: chat, title: "Ask about this meeting", outerRadius: s.scopedCornerRadius, inset: Metrics.listInset).padding(.bottom, -Metrics.listInset) }
                 }
@@ -327,7 +334,8 @@ struct MeetingView: View {
                     if !meeting.volatileOthers.isEmpty { LineRow(me: false, text: meeting.volatileOthers, time: nil, live: true) }
                     Color.clear.frame(height: 1).id("end")
                 }
-                .padding(.horizontal, 22)
+                .padding(.leading, 22)
+                .padding(.trailing, Metrics.listInset)
                 .padding(.vertical, 8)
             }
             .scrollIndicators(.automatic)
@@ -493,10 +501,11 @@ struct PastMeetingView: View {
             ScrollView {
                 NotesView(markdown: filtered)
                     .padding(.horizontal, 26)
-                    .padding(.bottom, 72) // room above the chat button
+                    .padding(.bottom, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: .infinity)
+            .padding(.bottom, chatRoom(chat, s))
             .overlay(alignment: .bottomTrailing) {
                 if let chat { ExpandingChat(copilot: chat, title: "Ask about this meeting", outerRadius: s.scopedCornerRadius, inset: Metrics.listInset).padding(.bottom, -Metrics.listInset) }
             }

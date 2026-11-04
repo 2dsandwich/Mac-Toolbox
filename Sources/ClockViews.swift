@@ -20,7 +20,7 @@ struct ClockHub: View {
         case .stopwatch: StopwatchesView.height()
         case .alarms: AlarmsView.height(model)
         }
-        return PanelLayout.inset * 2 + gap + tabsHeight + body
+        return PanelLayout.vertical + gap + tabsHeight + body
     }
 
     var body: some View {
@@ -38,7 +38,7 @@ struct ClockHub: View {
             }
             .transition(.opacity)
         }
-        .padding(PanelLayout.inset)
+        .padding(PanelLayout.edges)
     }
 }
 
@@ -61,14 +61,14 @@ private struct ClockTabs: View {
                     }
                     .foregroundStyle(on ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(RoundedRectangle(cornerRadius: max(4, outer - 4), style: .continuous).fill(Color.primary.opacity(on ? 0.16 : 0)))
+                    .background(RoundedRectangle(cornerRadius: PanelLayout.inner(outer, by: 4), style: .continuous).fill(Color.primary.opacity(on ? 0.16 : 0)))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(4)
-        .background(RoundedRectangle(cornerRadius: outer, style: .continuous).fill(Color.primary.opacity(0.06)))
+        .background(RoundedRectangle(cornerRadius: outer, style: .continuous).fill(cardFill))
     }
 
     private func running(_ m: ClockMode) -> Bool {
@@ -94,7 +94,7 @@ struct ClockButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(tint == nil ? Color.primary : Color.white)
-                .frame(width: 34, height: 34)
+                .frame(width: 32, height: 32)
                 .background(Circle().fill(tint.map { $0.opacity(hover ? 1 : 0.9) } ?? Color.primary.opacity(hover ? 0.18 : 0.1)))
                 .contentShape(Circle())
         }
@@ -254,7 +254,8 @@ struct TimersView: View {
                     ClockButton(symbol: "xmark", help: "Remove") { timers.remove(t) }
                 }
             }
-            .padding(14)
+            .padding(.horizontal, cardPadding)
+            .padding(.vertical, 14)
         }
         .frame(height: tileHeight)
     }
@@ -316,7 +317,8 @@ struct StopwatchesView: View {
                     if watches.list.count > 1 { ClockButton(symbol: "xmark", help: "Remove") { watches.remove(w) } }
                 }
             }
-            .padding(14)
+            .padding(.horizontal, cardPadding)
+            .padding(.vertical, 14)
         }
         .frame(height: tileHeight)
     }
@@ -341,7 +343,7 @@ struct StopwatchesView: View {
                 }
             }
             .scrollIndicators(.never)
-            .padding(.horizontal, 14)
+            .padding(.horizontal, cardPadding)
             .padding(.vertical, 12)
         }
         .frame(height: CGFloat(shown) * Self.lapHeight + 24)
@@ -408,7 +410,7 @@ struct AlarmsView: View {
     }
 
     private func ringing(_ a: Alarm) -> some View {
-        Block(radius: radius, fill: 0.14) {
+        Block(radius: radius, fill: Color.primary.opacity(0.14)) {
             HStack(spacing: 12) {
                 Image(systemName: "alarm.waves.left.and.right.fill").font(.system(size: 20)).foregroundStyle(orange).symbolEffect(.bounce, options: .repeating)
                 VStack(alignment: .leading, spacing: 0) {
@@ -419,14 +421,14 @@ struct AlarmsView: View {
                 if a.snooze { ClockButton(symbol: "zzz", help: "Snooze \(a.snoozeMinutes) min") { alarms.snooze() } }
                 ClockButton(symbol: "stop.fill", tint: orange, help: "Stop") { alarms.dismiss() }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, cardPadding)
             .frame(maxHeight: .infinity)
         }
         .frame(height: 58)
     }
 
     private func row(_ a: Alarm, past: Bool) -> some View {
-        Block(radius: radius, fill: past ? 0.035 : 0.06) {
+        Block(radius: radius) {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(a.time).font(.system(size: 24, weight: .semibold, design: .rounded)).monospacedDigit()
@@ -438,7 +440,7 @@ struct AlarmsView: View {
                 ClockButton(symbol: "pencil", help: "Edit") { model.editAlarm(a) }
                 ClockButton(symbol: "trash", help: "Delete") { alarms.remove(a.id) }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, cardPadding)
             .frame(maxHeight: .infinity)
         }
         .frame(height: Self.rowHeight)
@@ -468,7 +470,7 @@ private struct AlarmEditor: View {
             VStack(spacing: 14) {
                 HStack(spacing: 10) {
                     Spacer()
-                    TimePicker(model: model, hour: draft.hour, minute: draft.minute)
+                    TimePicker(model: model, hour: draft.hour, minute: draft.minute, radius: radius)
                     VStack(spacing: 4) {
                         ClockButton(symbol: "chevron.up", help: "Later") { model.nudgeAlarm(1) }
                         ClockButton(symbol: "chevron.down", help: "Earlier") { model.nudgeAlarm(-1) }
@@ -551,6 +553,7 @@ struct TimePicker: View {
     let model: LauncherModel
     let hour: Int
     let minute: Int
+    let radius: CGFloat
 
     static var twelveHour: Bool { (DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? "").contains("a") }
 
@@ -564,7 +567,7 @@ struct TimePicker: View {
             if twelve { part(2, hour < 12 ? "AM" : "PM", small: true).padding(.leading, 6) }
         }
         .padding(4)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.06)))
+        .background(RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(cardFill))
     }
 
     private func part(_ i: Int, _ text: String, small: Bool = false) -> some View {
@@ -575,7 +578,7 @@ struct TimePicker: View {
             .foregroundStyle(on ? Color.white : Color.primary)
             .padding(.horizontal, 8)
             .frame(minHeight: 64)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(on ? orange : .clear))
+            .background(RoundedRectangle(cornerRadius: PanelLayout.inner(PanelLayout.inner(radius), by: 4), style: .continuous).fill(on ? orange : .clear))
             .contentShape(Rectangle())
             .onTapGesture { model.alarmSegment = i }
     }

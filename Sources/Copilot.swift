@@ -603,7 +603,8 @@ struct ExpandingChat: View {
     @State private var resizeStart: (mouse: NSPoint, size: CGSize)?
 
     private var radius: CGFloat { max(8, outerRadius - inset) }
-    private var buttonSize: CGFloat { max(40, min(52, radius * 2)) }
+    private var buttonSize: CGFloat { Self.buttonSize(outerRadius: outerRadius, inset: inset) }
+    static func buttonSize(outerRadius: CGFloat, inset: CGFloat) -> CGFloat { max(40, min(52, max(8, outerRadius - inset) * 2)) }
     /// The close button sits in the corner, concentric with it.
     private static let closeInset: CGFloat = 8
     private var closeSize: CGFloat { max(20, (radius - Self.closeInset) * 2) }

@@ -618,7 +618,9 @@ private struct LibraryGrid: View {
                                 }
                         }
                     }
-                    .padding(listInset)
+                    .padding(.horizontal, listInset)
+                    .padding(.top, rowGap)
+                    .padding(.bottom, listInset)
                 }
                 .scrollIndicators(.never)
                 .frame(height: model.listHeight(s))
@@ -881,7 +883,7 @@ private struct ClipButton: View {
             // Icon only; the name and its key are in the tooltip.
             Image(systemName: symbol).font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(destructive && hovering ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
-                .frame(width: 28, height: 28)
+                .frame(width: 32, height: 32)
                 .background(Circle().fill(destructive && hovering ? Color.red.opacity(0.15) : Color.primary.opacity(hovering ? 0.12 : 0.06)))
                 .contentShape(Circle())
         }

@@ -1689,9 +1689,9 @@ struct IslandView: View {
                     Marquee(text: m.artistLine, font: .system(size: 12), color: .white.opacity(0.6))
                 }
                 Spacer(minLength: 0)
-                RoundButton(symbol: "backward.fill", tint: nil) { m.previous() }
-                RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink) { m.playPause() }
-                RoundButton(symbol: "forward.fill", tint: nil) { m.next() }
+                RoundButton(symbol: "backward.fill", tint: nil, size: Self.rowButton) { m.previous() }
+                RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: Self.rowButton) { m.playPause() }
+                RoundButton(symbol: "forward.fill", tint: nil, size: Self.rowButton) { m.next() }
             }
             // Under the title, lined up with it (`openHeight` makes the room).
             if !Lyrics.shared.cues.isEmpty { LyricLines(lyrics: Lyrics.shared).padding(.leading, 46 + 12) }

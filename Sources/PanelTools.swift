@@ -8,19 +8,22 @@ enum PanelLayout {
     static let inset: CGFloat = Metrics.listInset
     /// Between blocks and keys.
     static let gap: CGFloat = 8
-    static func inner(_ radius: CGFloat) -> CGFloat { max(6, radius - inset) }
+    /// Around a full view: the list's gap under the bar on top, the inset on the other sides.
+    static let edges = EdgeInsets(top: Metrics.rowGap, leading: inset, bottom: inset, trailing: inset)
+    static let vertical = edges.top + edges.bottom
+    static func inner(_ radius: CGFloat, by gap: CGFloat = inset) -> CGFloat { max(6, radius - gap) }
 }
 
 /// A rounded block inside a full view.
 struct Block<Content: View>: View {
     let radius: CGFloat
-    var fill: Double = 0.06
+    var fill = cardFill
     @ViewBuilder let content: () -> Content
 
     var body: some View {
         content()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(Color.primary.opacity(fill)))
+            .background(RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(fill))
     }
 }
 
@@ -32,7 +35,7 @@ struct CalculatorView: View {
 
     static let keyHeight: CGFloat = 50
     static let displayHeight: CGFloat = 84
-    static var height: CGFloat { PanelLayout.inset * 2 + PanelLayout.gap * 5 + displayHeight + keyHeight * 5 }
+    static var height: CGFloat { PanelLayout.vertical + PanelLayout.gap * 5 + displayHeight + keyHeight * 5 }
 
     private static let rows: [[String]] = [
         ["AC", "⌫", "( )", "÷"],
@@ -57,7 +60,7 @@ struct CalculatorView: View {
                 }
             }
         }
-        .padding(PanelLayout.inset)
+        .padding(PanelLayout.edges)
     }
 
     private var display: some View {
@@ -137,14 +140,14 @@ struct MixerView: View {
     static let rowHeight: CGFloat = 54
     static func height(_ apps: Int) -> CGFloat {
         let rows = CGFloat(min(max(apps, 1), 5) + 1)
-        return PanelLayout.inset * 2 + rows * rowHeight + (rows - 1) * PanelLayout.gap
+        return PanelLayout.vertical + rows * rowHeight + (rows - 1) * PanelLayout.gap
     }
 
     var body: some View {
         let gap = PanelLayout.gap
         let shown = mixer.apps.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
         VStack(spacing: gap) {
-            Block(radius: radius, fill: 0.09) {
+            Block(radius: radius) {
                 // Sized like an app icon's artwork (which has its own margin inside the 34 pt frame).
                 MixerRow(icon: AnyView(Image(systemName: mixer.masterMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                                         .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
@@ -178,7 +181,7 @@ struct MixerView: View {
             }
             .scrollIndicators(.never)
         }
-        .padding(PanelLayout.inset)
+        .padding(PanelLayout.edges)
         .onAppear { mixer.startWatching() }
         .onDisappear { mixer.stopWatching() }
     }
@@ -208,7 +211,7 @@ private struct MixerRow: View {
                 .frame(width: 38, alignment: .trailing)
             PillButton(title: nil, symbol: muted ? "speaker.slash.fill" : "speaker.wave.2.fill", tint: muted ? .red : nil, help: muted ? "Unmute" : "Mute", action: toggleMute)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, cardPadding)
         .frame(maxHeight: .infinity)
     }
 }

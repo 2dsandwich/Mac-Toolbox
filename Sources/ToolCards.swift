@@ -391,9 +391,9 @@ private struct WeatherCard: View {
             Text(first ? "Today" : dayLabel(d.date)).font(.system(size: 12.5, weight: .medium)).frame(width: 46, alignment: .leading)
             HStack(spacing: 2) {
                 Self.symbol(d.code, day: true).font(.system(size: 14))
-                if d.rain >= 30 { Text("\(d.rain)%").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(red: 0.55, green: 0.8, blue: 1)) }
+                if d.rain >= 30 { Text("\(d.rain)%").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(red: 0.55, green: 0.8, blue: 1)).fixedSize() }
             }
-            .frame(width: 44, alignment: .leading)
+            .frame(width: 50, alignment: .leading)
             Text(deg(d.lo)).font(.system(size: 12.5)).foregroundStyle(.secondary).monospacedDigit().frame(width: 30, alignment: .trailing)
             RangeBar(lo: d.lo, hi: d.hi, min: lo, max: hi, now: first ? f.temp : nil)
             Text(deg(d.hi)).font(.system(size: 12.5, weight: .medium)).monospacedDigit().frame(width: 30, alignment: .trailing)

@@ -102,7 +102,7 @@ struct NoteBoardView: View {
         GeometryReader { geo in
             ZStack {
                 // A soft paper board with a faint dot grid.
-                RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(Color.primary.opacity(0.05))
+                RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous).fill(cardFill)
                 Canvas { ctx, size in
                     let step: CGFloat = 22
                     for x in stride(from: step, to: size.width, by: step) {
@@ -131,7 +131,7 @@ struct NoteBoardView: View {
             .onTapGesture { board.editing = nil }
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["board"] = $0 }
         }
-        .padding(PanelLayout.inset)
+        .padding(PanelLayout.edges)
         .frame(height: Self.height)
     }
 }
