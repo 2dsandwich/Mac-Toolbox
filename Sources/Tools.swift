@@ -98,7 +98,7 @@ struct ToolInfo {
 
     private static let handlers: [(ToolGroup?, (String, String, Settings) -> [Answer])] = [
         (nil, help), (nil, alarm), (.text, textTools), (.weather, weather), (.system, system), (.system, WindowCommands.answers), (.generators, generators), (.colors, colors),
-        (.colors, bases), (.dates, timestamps), (.dates, dates), (.time, timeZones), (.currency, currency), (.units, units),
+        (.colors, bases), (.dates, timestamps), (.calendar, calendar), (.dates, dates), (.time, timeZones), (.currency, currency), (.units, units),
         (.calculator, calculator), (.dates, moon), (.dates, holidays),
     ]
 
@@ -131,6 +131,7 @@ struct ToolInfo {
         ToolInfo(name: "Countdown", example: "days until christmas", symbol: "calendar.badge.clock", color: .systemRed),
         ToolInfo(name: "Date math", example: "in 90 days", symbol: "calendar.badge.plus", color: .systemRed),
         ToolInfo(name: "Japanese era", example: "令和8年", symbol: "calendar", color: .systemRed),
+        ToolInfo(name: "Today’s events", example: "calendar", symbol: "calendar", color: .systemRed),
         ToolInfo(name: "Japanese holidays", example: "祝日", symbol: "flag.fill", color: .systemRed),
         ToolInfo(name: "Timer", example: "timer 10m", symbol: "timer", color: .systemOrange),
         ToolInfo(name: "Stopwatch", example: "stopwatch", symbol: "stopwatch", color: .systemOrange),
@@ -1449,6 +1450,16 @@ struct ToolInfo {
     }
 
     // MARK: Holidays
+
+    // MARK: Calendar
+
+    /// Today's remaining events ("calendar", "next meeting", "予定").
+    private static func calendar(_ q: String, _ l: String, _ s: Settings) -> [Answer] {
+        guard ["calendar", "events", "next meeting", "next event", "agenda", "予定", "今日の予定"].contains(l) else { return [] }
+        // Without access, "calendar" stays a search for the Calendar app.
+        if l == "calendar", !CalendarEvents.shared.authorized { return [] }
+        return [CalendarEvents.shared.answer()]
+    }
 
     private static func holidays(_ q: String, _ l: String, _ s: Settings) -> [Answer] {
         guard ["holiday", "holidays", "祝日", "休日", "次の祝日", "next holiday", "japanese holidays", "public holidays", "祝日一覧"].contains(l) else { return [] }
