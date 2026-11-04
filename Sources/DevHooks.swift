@@ -464,6 +464,11 @@ extension AppDelegate {
             exit(0)
         }
 
+        if args.contains("--layout-test") {
+            // Window layout math on made-up screens, then a real AX move of a window this test makes (never anyone else's).
+            layoutTest()
+            return true
+        }
         if args.contains("--menu-test") {
             apply(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -477,5 +482,166 @@ extension AppDelegate {
             return true
         }
         return false
+    }
+}
+
+// MARK: --layout-test
+
+extension AppDelegate {
+    func layoutTest() {
+        var failures = 0
+        func check(_ ok: Bool, _ what: String) {
+            if !ok { failures += 1 }
+            print(ok ? "  ok  " : "  FAIL", what)
+        }
+        func r(_ x: CGRect) -> String { "(\(Int(x.minX)), \(Int(x.minY)), \(Int(x.width))×\(Int(x.height)))" }
+        let inside = { (a: CGRect, v: CGRect) in v.insetBy(dx: -0.5, dy: -0.5).contains(a) }
+
+        // A notched MacBook (37pt menu bar, Dock hidden), the same with the Dock at the bottom, a bigger display to
+        // the right (its bottom below the built-in's), and one above.
+        let mac = Display(frame: CGRect(x: 0, y: 0, width: 1512, height: 982), visible: CGRect(x: 0, y: 0, width: 1512, height: 945))
+        let macDock = Display(frame: mac.frame, visible: CGRect(x: 0, y: 70, width: 1512, height: 875))
+        let right = Display(frame: CGRect(x: 1512, y: -218, width: 2560, height: 1440), visible: CGRect(x: 1512, y: -218, width: 2560, height: 1415))
+        let above = Display(frame: CGRect(x: -524, y: 982, width: 2560, height: 1440), visible: CGRect(x: -524, y: 982, width: 2560, height: 1415))
+        let setups: [(String, [Display])] = [("single, notch", [mac]), ("single, Dock at bottom", [macDock]),
+                                             ("two side by side", [mac, right]), ("display above", [mac, above])]
+        for (name, displays) in setups {
+            let H = displays[0].frame.height
+            for d in displays {
+                let v = d.visible
+                let window = CGRect(x: v.minX + 100, y: v.minY + 120, width: 900, height: 600)
+                print("\n[\(name)] screen \(r(d.frame)) visible \(r(v))")
+                var t: [WindowLayout: CGRect] = [:]
+                for l in WindowLayout.allCases where l != .restore && l != .nextDisplay {
+                    t[l] = WindowMath.target(l, window: window, visible: v)
+                    print("  \(l.rawValue.padding(toLength: 15, withPad: " ", startingAt: 0)) appkit \(r(t[l]!))  ax \(r(WindowMath.flip(t[l]!, primaryHeight: H)))")
+                }
+                check(t.values.allSatisfy { inside($0, v) }, "every layout stays inside the visible frame")
+                check(t[.leftHalf]!.maxX == t[.rightHalf]!.minX && t[.leftHalf]!.width + t[.rightHalf]!.width == v.width, "halves meet, no gap")
+                check(t[.topHalf]!.maxY == v.maxY && t[.bottomHalf]!.minY == v.minY && t[.topHalf]!.minY == t[.bottomHalf]!.maxY, "top/bottom halves meet")
+                check(t[.leftThird]!.maxX == t[.centerThird]!.minX && t[.centerThird]!.maxX == t[.rightThird]!.minX && t[.rightThird]!.maxX == v.maxX, "thirds tile")
+                check(t[.topLeft]!.maxY == v.maxY && t[.bottomRight]!.minY == v.minY && t[.topRight]!.maxX == v.maxX, "quarters in the corners")
+                check(t[.maximize]! == v, "maximize = visible frame (menu bar and Dock left alone)")
+                check(t[.center]!.size == window.size && abs(t[.center]!.midX - v.midX) <= 1, "centre keeps the size")
+                let ax = WindowMath.flip(t[.maximize]!, primaryHeight: H)
+                check(WindowMath.flip(ax, primaryHeight: H) == t[.maximize]!, "AX flip goes back exactly")
+                // In AX the top of this screen's usable area is (primary height − its top), measured down from the primary's top.
+                check(ax.minY == H - v.maxY, "AX top \(Int(ax.minY)) = primary height \(Int(H)) − visible top \(Int(v.maxY))")
+            }
+        }
+
+        print("\n[AX conversion spot checks]")
+        let H = mac.frame.height
+        check(WindowMath.flip(WindowMath.target(.maximize, window: .zero, visible: mac.visible), primaryHeight: H).minY == 37, "notch menu bar: maximized window's AX y is 37")
+        let onRight = WindowMath.flip(CGRect(x: 1600, y: 100, width: 800, height: 600), primaryHeight: H)
+        check(onRight.minY == 282, "window on the right display: AX y \(Int(onRight.minY)) (982 − 700)")
+        let onAbove = WindowMath.flip(WindowMath.target(.maximize, window: .zero, visible: above.visible), primaryHeight: H)
+        check(onAbove.minY == -1415, "display above: AX y is negative (\(Int(onAbove.minY)))")
+
+        print("\n[1/2 → 2/3 → 1/3]")
+        var prev: (layout: WindowLayout, step: Int, frame: CGRect)?
+        var current = CGRect(x: 300, y: 200, width: 800, height: 500)
+        var widths: [CGFloat] = []
+        for _ in 0..<4 {
+            let step = WindowMath.step(.leftHalf, previous: prev, current: current)
+            current = WindowMath.target(.leftHalf, window: current, visible: mac.visible, step: step)
+            widths.append(current.width)
+            prev = (.leftHalf, step, current)
+        }
+        print("  left half ×4 widths:", widths.map { Int($0) })
+        check(widths == [756, 1008, 504, 756], "cycles 756 → 1008 → 504 → 756")
+        check(WindowMath.step(.leftHalf, previous: prev, current: current.offsetBy(dx: 40, dy: 0)) == 0, "moved by hand: starts over at 1/2")
+        check(WindowMath.step(.rightHalf, previous: prev, current: current) == 0, "a different half starts at 1/2")
+        check(WindowMath.step(.leftThird, previous: (.leftThird, 0, current), current: current) == 0, "thirds don't cycle")
+
+        print("\n[next display]")
+        let pair = [mac, right], stack = [mac, above]
+        check(WindowMath.nextDisplay(after: mac, in: pair) == right && WindowMath.nextDisplay(after: right, in: pair) == mac, "side by side: built-in → right → built-in")
+        check(WindowMath.nextDisplay(after: above, in: stack) == mac, "stacked: ordered left to right (above starts further left)")
+        check(WindowMath.nextDisplay(after: mac, in: [mac]) == nil, "one display: nothing to do")
+        let m = WindowMath.moved(CGRect(x: 100, y: 100, width: 900, height: 600), from: mac.visible, to: right.visible)
+        print("  900×600 window moved to the right display:", r(m))
+        check(m.size == CGSize(width: 900, height: 600) && inside(m, right.visible), "keeps its size, lands inside")
+        let big = WindowMath.moved(CGRect(x: 0, y: 0, width: 2500, height: 1400), from: right.visible, to: mac.visible)
+        check(inside(big, mac.visible), "a big window shrinks to fit the smaller screen \(r(big))")
+        check(WindowMath.displayIndex(for: CGRect(x: 1300, y: 100, width: 800, height: 400), in: pair) == 1, "a window across both belongs to the one with more of it")
+        check(WindowMath.displayIndex(for: CGRect(x: 9000, y: 9000, width: 100, height: 100), in: pair) == 1, "off every screen: the nearest")
+
+        print("\n[minimum sizes]")
+        let rh = WindowMath.target(.rightHalf, window: .zero, visible: mac.visible)
+        let s1 = WindowMath.settled(rh, actual: CGSize(width: 900, height: 945), visible: mac.visible)
+        check(s1.maxX == mac.visible.maxX, "right half with a 900pt minimum width stays on the right \(r(s1))")
+        let th = WindowMath.target(.topHalf, window: .zero, visible: mac.visible)
+        let s2 = WindowMath.settled(th, actual: CGSize(width: 1512, height: 600), visible: mac.visible)
+        check(s2.maxY == mac.visible.maxY, "top half that won't shrink stays at the top \(r(s2))")
+        let lh = WindowMath.target(.leftHalf, window: .zero, visible: mac.visible)
+        let s3 = WindowMath.settled(lh, actual: CGSize(width: 756, height: 900), visible: mac.visible)
+        check(s3.maxY == mac.visible.maxY && s3.minX == 0, "max height shorter than the screen: top left \(r(s3))")
+
+        // The quit rows: what they say before and after the first ↩ (only the arming is called; nothing is quit).
+        print("\n[quit / hide rows]")
+        for q in ["quit all apps", "quit other apps", "hide other apps"] {
+            let before = WindowCommands.answers(q, q, store.settings).first
+            print("  \(q): \(before?.title ?? "—") | \(before?.subtitle ?? "")")
+        }
+        WindowCommands.arm("quitOthers", query: "quit other apps")
+        let armedRow = WindowCommands.answers("quit other apps", "quit other apps", store.settings).first
+        print("  after the first ↩: \(armedRow?.title ?? "—") | \(armedRow?.subtitle ?? "") | \(armedRow?.hintText ?? "")")
+        check(armedRow?.title.hasSuffix("apps?") == true, "several apps: the row asks first")
+        let other = WindowCommands.answers("quit others", "quit others", store.settings).first
+        check(other?.title.hasSuffix("?") != true, "typing something else drops the question")
+
+        // A real move through AX, on an invisible window of this process only.
+        print("\n[AX on this test's own window]")
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 420), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        w.title = "MONEY layout test"
+        w.alphaValue = 0
+        w.ignoresMouseEvents = true
+        w.isReleasedWhenClosed = false
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        w.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 80, y: screen.visibleFrame.minY + 80))
+        w.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        print("  accessibility trusted:", Paster.trusted)
+        let app = AXUIElementCreateApplication(getpid())
+        var list: CFTypeRef?
+        AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &list)
+        let element = (list as? [AXUIElement] ?? []).first { el in
+            var t: CFTypeRef?
+            AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &t)
+            return t as? String == "MONEY layout test"
+        }
+        if let element {
+            let displays = Display.current
+            let v = displays[WindowMath.displayIndex(for: w.frame, in: displays) ?? 0].visible
+            let start = w.frame
+            let mover = WindowMover.shared
+            for (l, expect) in [(WindowLayout.leftHalf, WindowMath.target(.leftHalf, window: .zero, visible: v, step: 0)),
+                                (.leftHalf, WindowMath.target(.leftHalf, window: .zero, visible: v, step: 1)),
+                                (.leftHalf, WindowMath.target(.leftHalf, window: .zero, visible: v, step: 2)),
+                                (.center, nil), (.maximize, v), (.restore, start)] as [(WindowLayout, CGRect?)] {
+                let got = mover.apply(l, to: element)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                let real = w.frame
+                print("  \(l.rawValue): AX says \(got.map(r) ?? "nil"), NSWindow frame \(r(real))")
+                if let expect { check(got.map { WindowMath.same($0, expect, tolerance: 1) } == true && WindowMath.same(real, expect, tolerance: 1), "\(l.rawValue) → \(r(expect))") }
+                else { check(got.map { abs($0.midX - v.midX) <= 1 && abs($0.midY - v.midY) <= 1 } == true, "centred on the visible frame") }
+            }
+            if displays.count > 1 {
+                _ = mover.apply(.rightHalf, to: element)
+                let got = mover.apply(.nextDisplay, to: element)
+                print("  nextDisplay:", got.map(r) ?? "nil")
+                check(got.map { g in displays.contains { WindowMath.same(g, WindowMath.target(.rightHalf, window: .zero, visible: $0.visible), tolerance: 1) } } == true,
+                      "right half carries over to the next display")
+            } else {
+                print("  next display: one screen here, covered by the math above")
+            }
+        } else {
+            print("  FAIL couldn't find the test window through AX (Accessibility not granted to whatever launched this?)")
+            failures += 1
+        }
+        w.close()
+        print(failures == 0 ? "\nall layout checks passed" : "\n\(failures) layout check(s) FAILED")
+        exit(failures == 0 ? 0 : 1)
     }
 }
