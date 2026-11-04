@@ -1698,6 +1698,8 @@ private struct NotchPane: View {
             store.settings.notchMeeting = d.notchMeeting
             store.settings.notchDictation = d.notchDictation
             store.settings.mediaInNotch = d.mediaInNotch
+            store.settings.notchLyrics = d.notchLyrics
+            store.settings.notchLyricLine = d.notchLyricLine
             store.settings.notchInCaptures = d.notchInCaptures
             store.settings.notchHoverExpand = d.notchHoverExpand
             store.settings.notchHoverDelay = d.notchHoverDelay
@@ -1721,6 +1723,10 @@ private struct NotchPane: View {
                 Toggle("Meetings", isOn: $store.settings.notchMeeting)
                 Toggle("Dictation", isOn: $store.settings.notchDictation)
                 Toggle("What’s playing", isOn: $store.settings.mediaInNotch)
+                Toggle("Lyrics", isOn: $store.settings.notchLyrics)
+                    .disabled(!store.settings.mediaInNotch)
+                Toggle("Lyric line under the closed notch", isOn: $store.settings.notchLyricLine)
+                    .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
             }
             .disabled(!store.settings.notchEnabled)
             Section {

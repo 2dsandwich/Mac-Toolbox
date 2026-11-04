@@ -290,6 +290,10 @@ struct Settings: Codable, Equatable {
     var notchFocus = true
     var notchMeeting = true
     var notchDictation = true
+    /// Synced lyrics (from LRCLIB) under the song in the open notch.
+    var notchLyrics = true
+    /// The line being sung, just under the closed notch.
+    var notchLyricLine = false
     var notchHoverExpand = true
     var notchHoverDelay: Double = 0.18
     var notchCollapseDelay: Double = 0.7

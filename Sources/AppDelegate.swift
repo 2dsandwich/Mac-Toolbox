@@ -69,6 +69,7 @@ import SwiftUI
         fnKeys.onOtherKey = { [weak self] in self?.dictation.abortIfJustStarted() }
 
         if runDevHook(CommandLine.arguments) { return }
+        Lyrics.shared.start()
 
         // Every launch starts hidden from screen sharing; turning it off only lasts until Halo quits.
         if !store.settings.hideFromScreenShare { store.settings.hideFromScreenShare = true }

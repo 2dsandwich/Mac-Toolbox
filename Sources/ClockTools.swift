@@ -584,6 +584,8 @@ struct AlarmDraft: Equatable {
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var poller: Timer?
     @ObservationIgnored private var artKey = ""
+    /// Snapshots and tests: keep the demo song (the player's answers are ignored).
+    @ObservationIgnored var frozen = false
 
     var available: Bool { !title.isEmpty }
 
@@ -716,6 +718,7 @@ struct AlarmDraft: Equatable {
     }
 
     private func apply(_ info: [String]?, source: String?) {
+        guard !frozen else { return }
         let wasPlaying = playing, wasTitle = title
         let started = info.map { $0.first == "playing" } ?? false
         let change = { [self] in
