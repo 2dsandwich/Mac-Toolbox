@@ -118,7 +118,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
 
 /// The jobs that use a language model. Each has its own model and tuned defaults.
 enum AITask: String, Codable, CaseIterable, Identifiable {
-    case dictation, voiceEdit, meetingChat, meetingNotes, translate
+    case dictation, voiceEdit, meetingChat, meetingNotes, translate, assistant
 
     var id: String { rawValue }
 
@@ -129,6 +129,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingChat: "Meeting chat"
         case .meetingNotes: "Meeting notes"
         case .translate: "Translate"
+        case .assistant: "Ask"
         }
     }
 
@@ -139,6 +140,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingChat: "Answers questions about a meeting, during or after it."
         case .meetingNotes: "Writes the notes when a meeting ends. Long transcripts."
         case .translate: "“tr …” in the search bar."
+        case .assistant: "Tab in the empty search bar. Short answers; Claude also searches the web."
         }
     }
 
@@ -149,6 +151,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingChat: "text.bubble.fill"
         case .meetingNotes: "doc.text.fill"
         case .translate: "character.bubble.fill"
+        case .assistant: "sparkles"
         }
     }
 
@@ -159,7 +162,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .voiceEdit: 0.2
         case .translate: 0.2
         case .meetingNotes: 0.3
-        case .meetingChat: 0.4
+        case .meetingChat, .assistant: 0.4
         }
     }
 
@@ -168,6 +171,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .dictation: 2048
         case .voiceEdit: 4096
         case .meetingChat: 800
+        case .assistant: 1024
         case .meetingNotes: 4096
         case .translate: 2048
         }
@@ -176,7 +180,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
     /// Claude's effort for the job.
     var effort: String {
         switch self {
-        case .dictation, .meetingChat, .translate: "low"
+        case .dictation, .meetingChat, .translate, .assistant: "low"
         case .voiceEdit, .meetingNotes: "medium"
         }
     }
@@ -185,7 +189,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .dictation: 12
         case .translate: 30
-        case .voiceEdit, .meetingChat: 60
+        case .voiceEdit, .meetingChat, .assistant: 60
         case .meetingNotes: 300
         }
     }
@@ -198,6 +202,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .translate: "\n\nReply with the translation only."
         case .meetingChat: "\n\nBe brief. If the transcript doesn't say, say you don't know."
         case .meetingNotes: "\n\nOnly include what the transcript says."
+        case .assistant: "\n\nBe brief. If you aren't sure, say so."
         }
     }
 
@@ -206,7 +211,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .dictation: OpenModel.all[0]
         case .voiceEdit, .meetingNotes: OpenModel.all[1]
-        case .meetingChat, .translate: OpenModel.all[2]
+        case .meetingChat, .translate, .assistant: OpenModel.all[2]
         }
     }
 }
@@ -269,7 +274,8 @@ enum AIError: LocalizedError {
         if let c = s.aiTasks[task.rawValue] { return c }
         // Polishing speech needs a model that keeps every word and applies "no, actually…" corrections; Apple's
         // on-device one drops sentences and keeps fillers. With a Claude key, Haiku does it (on-device is the fallback).
-        if task == .dictation || task == .voiceEdit, key(.anthropic) != nil { return TaskModel(provider: .anthropic, model: "claude-haiku-5-5") }
+        // Ask wants quick answers and web search, which Haiku has.
+        if [.dictation, .voiceEdit, .assistant].contains(task), key(.anthropic) != nil { return TaskModel(provider: .anthropic, model: "claude-haiku-5-5") }
         return TaskModel()
     }
     static func options(_ p: AIProvider, _ s: Settings) -> ProviderSettings { s.aiProviders[p.rawValue] ?? ProviderSettings() }

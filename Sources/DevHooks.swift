@@ -5,7 +5,7 @@ import SwiftUI
 
 /// Command-line switches for checking the app without using it by hand: off-screen snapshots of each view
 /// (`--snapshot`, `--island-snapshot`, `--settings-snapshot`, `--menu-snapshot`) and small tests of the parts
-/// that don't need a person (`--tools-test`, `--ai-test`, `--polish-test`, `--merge-file` …). See the README.
+/// that don't need a person (`--tools-test`, `--ai-test`, `--ask`, `--polish-test`, `--merge-file` …). See the README.
 extension AppDelegate {
     /// Runs the switch it was launched with, if any; true means it handled the launch (most print and exit).
     func runDevHook(_ args: [String]) -> Bool {
@@ -224,6 +224,29 @@ extension AppDelegate {
             }
             return true
         }
+        if let i = args.firstIndex(of: "--ask"), i + 1 < args.count {
+            // One real question through Ask (the same path as ↩ in the popup); prints the answer and its sources.
+            let a = Assistant.shared
+            let start = Date()
+            a.ask(args[i + 1])
+            Task {
+                while a.busy { try? await Task.sleep(for: .milliseconds(100)) }
+                let t = a.turns.last
+                print("[\(AI.label(.assistant, store.settings))]", String(format: "%.1fs", Date().timeIntervalSince(start)), "updates:", a.updates,
+                      t?.failed == true ? "FAILED:" : "→", t?.answer ?? "")
+                for src in t?.sources ?? [] { print("  source:", src.title, src.url.absoluteString) }
+                if let follow = args.dropFirst(i + 2).first(where: { !$0.hasPrefix("-") }) {
+                    // A follow-up in the same thread.
+                    a.ask(follow)
+                    while a.busy { try? await Task.sleep(for: .milliseconds(100)) }
+                    let f = a.turns.last
+                    print("follow-up", f?.failed == true ? "FAILED:" : "→", f?.answer ?? "")
+                    for src in f?.sources ?? [] { print("  source:", src.title, src.url.absoluteString) }
+                }
+                exit(0)
+            }
+            return true
+        }
         if let i = args.firstIndex(of: "--island-snapshot"), i + 1 < args.count {
             // Renders the notch off screen with demo activities: collapsed and expanded side by side.
             if !args.contains("--media-only") {
@@ -414,6 +437,7 @@ extension AppDelegate {
             case "mixer": .mixer
             case "translate": .translate
             case "weather": .weather
+            case "assistant", "ask": .assistant
             default: .apps
             }
             if scope == .text, let img = value("--image").flatMap(NSImage.init(contentsOfFile:)),
@@ -445,6 +469,7 @@ extension AppDelegate {
                 NoteBoard.shared.add("買い物: 牛乳、卵、コーヒー")
                 NoteBoard.shared.editing = nil
             }
+            if scope == .assistant, args.contains("--demo") { Assistant.shared.demo(busy: args.contains("--busy")) }
             if scope == .calculator { launcher.model.calcHistory = ["12×8 = 96", "1200×1.1 = 1,320"] }
             if let m = value("--clock").flatMap(ClockMode.init(rawValue:)) { launcher.model.clockMode = m }
             if launcher.model.clockMode == .stopwatch, let w = Stopwatches.shared.list.first { w.banked = 83.42; w.laps = [83.42, 51.2, 24.9] }

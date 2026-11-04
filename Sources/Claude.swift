@@ -94,4 +94,74 @@ enum Claude {
         guard !text.isEmpty else { throw Failure.empty }
         return text
     }
+
+    /// One streamed turn of a conversation, with server tools (web search). `onUpdate` gets the content blocks so far
+    /// after every event; the result is the assistant's blocks exactly as sent (search results carry encrypted
+    /// content that the next turn must send back unchanged) and the stop reason.
+    @MainActor static func stream(system: String, messages: [[String: Any]], model: String, effort: String, maxTokens: Int,
+                                  tools: [[String: Any]], timeout: TimeInterval, fallback: Bool,
+                                  onUpdate: @escaping @MainActor ([[String: Any]]) -> Void) async throws -> (blocks: [[String: Any]], stop: String) {
+        guard let key = apiKey, !key.isEmpty else { throw Failure.noKey }
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!, timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.setValue(key, forHTTPHeaderField: "x-api-key")
+        req.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
+        var body: [String: Any] = ["model": model, "max_tokens": maxTokens, "system": system, "messages": messages,
+                                   "output_config": ["effort": effort], "stream": true]
+        if !tools.isEmpty { body["tools"] = tools }
+        if fallback, !model.contains("haiku") {
+            req.setValue("server-side-fallback-2026-07-01", forHTTPHeaderField: "anthropic-beta")
+            body["fallbacks"] = "default"
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            var raw = ""
+            for try await line in bytes.lines { raw += line }
+            let json = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] ?? [:]
+            throw Failure.http(status, ((json["error"] as? [String: Any])?["message"] as? String) ?? String(raw.prefix(300)))
+        }
+        var blocks: [[String: Any]] = []
+        var inputs: [Int: String] = [:] // tool inputs arrive as pieces of JSON
+        var stop = ""
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:"),
+                  let e = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(5).utf8))) as? [String: Any] else { continue }
+            let i = e["index"] as? Int ?? -1
+            switch e["type"] as? String {
+            case "content_block_start":
+                guard i >= 0, let b = e["content_block"] as? [String: Any] else { continue }
+                while blocks.count <= i { blocks.append([:]) }
+                blocks[i] = b
+            case "content_block_delta":
+                guard blocks.indices.contains(i), let d = e["delta"] as? [String: Any] else { continue }
+                switch d["type"] as? String {
+                case "text_delta": blocks[i]["text"] = (blocks[i]["text"] as? String ?? "") + (d["text"] as? String ?? "")
+                case "thinking_delta": blocks[i]["thinking"] = (blocks[i]["thinking"] as? String ?? "") + (d["thinking"] as? String ?? "")
+                case "signature_delta": blocks[i]["signature"] = d["signature"]
+                case "citations_delta":
+                    if let c = d["citation"] { blocks[i]["citations"] = ((blocks[i]["citations"] as? [Any]) ?? []) + [c] }
+                case "input_json_delta": inputs[i, default: ""] += d["partial_json"] as? String ?? ""
+                default: break
+                }
+            case "content_block_stop":
+                if let json = inputs.removeValue(forKey: i), !json.isEmpty, blocks.indices.contains(i),
+                   let input = try? JSONSerialization.jsonObject(with: Data(json.utf8)) {
+                    blocks[i]["input"] = input
+                }
+            case "message_delta":
+                if let s = (e["delta"] as? [String: Any])?["stop_reason"] as? String { stop = s }
+            case "error":
+                let msg = (e["error"] as? [String: Any])?["message"] as? String ?? "Stream failed"
+                throw AIError.unavailable("Claude: \(msg)")
+            default:
+                continue
+            }
+            onUpdate(blocks)
+        }
+        if stop == "refusal" { throw Failure.refused }
+        return (blocks.filter { !$0.isEmpty }, stop)
+    }
 }

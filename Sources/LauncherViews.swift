@@ -77,6 +77,9 @@ struct LauncherRoot: View {
                 } else if model.scope == .translate {
                     TranslateView(model: model, translator: Translator.shared, radius: radius)
                         .transition(.opacity)
+                } else if model.scope == .assistant {
+                    AssistantView(assistant: Assistant.shared, radius: radius)
+                        .transition(.opacity)
                 } else if model.scope == .mixer {
                     MixerView(mixer: AudioMixer.shared, radius: radius, query: model.query)
                         .transition(.opacity)
@@ -214,7 +217,7 @@ private struct SearchBar: View {
     var body: some View {
         let chipHeight = min(44, s.barHeight - 16)
         let chipPad = (s.barHeight - chipHeight) / 2
-        let showChip = [.switcher, .web, .library, .clipboard, .weather].contains(model.scope) || model.scope.isPanel
+        let showChip = [.switcher, .web, .library, .clipboard, .weather, .assistant].contains(model.scope) || model.scope.isPanel
         HStack(spacing: 12) {
             if showChip {
                 ScopeChip(scope: model.scope, height: chipHeight, radius: max(4, s.scopedCornerRadius - chipPad),
@@ -262,6 +265,13 @@ private struct SearchBar: View {
                     }
                 }
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["panel"] = $0 }
+            } else if model.scope == .assistant, let answer = Assistant.shared.lastAnswer {
+                BarControls {
+                    PillButton(title: nil, symbol: "doc.on.doc", help: "Copy the answer (⌘C)") {
+                        (NSApp.delegate as? AppDelegate)?.launcher.copyAnswer(answer)
+                    }
+                }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["panel"] = $0 }
             } else if let timer = timerAnswer {
                 BarControls {
                     PillButton(title: "Start", symbol: "play.fill", tint: .orange, help: "Start the timer (↩)") { onAnswerAction(timer.action) }
@@ -270,7 +280,7 @@ private struct SearchBar: View {
             }
         }
         .padding(.leading, showChip ? chipPad : textLeft - fieldTextInset)
-        .padding(.trailing, model.scope.isPanel || timerAnswer != nil ? chipPad : textLeft)
+        .padding(.trailing, model.scope.isPanel || model.scope == .assistant || timerAnswer != nil ? chipPad : textLeft)
         .frame(height: s.barHeight)
         .contentShape(Rectangle())
         .onHover { model.hoverTabs("bar", $0) }

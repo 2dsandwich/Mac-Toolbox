@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 
 enum Scope: Equatable {
-    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather
+    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant
 
     var title: String {
         switch self {
@@ -21,6 +21,7 @@ enum Scope: Equatable {
         case .translate: "Translate"
         case .notes: "Notes"
         case .weather: "Weather"
+        case .assistant: "Ask"
         }
     }
 
@@ -40,6 +41,7 @@ enum Scope: Equatable {
         case .translate: "character.bubble.fill"
         case .notes: "note.text"
         case .weather: "cloud.sun.fill"
+        case .assistant: "sparkles"
         }
     }
 
@@ -168,7 +170,13 @@ enum Metrics {
 
 @MainActor @Observable final class LauncherModel {
     var query = ""
-    var scope = Scope.apps { didSet { if scope != .notes { controlFrames["board"] = nil } } }
+    var scope = Scope.apps {
+        didSet {
+            if scope != .notes { controlFrames["board"] = nil }
+            // Leaving Ask (or closing the popup in it) ends the thread; Tab starts a fresh one.
+            if oldValue == .assistant, scope != .assistant { Assistant.shared.reset() }
+        }
+    }
     var items: [ResultItem] = []
     var selection = 0
     var hovered: Int?
@@ -276,6 +284,7 @@ enum Metrics {
         if scope == .pomodoro { return ClockHub.height(self) }
         if scope == .calculator { return CalculatorView.height }
         if scope == .translate { return TranslateView.height }
+        if scope == .assistant { return AssistantView.height(Assistant.shared) }
         if scope == .notes { return NoteBoardView.height }
         if scope == .mixer { return MixerView.height(AudioMixer.shared.apps.count) }
         if scope == .library {
@@ -328,6 +337,7 @@ enum Metrics {
         case .translate: "Type to translate"
         case .notes: "New note…"
         case .weather: "City or place…"
+        case .assistant: "Ask anything"
         }
     }
 
@@ -521,7 +531,7 @@ enum Metrics {
         case .weather:
             // A place's weather as you type it (here, or your default city, when it's empty).
             items = LiveData.shared.weather(place: q, kind: .full, s).enumerated().map { answerItem($1, $0) }
-        case .text, .meeting, .calculator, .timer, .mixer, .notes:
+        case .text, .meeting, .calculator, .timer, .mixer, .notes, .assistant:
             items = []
         case .web:
             let r = BrowserSites.suggest(query, in: sites, limit: max(s.maxRows, 6))
@@ -975,6 +985,8 @@ enum Metrics {
                 model.setQuery("")
             } else if model.scope == .translate {
                 if let r = Translator.shared.result { copyTranslation(r) }
+            } else if model.scope == .assistant {
+                if Assistant.shared.ask(model.query) { model.setQuery("") }
             } else if model.scope == .pomodoro {
                 switch model.clockMode {
                 case .focus: startPomodoro(Pomodoro.parse(model.query))
@@ -1005,6 +1017,12 @@ enum Metrics {
     }
 
     private func tab() {
+        // Tab in the empty search bar is the only way into Ask, so AI never opens by accident.
+        if model.scope == .apps, model.query.isEmpty {
+            AI.prewarm(.assistant)
+            enter(.assistant)
+            return
+        }
         if model.scope == .apps, case .app(let a)? = model.selected?.kind, BrowserSites.browserPaths.contains(a.path) {
             enterBrowser(a)
             return
@@ -1108,6 +1126,9 @@ enum Metrics {
         case ("p", _):
             guard case .clip(let c)? = model.selected?.kind else { return false }
             togglePin(c.id)
+        case ("c", _) where model.scope == .assistant:
+            guard (model.field?.currentEditor()?.selectedRange.length ?? 0) == 0, let a = Assistant.shared.lastAnswer else { return false }
+            copyAnswer(a)
         case ("c", _):
             guard case .clip? = model.selected?.kind, (model.field?.currentEditor()?.selectedRange.length ?? 0) == 0,
                   let item = model.selected else { return false }
@@ -1270,6 +1291,13 @@ enum Metrics {
     func copyTranslation(_ text: String) {
         Stats.shared.add(.translations)
         clipboard.copy(text: text, source: "Translate")
+        hide()
+    }
+
+    // MARK: Ask
+
+    func copyAnswer(_ text: String) {
+        clipboard.copy(text: text, source: "Ask")
         hide()
     }
 
