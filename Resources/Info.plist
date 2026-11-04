@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>MONEY! transcribes the other people in your meetings.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>MONEY! shows your next event in the notch and lists today’s events when you type “calendar”.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSLocationUsageDescription</key>

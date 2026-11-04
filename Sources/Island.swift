@@ -48,7 +48,7 @@ let islandSpring = Animation.spring(response: 0.42, dampingFraction: 0.78)
 let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
 
 @MainActor @Observable final class IslandModel {
-    enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media }
+    enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media, event }
 
     var stage = IslandStage.hidden { didSet { if stage != oldValue { onStage?(stage) } } }
     var contentVisible = false
@@ -84,6 +84,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         case .pomodoro: .focus
         case .stopwatch: .stopwatch
         case .toast: .message
+        case .event: .event
         case .alarm, .dictation: nil
         }
     }
@@ -98,6 +99,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         case .timer: .timer
         case .stopwatch: .stopwatch
         case .media: .media
+        case .event: .event
         }
     }
 
@@ -181,7 +183,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
 
     /// One thing in the notch: each running timer and stopwatch gets its own.
     enum Slot: Hashable {
-        case alarm, dictation, toast, meeting, pomodoro, timer(UUID), stopwatch(UUID), media
+        case alarm, dictation, toast, meeting, pomodoro, timer(UUID), stopwatch(UUID), media, event
         var key: String {
             switch self {
             case .timer(let id): "timer-\(id)"
@@ -199,6 +201,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         case .meeting: .meeting
         case .pomodoro: .pomodoro
         case .media: .media
+        case .event: .event
         case .timer: Timers.shared.next.map { .timer($0.id) } ?? .toast
         case .stopwatch: Stopwatches.shared.running.first.map { .stopwatch($0.id) } ?? .toast
         }
@@ -246,6 +249,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         case .meeting: 90
         case .alarm: 48
         case .toast: 42
+        case .event: 46
         case .dictation:
             if case .failed = dictation.phase { 48 } else {
                 max(dictation.preview.isEmpty ? 0 : dictationTextHeight, dictationControls ? 32 : 0)
@@ -276,7 +280,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         guard !shown.isEmpty else { return CompactLayout() }
         let pad = geometry.hasNotch ? Self.compactPad : 10, gap = Self.compactGap
         var L = CompactLayout()
-        L.text = shown.first { [.timer, .stopwatch, .pomodoro, .meeting].contains(activity(for: $0)) && slotTextWidth($0) > 0 }
+        L.text = shown.first { [.timer, .stopwatch, .pomodoro, .meeting, .event].contains(activity(for: $0)) && slotTextWidth($0) > 0 }
             ?? (slotTextWidth(shown[0]) > 0 ? shown[0] : nil)
         L.textWidth = L.text.map(slotTextWidth) ?? 0
         if shown.count == 1 {
@@ -381,6 +385,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         if pomodoro.active, s.notchFocus { list.append(.pomodoro) }
         if !Timers.shared.running.isEmpty, s.notchTimers { list.append(.timer) }
         if !Stopwatches.shared.running.isEmpty, s.notchStopwatch { list.append(.stopwatch) }
+        if s.notchEvents, CalendarEvents.shared.upcoming != nil { list.append(.event) }
         if !s.notchEnabled { list.removeAll() }
         // Alarms and dictation first, then the order from Settings › Notch.
         let order = s.notchPriority
@@ -415,7 +420,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
     /// Closed, only times (and a few live marks) show as text; everything else is just its icon.
     func compactTrailingWidth(_ a: Activity) -> CGFloat {
         switch a {
-        case .pomodoro, .meeting, .timer, .stopwatch, .media: return trailingWidth(a)
+        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event: return trailingWidth(a)
         case .dictation:
             switch dictation.phase {
             case .starting, .listening, .processing: return 16
@@ -449,6 +454,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
             return w(t.next.map { Pomodoro.clock($0.remaining(t.now)) } ?? "00:00", 14, mono: true)
         case .stopwatch: return w(Stopwatch.format(Stopwatches.shared.running.first?.elapsed(Stopwatches.shared.now) ?? 0, hundredths: false), 14, mono: true)
         case .media: return 18
+        case .event: return w(CalendarEvents.shared.upcoming?.countdown(CalendarEvents.shared.now) ?? "", 14, mono: true)
         case .dictation, .toast, .alarm: return compactTextWidth(a)
         }
     }
@@ -943,6 +949,7 @@ struct IslandView: View {
         case .meeting: leading(.meeting)
         case .pomodoro: leading(.pomodoro)
         case .media: leading(.media)
+        case .event: leading(.event)
         }
     }
 
@@ -972,6 +979,8 @@ struct IslandView: View {
             ProgressRing(progress: t.next?.progress(t.now) ?? 0, color: .orange, size: 16, lineWidth: 3)
         case .media:
             AlbumArt(image: NowPlaying.shared.artwork, corner: 3, note: 11)
+        case .event:
+            Image(systemName: "calendar").font(.system(size: 13, weight: .semibold)).foregroundStyle(.red)
         case nil:
             EmptyView()
         }
@@ -979,7 +988,7 @@ struct IslandView: View {
 
     @ViewBuilder private func compactTrailing(_ a: IslandModel.Activity?) -> some View {
         switch a {
-        case .pomodoro, .meeting, .timer, .stopwatch, .media: trailing(a)
+        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event: trailing(a)
         case .dictation:
             switch model.dictation.phase {
             case .processing: PolishSpinner(size: 14, line: 2).frame(width: 16, height: 16)
@@ -1024,6 +1033,9 @@ struct IslandView: View {
             Text(t.next.map { Pomodoro.clock($0.remaining(t.now)) } ?? "").font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
         case .media:
             EqualizerBars(playing: NowPlaying.shared.playing)
+        case .event:
+            let c = CalendarEvents.shared
+            Text(c.upcoming?.countdown(c.now) ?? "").font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
         case nil:
             EmptyView()
         }
@@ -1257,6 +1269,7 @@ struct IslandView: View {
         case .dictation: dictationDetail
         case .pomodoro: HStack(alignment: .top, spacing: 12) { icon(slot, size: 24).padding(.top, 2); pomodoroDetail }
         case .meeting: HStack(alignment: .top, spacing: 12) { icon(slot, size: 24).padding(.top, 2); meetingDetail }
+        case .event: eventDetail
         }
     }
 
@@ -1432,6 +1445,26 @@ struct IslandView: View {
         }
     }
 
+    /// The next event: its title, time and calendar, with Join (when it has a call link) and dismiss.
+    @ViewBuilder private var eventDetail: some View {
+        let c = CalendarEvents.shared
+        if let e = c.upcoming {
+            HStack(spacing: 12) {
+                icon(.event, size: 24)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(e.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Circle().fill(Color(nsColor: e.color)).frame(width: 7, height: 7)
+                        Text(e.timeRange + " · " + (e.start > c.now ? "in " : "") + e.countdown(c.now)).font(.system(size: 12.5).monospacedDigit()).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                if e.link != nil { RoundButton(symbol: "video.fill", tint: .green) { c.join(e) }.help("Join") }
+                RoundButton(symbol: "xmark", tint: nil) { c.dismiss(e) }.help("Dismiss")
+            }
+        }
+    }
+
     private var toastDetail: some View {
         HStack(spacing: 10) {
             if let t = model.toast {
@@ -1475,6 +1508,7 @@ struct IslandView: View {
             case .meeting: rowContent(.meeting)
             case .pomodoro: rowContent(.pomodoro)
             case .media: rowContent(.media)
+            case .event: rowContent(.event)
             }
         }
         .frame(height: IslandGeometry.rowHeight - 10)
@@ -1527,6 +1561,15 @@ struct IslandView: View {
                 Spacer(minLength: 0)
                 RoundButton(symbol: NowPlaying.shared.playing ? "pause.fill" : "play.fill", tint: nil, size: Self.rowButton) { NowPlaying.shared.playPause() }
                 RoundButton(symbol: "forward.fill", tint: nil, size: Self.rowButton) { NowPlaying.shared.next() }
+            case .event:
+                let c = CalendarEvents.shared
+                if let e = c.upcoming {
+                    Text(e.title).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    trailing(a)
+                    if e.link != nil { RoundButton(symbol: "video.fill", tint: .green, size: Self.rowButton) { c.join(e) }.help("Join") }
+                    RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { c.dismiss(e) }.help("Dismiss")
+                }
             }
     }
 

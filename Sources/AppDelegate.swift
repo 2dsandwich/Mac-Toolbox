@@ -57,6 +57,7 @@ import SwiftUI
         ClockSound.announce = { [weak self] title, detail, symbol in self?.island.flash(title, detail, symbol: symbol, color: .orange, seconds: 4) }
         Alarms.shared.onChange = { [weak self] in self?.island.refresh() }
         NowPlaying.shared.onChange = { [weak self] in self?.island.refresh() }
+        CalendarEvents.shared.onChange = { [weak self] in self?.island.refresh() }
         NowPlaying.shared.start()
         _ = AudioMixer.shared // re-applies saved per-app levels
         pomodoro.announce = { [weak self] title, detail in
@@ -103,6 +104,8 @@ import SwiftUI
         launcher.panel.sharingType = s.hideFromScreenShare ? .none : .readOnly
         islandController.setSharing(!s.notchInCaptures)
         copilotWindow.applyPrivacy()
+        if old == nil || old?.notchEvents != s.notchEvents || old?.eventCalendarsOff != s.eventCalendarsOff { CalendarEvents.shared.apply(s) }
+        if old?.notchEventLead != s.notchEventLead { island.refresh() }
     }
 
     // MARK: Hotkeys

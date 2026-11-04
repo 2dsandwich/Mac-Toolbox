@@ -167,7 +167,7 @@ enum QuickButton: Codable, Hashable, Identifiable {
 
 /// What the closed notch shows first when more than three things are going on (alarms and dictation always lead).
 enum NotchKind: String, Codable, CaseIterable, Identifiable {
-    case media, timer, meeting, focus, stopwatch, message
+    case media, timer, meeting, focus, stopwatch, message, event
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -177,6 +177,7 @@ enum NotchKind: String, Codable, CaseIterable, Identifiable {
         case .focus: "Focus"
         case .stopwatch: "Stopwatches"
         case .message: "Messages"
+        case .event: "Upcoming events"
         }
     }
     var symbol: String {
@@ -187,13 +188,14 @@ enum NotchKind: String, Codable, CaseIterable, Identifiable {
         case .focus: "brain.head.profile"
         case .stopwatch: "stopwatch"
         case .message: "checkmark.circle"
+        case .event: "calendar"
         }
     }
 }
 
 /// Groups of search-bar answers that can be switched off.
 enum ToolGroup: String, Codable, CaseIterable, Identifiable {
-    case calculator, units, currency, weather, time, dates, text, generators, colors, system, emoji, translate, define
+    case calculator, units, currency, weather, time, dates, calendar, text, generators, colors, system, emoji, translate, define
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -203,6 +205,7 @@ enum ToolGroup: String, Codable, CaseIterable, Identifiable {
         case .weather: "Weather"
         case .time: "World clock and time zones"
         case .dates: "Dates, countdowns, Japanese era"
+        case .calendar: "Today’s events"
         case .text: "Text tools (case, Base64, hashes, kana…)"
         case .generators: "Passwords, UUIDs, dice, random"
         case .colors: "Colors, number bases, QR codes"
@@ -290,12 +293,17 @@ struct Settings: Codable, Equatable {
     var notchFocus = true
     var notchMeeting = true
     var notchDictation = true
+    var notchEvents = true
+    /// Minutes before an event starts that it shows in the notch.
+    var notchEventLead = 15
+    /// Calendars left out of the notch and the search bar (by identifier, so new ones show).
+    var eventCalendarsOff: [String] = []
     var notchHoverExpand = true
     var notchHoverDelay: Double = 0.18
     var notchCollapseDelay: Double = 0.7
     /// Let the notch appear in screenshots, recordings and screen sharing.
     var notchInCaptures = false
-    var notchOrder: [NotchKind] = [.media, .timer, .meeting, .focus, .stopwatch, .message]
+    var notchOrder: [NotchKind] = [.media, .timer, .meeting, .focus, .stopwatch, .message, .event]
     /// The closed notch's order for each mix of activities you've dragged into place.
     var notchArrangements: [String: [String]] = [:]
 

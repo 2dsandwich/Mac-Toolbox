@@ -1686,6 +1686,7 @@ private struct ClockPane: View {
 
 private struct NotchPane: View {
     @Bindable var store: Store
+    private var events: CalendarEvents { .shared }
 
     /// Everything on this pane back to how it started, the order included.
     private func resetNotch() {
@@ -1697,6 +1698,9 @@ private struct NotchPane: View {
             store.settings.notchFocus = d.notchFocus
             store.settings.notchMeeting = d.notchMeeting
             store.settings.notchDictation = d.notchDictation
+            store.settings.notchEvents = d.notchEvents
+            store.settings.notchEventLead = d.notchEventLead
+            store.settings.eventCalendarsOff = d.eventCalendarsOff
             store.settings.mediaInNotch = d.mediaInNotch
             store.settings.notchInCaptures = d.notchInCaptures
             store.settings.notchHoverExpand = d.notchHoverExpand
@@ -1721,8 +1725,34 @@ private struct NotchPane: View {
                 Toggle("Meetings", isOn: $store.settings.notchMeeting)
                 Toggle("Dictation", isOn: $store.settings.notchDictation)
                 Toggle("What’s playing", isOn: $store.settings.mediaInNotch)
+                Toggle("Upcoming events", isOn: $store.settings.notchEvents)
             }
             .disabled(!store.settings.notchEnabled)
+            Section("Upcoming events") {
+                Picker("Show before it starts", selection: $store.settings.notchEventLead) {
+                    ForEach([5, 10, 15, 30, 60], id: \.self) { m in Text(m == 60 ? "1 hour" : "\(m) minutes").tag(m) }
+                }
+                if events.authorized {
+                    ForEach(events.calendars) { c in
+                        Toggle(isOn: Binding(get: { !store.settings.eventCalendarsOff.contains(c.id) }, set: { on in
+                            store.settings.eventCalendarsOff.removeAll { $0 == c.id }
+                            if !on { store.settings.eventCalendarsOff.append(c.id) }
+                        })) {
+                            HStack(spacing: 8) {
+                                Circle().fill(Color(nsColor: c.color)).frame(width: 9, height: 9)
+                                Text(c.title)
+                                if !c.source.isEmpty { Text(c.source).foregroundStyle(.secondary) }
+                            }
+                        }
+                    }
+                } else {
+                    LabeledContent("Calendars") {
+                        Button(events.undecided ? "Allow Access" : "Open Privacy Settings") { events.requestAccess() }
+                    }
+                }
+            }
+            .disabled(!store.settings.notchEnabled || !store.settings.notchEvents)
+            .onAppear { if events.authorized { events.reload() } }
             Section {
                 LabeledContent("Order") {
                     Text(store.settings.notchPriority.map(\.title).joined(separator: " › ")).foregroundStyle(.secondary).lineLimit(2)

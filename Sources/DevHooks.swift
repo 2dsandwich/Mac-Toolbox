@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import EventKit
 import Speech
 import SwiftUI
 
@@ -226,6 +227,7 @@ extension AppDelegate {
         }
         if let i = args.firstIndex(of: "--island-snapshot"), i + 1 < args.count {
             // Renders the notch off screen with demo activities: collapsed and expanded side by side.
+            island.onStage = nil // the real notch stays hidden
             if !args.contains("--media-only") {
                 Timers.shared.add(minutes: 25, label: "Tea")
                 Timers.shared.add(minutes: 3)
@@ -248,6 +250,14 @@ extension AppDelegate {
                     ? "So the plan for tomorrow is number one finish the notch drag and drop, number two fix the dictation paste, number three ship the build before lunch, and then we can look at the settings preview again and maybe the meeting chat too"
                     : "So the plan for tomorrow is"
                 d.levels = (0..<20).map { i in Float(0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
+            }
+            if args.contains("--event") || args.contains("--event-now") {
+                // A made-up event with a Meet link, 12 minutes off (or just started), instead of the real calendar.
+                let now = Date().addingTimeInterval(args.contains("--event-now") ? 13 * 60 : 0)
+                CalendarEvents.shared.useDemo(CalendarEvents.demoEvents(Date()))
+                CalendarEvents.shared.setNowForDemo(now)
+                // Alone, so its open view comes first (whatever is really playing stays out).
+                if args.contains("--no-media") { NowPlaying.shared.onChange = nil; NowPlaying.shared.title = "" }
             }
             island.refresh()
             var images: [NSBitmapImageRep] = []
@@ -445,6 +455,9 @@ extension AppDelegate {
                 NoteBoard.shared.add("買い物: 牛乳、卵、コーヒー")
                 NoteBoard.shared.editing = nil
             }
+            // Made-up events, never the real calendar ("calendar", "予定"); the real notch stays hidden.
+            island.onStage = nil
+            CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
             if scope == .calculator { launcher.model.calcHistory = ["12×8 = 96", "1200×1.1 = 1,320"] }
             if let m = value("--clock").flatMap(ClockMode.init(rawValue:)) { launcher.model.clockMode = m }
             if launcher.model.clockMode == .stopwatch, let w = Stopwatches.shared.list.first { w.banked = 83.42; w.laps = [83.42, 51.2, 24.9] }
@@ -464,6 +477,26 @@ extension AppDelegate {
             exit(0)
         }
 
+        if args.contains("--calendar-count") {
+            // How many events EventKit has today, as counts only. Never asks for access or shows the notch.
+            island.onStage = nil
+            let status = EKEventStore.authorizationStatus(for: .event)
+            guard status == .fullAccess else {
+                print("calendar access:", status == .notDetermined ? "not asked yet" : "not allowed (\(status.rawValue))")
+                exit(0)
+            }
+            let store = EKEventStore()
+            let day = Calendar.current.startOfDay(for: Date())
+            let all = store.events(matching: store.predicateForEvents(withStart: day, end: day.addingTimeInterval(86_400), calendars: nil))
+            let timed = all.filter { !$0.isAllDay }
+            let declined = timed.filter { $0.attendees?.first(where: \.isCurrentUser)?.participantStatus == .declined }
+            let links = timed.filter { CalendarEvent.meetingLink([$0.url?.absoluteString, $0.location, $0.notes]) != nil }
+            print("calendars:", store.calendars(for: .event).count, "| today:", all.count, "timed:", timed.count, "all-day:", all.count - timed.count,
+                  "declined:", declined.count, "with call link:", links.count, "| still to come:", timed.filter { $0.endDate > Date() }.count)
+            CalendarEvents.shared.reload()
+            print("notch list:", CalendarEvents.shared.events.count, "| in the notch now:", CalendarEvents.shared.upcoming == nil ? "no" : "yes")
+            exit(0)
+        }
         if args.contains("--menu-test") {
             apply(nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

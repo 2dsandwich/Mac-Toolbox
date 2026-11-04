@@ -87,6 +87,7 @@ enum ToolCard {
     case moon(emoji: String, phase: String, detail: String, next: [(String, String)])
     case gauge(Gauge)
     case toggle(Switch)
+    case events([CalendarEvent], now: Date)
 
     /// Room for the card: what its content needs, the padding round it, and the header with its gap.
     @MainActor var height: CGFloat { content + 2 * (cardPadding - 14) - (header == nil ? 0 : 1) }
@@ -109,6 +110,7 @@ enum ToolCard {
         case .toggle(let t): t.level == nil ? 88 : 128
         case .volume: 140
         case .media: 112
+        case .events(let list, _): 55 + (list.isEmpty ? 17 : CGFloat(min(list.count, EventsCard.most)) * 46 - 6)
         }
     }
 
@@ -130,6 +132,7 @@ enum ToolCard {
         case .moon: ("moon.fill", "Moon", .systemIndigo)
         case .gauge(let g): (g.symbol, g.title, g.color)
         case .toggle(let t): (t.symbol, t.title, t.color)
+        case .events(_, let now): ("calendar", "Calendar · " + now.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()), .systemRed)
         }
     }
 }
@@ -194,6 +197,7 @@ struct AnswerCardView: View {
         case .moon(let emoji, let phase, let detail, let next): MoonCard(emoji: emoji, phase: phase, detail: detail, next: next)
         case .gauge(let g): GaugeCard(g: g)
         case .toggle(let t): ToggleCard(t: t, onAction: onAction)
+        case .events(let list, let now): EventsCard(events: list, now: now, onAction: onAction)
         }
     }
 }
@@ -876,4 +880,39 @@ private struct VolumeCard: View {
 private struct MediaCardInList: View {
     @Environment(\.cardInner) private var inner
     var body: some View { MediaCard(media: NowPlaying.shared, artSize: 48, corner: inner) }
+}
+
+/// What's left of today: each event's calendar colour, title and time, how long until it starts, and Join for a call.
+private struct EventsCard: View {
+    let events: [CalendarEvent]
+    let now: Date
+    let onAction: (Answer.Action) -> Void
+    @Environment(\.cardInner) private var inner
+    static let most = 6
+
+    var body: some View {
+        if events.isEmpty {
+            Text("Nothing left today").font(.system(size: 13)).foregroundStyle(.secondary)
+        } else {
+            VStack(spacing: 6) {
+                ForEach(events.prefix(Self.most)) { e in row(e) }
+            }
+        }
+    }
+
+    private func row(_ e: CalendarEvent) -> some View {
+        HStack(spacing: 10) {
+            Capsule().fill(Color(nsColor: e.color)).frame(width: 4, height: 26)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(e.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(e.timeRange).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Text(e.countdown(now)).font(.system(size: 12.5, weight: .medium)).foregroundStyle(e.start <= now ? Color(nsColor: .systemRed) : .secondary).monospacedDigit()
+            if let link = e.link { RoundIcon(symbol: "video.fill", help: "Join") { onAction(.open(link)) } }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 40)
+        .background(RoundedRectangle(cornerRadius: inner, style: .continuous).fill(Color.primary.opacity(0.06)))
+    }
 }
