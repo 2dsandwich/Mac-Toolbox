@@ -310,7 +310,7 @@ struct ClosedLyricLine: View {
     var body: some View {
         let lyrics = Lyrics.shared
         let shown = model.stage == .compact && model.contentVisible && lyrics.closedLine && NowPlaying.shared.playing
-            && model.compactShown.contains(.media)
+            && model.compactShown.contains(.media) && !model.peek // the new song's name has that spot for a moment
         let i = index ?? lyrics.index(at: lyrics.playhead(Date()))
         ZStack {
             if shown, lyrics.cues.indices.contains(i) {

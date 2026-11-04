@@ -306,8 +306,10 @@ struct Settings: Codable, Equatable {
     /// Calendars left out of the notch and the search bar (by identifier, so new ones show).
     var eventCalendarsOff: [String] = []
     var notchHoverExpand = true
-    var notchHoverDelay: Double = 0.18
+    var notchHoverDelay: Double = 0.3
     var notchCollapseDelay: Double = 0.7
+    /// Out of the way while a full-screen app is in front on the notch's screen (alarms and dictation still show).
+    var notchHideInFullScreen = true
     /// Let the notch appear in screenshots, recordings and screen sharing.
     var notchInCaptures = false
     var notchOrder: [NotchKind] = [.media, .timer, .meeting, .focus, .stopwatch, .message, .event]
@@ -427,6 +429,8 @@ struct Settings: Codable, Equatable {
         if ["~/Documents/Flick Meetings", "~/Documents/Halo Meetings"].contains(merged["meetingFolder"] as? String ?? "") {
             merged["meetingFolder"] = "~/Documents/MONEY Meetings"
         }
+        // The hover delay's old default (the slider moves in 0.05 steps, so 0.18 was never picked by hand).
+        if merged["notchHoverDelay"] as? Double == 0.18 { merged["notchHoverDelay"] = 0.3 }
         if (savedDict["version"] as? Int ?? 1) < 3 {
             // Apps and Clipboard share one width so switching tabs doesn't jump sideways.
             if (merged["width"] as? Double) == 620 && (merged["clipboardWidth"] as? Double) == 780 {

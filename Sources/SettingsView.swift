@@ -1706,6 +1706,7 @@ private struct NotchPane: View {
             store.settings.notchLyrics = d.notchLyrics
             store.settings.notchLyricLine = d.notchLyricLine
             store.settings.notchInCaptures = d.notchInCaptures
+            store.settings.notchHideInFullScreen = d.notchHideInFullScreen
             store.settings.notchHoverExpand = d.notchHoverExpand
             store.settings.notchHoverDelay = d.notchHoverDelay
             store.settings.notchCollapseDelay = d.notchCollapseDelay
@@ -1781,6 +1782,14 @@ private struct NotchPane: View {
             .disabled(!store.settings.notchEnabled)
             Section("Screenshots and sharing") {
                 Toggle("Show the notch in screenshots, recordings and screen sharing", isOn: $store.settings.notchInCaptures)
+            }
+            .disabled(!store.settings.notchEnabled)
+            Section {
+                Toggle("Hide while an app is full screen", isOn: $store.settings.notchHideInFullScreen)
+            } header: {
+                Text("Full screen")
+            } footer: {
+                Text("Alarms and dictation still show.").font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!store.settings.notchEnabled)
             Section("Opening") {

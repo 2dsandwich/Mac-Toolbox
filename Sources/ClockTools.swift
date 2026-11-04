@@ -586,6 +586,11 @@ struct AlarmDraft: Equatable {
     @ObservationIgnored private var artKey = ""
     /// Snapshots and tests: keep the demo song (the player's answers are ignored).
     @ObservationIgnored var frozen = false
+    /// Dev snapshots: the same as `frozen` (the notch's hooks set this one).
+    @ObservationIgnored var demo: Bool {
+        get { frozen }
+        set { frozen = newValue }
+    }
 
     var available: Bool { !title.isEmpty }
 
@@ -669,6 +674,7 @@ struct AlarmDraft: Equatable {
     @ObservationIgnored private var asking = false
 
     func refresh() {
+        guard !demo else { return }
         // Only ask apps that are already open (asking would launch them).
         let spotify = Self.running("com.spotify.client"), music = Self.running("com.apple.Music")
         guard spotify || music else { return apply(nil, source: nil) }
