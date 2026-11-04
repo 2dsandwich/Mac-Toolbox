@@ -224,8 +224,35 @@ extension AppDelegate {
             }
             return true
         }
+        if let i = args.firstIndex(of: "--lyrics-test"), i + 3 < args.count {
+            // `--lyrics-test "<track>" "<artist>" <duration> [<at>]`: looks the song up (cache, then LRCLIB) and prints
+            // only counts and times, never the words.
+            island.onStage = nil // the real notch stays hidden
+            NowPlaying.shared.frozen = true
+            let duration = Double(args[i + 3]) ?? 0
+            let at = i + 4 < args.count ? Double(args[i + 4]) ?? duration / 2 : duration / 2
+            let song = Lyrics.Song(title: args[i + 1], name: args[i + 1], artist: args[i + 2], album: "", duration: duration)
+            func clock(_ t: Double) -> String { String(format: "%02d:%05.2f", Int(t) / 60, t.truncatingRemainder(dividingBy: 60)) }
+            Task {
+                guard store.settings.notchLyrics else { print("lyrics are off in Settings › Notch"); exit(0) }
+                let (entry, via) = await Lyrics.shared.lookUp(song)
+                guard let entry else { print("source:", via, "→ network failed"); exit(1) }
+                let cues = entry.synced.map { Lyrics.parse($0, duration: duration) } ?? []
+                let plain = entry.plain.map { $0.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count } ?? 0
+                print("source:", via, "| synced:", entry.synced != nil, "| plain lines:", plain, "| instrumental:", entry.instrumental)
+                let lines = cues.filter { $0.text != nil }, gaps = cues.count - lines.count
+                print("cues:", cues.count, "| lines:", lines.count, "| breaks (note):", gaps)
+                if let f = lines.first, let l = lines.last { print("first line:", clock(f.time), "| last line:", clock(l.time)) }
+                let k = cues.lastIndex { $0.time <= at } ?? -1
+                let what = k < 0 ? "before the first line" : cues[k].text == nil ? "break (note)" : "line"
+                print("at \(clock(at)): cue \(k) of \(cues.count) (\(what))" + (k + 1 < cues.count ? ", next at \(clock(cues[k + 1].time))" : ""))
+                exit(0)
+            }
+            return true
+        }
         if let i = args.firstIndex(of: "--island-snapshot"), i + 1 < args.count {
             // Renders the notch off screen with demo activities: collapsed and expanded side by side.
+            island.onStage = nil // the real notch stays hidden
             if !args.contains("--media-only") {
                 Timers.shared.add(minutes: 25, label: "Tea")
                 Timers.shared.add(minutes: 3)
@@ -233,11 +260,18 @@ extension AppDelegate {
             }
             if args.contains("--focus") { pomodoro.start(Pomodoro.Plan()) }
             if !args.contains("--no-media") {
+                NowPlaying.shared.frozen = true
                 NowPlaying.shared.title = args.contains("--long") ? "Save Your Tears (Remix) [feat. Ariana Grande] - Extended Club Mix" : "Blinding Lights"
                 NowPlaying.shared.artist = args.contains("--long") ? "The Weeknd & Kendrick Lamar" : "The Weeknd"
                 NowPlaying.shared.playing = true
                 NowPlaying.shared.duration = 200
                 NowPlaying.shared.position = 80
+                if args.contains("--lyrics") {
+                    // Made-up lines (`--lyrics-at <seconds>` moves the song, 92 for the break's note).
+                    if let j = args.firstIndex(of: "--lyrics-at"), j + 1 < args.count { NowPlaying.shared.position = Double(args[j + 1]) ?? 80 }
+                    NowPlaying.shared.updated = Date()
+                    Lyrics.shared.showDemo()
+                }
             }
             if let j = args.firstIndex(of: "--dictation"), j + 1 < args.count {
                 // Dictation as it looks while listening or polishing (with a long take, to see it scroll).

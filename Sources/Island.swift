@@ -239,7 +239,7 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
     /// Height of the first item's detail in the expanded notch.
     var detailHeight: CGFloat {
         switch slots.first {
-        case .media: NowPlaying.shared.duration > 0 ? 60 : 46
+        case .media: (NowPlaying.shared.duration > 0 ? 60 : 46) + Lyrics.shared.openHeight
         case .timer: 56
         case .stopwatch: 56
         case .pomodoro: 80
@@ -854,6 +854,7 @@ struct IslandView: View {
                 .padding(.top, model.geometry.topInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .top) { ClosedLyricLine(model: model) }
         .environment(\.colorScheme, .dark)
     }
 
@@ -1426,6 +1427,8 @@ struct IslandView: View {
                 RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink) { m.playPause() }
                 RoundButton(symbol: "forward.fill", tint: nil) { m.next() }
             }
+            // Under the title, lined up with it (`openHeight` makes the room).
+            if !Lyrics.shared.cues.isEmpty { LyricLines(lyrics: Lyrics.shared).padding(.leading, 46 + 12) }
             if m.duration > 0 {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in bar(m.livePosition / max(1, m.duration), .white.opacity(0.8)) }
             }
