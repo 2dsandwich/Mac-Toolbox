@@ -102,6 +102,7 @@ import SwiftUI
         if s.dictationEnabled && s.fnDictation { fnKeys.start() } else { fnKeys.stop() }
         launcher.panel.sharingType = s.hideFromScreenShare ? .none : .readOnly
         islandController.setSharing(!s.notchInCaptures)
+        if let old, old.notchHideInFullScreen != s.notchHideInFullScreen { island.refresh() }
         copilotWindow.applyPrivacy()
     }
 

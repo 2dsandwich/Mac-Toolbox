@@ -225,7 +225,11 @@ extension AppDelegate {
             return true
         }
         if let i = args.firstIndex(of: "--island-snapshot"), i + 1 < args.count {
-            // Renders the notch off screen with demo activities: collapsed and expanded side by side.
+            // Renders the notch off screen with demo activities: collapsed and expanded side by side. The real notch
+            // panel stays hidden (nothing shows on screen), and the demo song stands in for whatever is really playing.
+            island.onStage = nil
+            island.haptic = {}
+            NowPlaying.shared.demo = true
             if !args.contains("--media-only") {
                 Timers.shared.add(minutes: 25, label: "Tea")
                 Timers.shared.add(minutes: 3)
@@ -233,11 +237,19 @@ extension AppDelegate {
             }
             if args.contains("--focus") { pomodoro.start(Pomodoro.Plan()) }
             if !args.contains("--no-media") {
-                NowPlaying.shared.title = args.contains("--long") ? "Save Your Tears (Remix) [feat. Ariana Grande] - Extended Club Mix" : "Blinding Lights"
-                NowPlaying.shared.artist = args.contains("--long") ? "The Weeknd & Kendrick Lamar" : "The Weeknd"
-                NowPlaying.shared.playing = true
-                NowPlaying.shared.duration = 200
-                NowPlaying.shared.position = 80
+                let m = NowPlaying.shared
+                if args.contains("--peek") {
+                    // The song before, so the next refresh sees a new one and peeks.
+                    m.title = "Starboy"
+                    m.artist = "The Weeknd"
+                    island.refresh()
+                }
+                m.title = args.contains("--long") ? "Save Your Tears (Remix) [feat. Ariana Grande] - Extended Club Mix" : "Blinding Lights"
+                m.artist = args.contains("--long") ? "The Weeknd & Kendrick Lamar" : "The Weeknd"
+                m.playing = !args.contains("--paused")
+                m.duration = 200
+                m.position = 80
+                m.artwork = args.contains("--no-art") ? nil : Self.demoArt()
             }
             if let j = args.firstIndex(of: "--dictation"), j + 1 < args.count {
                 // Dictation as it looks while listening or polishing (with a long take, to see it scroll).
@@ -250,6 +262,28 @@ extension AppDelegate {
                 d.levels = (0..<20).map { i in Float(0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
             }
             island.refresh()
+            if args.contains("--peek") { print("peek:", island.peek) }
+            if args.contains("--swipe-test") {
+                // Feeds trackpad swipes (finger travel in points) to the notch and says what it did.
+                var skipped: [Bool] = []
+                island.skip = { skipped.append($0) }
+                func swipe(_ dx: CGFloat, _ dy: CGFloat, player: Bool = true) -> Bool {
+                    var took = island.swipe(.began, dx: 0, dy: 0, overPlayer: player)
+                    for _ in 0..<10 { took = island.swipe(.changed, dx: dx / 10, dy: dy / 10, overPlayer: player) || took }
+                    print(String(format: "  pull %.1f×%.1f", island.pull.width, island.pull.height), terminator: "")
+                    return island.swipe(.ended, dx: 0, dy: 0, overPlayer: player) && took
+                }
+                island.stage = .compact
+                print("compact, up 40 →", swipe(0, -40), island.stage)
+                print("compact, down 15 →", swipe(0, 15), island.stage)
+                print("compact, down 40 →", swipe(0, 40), island.stage)
+                print("expanded, left 60 over player →", swipe(-60, 0), skipped)
+                print("expanded, right 60 over player →", swipe(60, 0), skipped)
+                print("expanded, right 60 below player →", swipe(60, 0, player: false), skipped)
+                print("expanded, up 40 →", swipe(0, -40), island.stage)
+                print("front app full screen:", IslandController.frontIsFullScreen(on: island.geometry.screenFrame))
+                exit(0)
+            }
             var images: [NSBitmapImageRep] = []
             for stage in [IslandStage.compact, .expanded] {
                 island.lastInteraction = .distantFuture // keep it open for the picture
@@ -278,6 +312,28 @@ extension AppDelegate {
                         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
                     }
                     print("clicked", args[k + 1], "at", p, "→ phase", island.dictation.phase, "handsFree", island.dictation.handsFree)
+                }
+                w.orderOut(nil)
+            }
+            if args.contains("--frames") {
+                // Opening and closing caught part way: 60, 120 and 220 ms into each.
+                island.stage = .compact
+                island.peek = false
+                let size = island.geometry.panelSize
+                let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
+                let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+                w.contentView = hv
+                w.orderFrontRegardless()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+                for open in [true, false] {
+                    if open { island.expand(haptic: false) } else { island.collapse() }
+                    var last = 0.0
+                    for ms in [60.0, 120, 220] {
+                        RunLoop.main.run(until: Date().addingTimeInterval((ms - last) / 1000))
+                        last = ms
+                        if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) { hv.cacheDisplay(in: hv.bounds, to: rep); images.append(rep) }
+                    }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
                 }
                 w.orderOut(nil)
             }
@@ -477,5 +533,15 @@ extension AppDelegate {
             return true
         }
         return false
+    }
+
+    /// A stand-in album cover for snapshots: a red sky over a dark street.
+    static func demoArt() -> NSImage {
+        NSImage(size: NSSize(width: 300, height: 300), flipped: false) { r in
+            NSGradient(colors: [NSColor(red: 0.95, green: 0.18, blue: 0.2, alpha: 1), NSColor(red: 0.35, green: 0.02, blue: 0.08, alpha: 1)])?.draw(in: r, angle: 90)
+            NSColor(white: 0.05, alpha: 1).setFill()
+            NSRect(x: 0, y: 0, width: r.width, height: r.height * 0.28).fill()
+            return true
+        }
     }
 }

@@ -584,6 +584,8 @@ struct AlarmDraft: Equatable {
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var poller: Timer?
     @ObservationIgnored private var artKey = ""
+    /// Dev snapshots: keep the demo song set by hand, whatever Music or Spotify is really playing.
+    @ObservationIgnored var demo = false
 
     var available: Bool { !title.isEmpty }
 
@@ -667,6 +669,7 @@ struct AlarmDraft: Equatable {
     @ObservationIgnored private var asking = false
 
     func refresh() {
+        guard !demo else { return }
         // Only ask apps that are already open (asking would launch them).
         let spotify = Self.running("com.spotify.client"), music = Self.running("com.apple.Music")
         guard spotify || music else { return apply(nil, source: nil) }
@@ -716,6 +719,7 @@ struct AlarmDraft: Equatable {
     }
 
     private func apply(_ info: [String]?, source: String?) {
+        guard !demo else { return }
         let wasPlaying = playing, wasTitle = title
         let started = info.map { $0.first == "playing" } ?? false
         let change = { [self] in
