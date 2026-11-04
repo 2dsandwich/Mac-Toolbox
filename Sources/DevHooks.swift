@@ -140,6 +140,52 @@ extension AppDelegate {
             }
             return true
         }
+        if args.contains("--paste-test") {
+            // Dictation's insert-and-check against text fields in an off-screen window of this process. No key events
+            // are sent (the ⌘V "doesn't land"), so each field goes through the Accessibility insert and its check.
+            setbuf(stdout, nil)
+            let w = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 420, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+            let field = NSTextField(frame: NSRect(x: 10, y: 150, width: 400, height: 24))
+            field.stringValue = "Hello"
+            let scroll = NSTextView.scrollableTextView()
+            scroll.frame = NSRect(x: 10, y: 10, width: 400, height: 120)
+            let view = scroll.documentView as! NSTextView
+            view.string = "First line"
+            let label = NSTextField(labelWithString: "Not editable")
+            label.frame = NSRect(x: 10, y: 130, width: 400, height: 18)
+            [field, scroll, label].forEach { w.contentView?.addSubview($0) }
+            w.orderFrontRegardless()
+            let pid = ProcessInfo.processInfo.processIdentifier
+            print("accessibility:", Paster.trusted ? "allowed" : "NOT ALLOWED (AX calls will fail)")
+            print("chunks:", Paster.typingChunks("日本語のテキストと English words 👋🏽 together\nnext line").map { "\($0.utf16.count)" }.joined(separator: " "),
+                  Paster.typingChunks("日本語のテキストと English words 👋🏽 together\nnext line").joined() == "日本語のテキストと English words 👋🏽 together\nnext line" ? "(rejoin ok)" : "(REJOIN BROKEN)")
+            Task {
+                let cases: [(String, NSView, () -> String)] = [("text field", field, { field.stringValue }), ("text view", view, { view.string }),
+                                                               ("label", label, { label.stringValue })]
+                for (name, v, read) in cases {
+                    w.makeFirstResponder(v.acceptsFirstResponder ? v : nil)
+                    let was = read()
+                    try? await Task.sleep(for: .milliseconds(150))
+                    let how = await Task.detached { () -> String in
+                        // Only ever this process's own focus: the system-wide one is whatever the person is typing in.
+                        let app = AXUIElementCreateApplication(pid)
+                        AXUIElementSetMessagingTimeout(app, 1)
+                        var f: AnyObject?
+                        let err = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &f)
+                        guard err == .success, let f, CFGetTypeID(f) == AXUIElementGetTypeID() else { return "no focused element (\(err.rawValue))" }
+                        let el = f as! AXUIElement
+                        var owner: pid_t = 0
+                        guard AXUIElementGetPid(el, &owner) == .success, owner == pid else { return "focus is in another app: skipped" }
+                        let before = Paster.snapshot(el).map { "\($0)" } ?? "nil"
+                        let r = await Paster.deliver(" 音声 dictated ✓", pid: pid, field: el, post: false)
+                        return "before \(before) → \(r.rawValue), after \(Paster.snapshot(el).map { "\($0)" } ?? "nil")"
+                    }.value
+                    print("\(name): \(how); \(was.count) → \(read().count) chars")
+                }
+                exit(0)
+            }
+            return true
+        }
         if args.contains("--polish-test") {
             Task {
                 let long = "so um I don't think that the the dictation cleanup is actually working because I still see a lot of like junk and also very incoherent polished results just like how my output is right now and uh I want you to make sure that the end result feels coherent and that it's a sentence and also it's very hard to hands free dictate so fix that and also add support for bullet points and allow adding items in the same text field after dictating"
@@ -257,7 +303,8 @@ extension AppDelegate {
                 island.contentVisible = true
                 let size = island.geometry.panelSize
                 let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
-                let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+                setbuf(stdout, nil)
+            let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
                 w.contentView = hv
                 w.orderFrontRegardless()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.6))
@@ -351,6 +398,7 @@ extension AppDelegate {
         }
         if args.contains("--recorder-test") {
             // Feeds real key events to the shortcut recorder off screen and prints what it recorded.
+            setbuf(stdout, nil)
             let w = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 200, height: 40), styleMask: .titled, backing: .buffered, defer: false)
             let v = HotKeyRecorderView(frame: NSRect(x: 0, y: 0, width: 150, height: 26))
             w.contentView?.addSubview(v)
@@ -385,6 +433,7 @@ extension AppDelegate {
         }
         if let i = args.firstIndex(of: "--menu-snapshot"), i + 1 < args.count {
             let hv = NSHostingView(rootView: MenuView(store: store, clipboard: clipboard, meeting: MeetingRecorder(store: store), pomodoro: Pomodoro()) { _ in })
+            setbuf(stdout, nil)
             let w = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 320, height: 10), styleMask: .borderless, backing: .buffered, defer: false)
             w.appearance = NSAppearance(named: args.contains("--dark") ? .darkAqua : .aqua)
             w.backgroundColor = .windowBackgroundColor

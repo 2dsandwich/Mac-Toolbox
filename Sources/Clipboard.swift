@@ -301,11 +301,20 @@ enum Paster {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
+    typealias Saved = [[(NSPasteboard.PasteboardType, Data)]]
+
     /// Types `text` into the frontmost app by pasting, then puts the previous clipboard back.
-    /// Marked transient so clipboard managers (ours included) skip it.
     static func pasteText(_ text: String) {
+        let (saved, mark) = putOnClipboard(text)
+        pressCommandV()
+        restore(saved, mark, after: 0.9)
+    }
+
+    /// Puts `text` on the clipboard, marked transient so clipboard managers (ours included) skip it. Returns what was
+    /// there before and the change count to restore against.
+    static func putOnClipboard(_ text: String) -> (Saved, Int) {
         let pb = NSPasteboard.general
-        let saved: [[(NSPasteboard.PasteboardType, Data)]] = (pb.pasteboardItems ?? []).map { item in
+        let saved: Saved = (pb.pasteboardItems ?? []).map { item in
             item.types.compactMap { t in item.data(forType: t).map { (t, $0) } }
         }
         let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
@@ -313,9 +322,12 @@ enum Paster {
         pb.declareTypes([.string, transient], owner: nil)
         pb.setString(text, forType: .string)
         pb.setData(Data(), forType: transient)
-        let mark = pb.changeCount
-        pressCommandV()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+        return (saved, pb.changeCount)
+    }
+
+    static func restore(_ saved: Saved, _ mark: Int, after delay: Double) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            let pb = NSPasteboard.general
             guard pb.changeCount == mark, !saved.isEmpty else { return } // something new was copied meanwhile
             pb.clearContents()
             pb.writeObjects(saved.map { pairs in
@@ -323,6 +335,149 @@ enum Paster {
                 for (t, d) in pairs { item.setData(d, forType: t) }
                 return item
             })
+        }
+    }
+
+    enum Delivery: String { case pasted, inserted, typed, unconfirmed, failed }
+
+    /// Pastes `text` into the focused field and checks it arrived. When the field shows no change: in through
+    /// Accessibility, then typed. `.failed` leaves `text` on the clipboard. `field` and `post` are for `--paste-test`:
+    /// an element of our own, and neither the clipboard nor key events touched.
+    static func deliver(_ text: String, pid: pid_t?, field given: AXUIElement? = nil, post: Bool = true) async -> Delivery {
+        let look = { given ?? focusedElement(pid).0 }
+        let before = look().flatMap(snapshot)
+        let (saved, mark) = post ? putOnClipboard(text) : ([], 0)
+        if post { pressCommandV() }
+        // A field that doesn't say what's in it (terminals, a web view with no tree): nothing to check against, so
+        // trust the paste and give a slow app plenty of time to read the clipboard.
+        guard let before else {
+            Log.write("paste sent, field doesn't tell: not checked")
+            restore(saved, mark, after: 4)
+            return .unconfirmed
+        }
+        if await landed(look, before, within: 1.5) {
+            Log.write("paste landed")
+            restore(saved, mark, after: 0.5)
+            return .pasted
+        }
+        // The paste may still be read late; keep our text there a while so it can't paste the old clipboard.
+        Log.write("paste didn't show in the field: inserting through Accessibility")
+        if let el = look() {
+            let err = AXUIElementSetAttributeValue(el, kAXSelectedTextAttribute as CFString, text as CFString)
+            if err == .success, await landed(look, before, within: 0.5) {
+                Log.write("inserted through Accessibility")
+                restore(saved, mark, after: 4)
+                return .inserted
+            }
+            Log.write("Accessibility insert \(err == .success ? "didn't show" : "refused (\(err.rawValue))"): typing")
+        }
+        if post {
+            await type(text)
+            if await landed(look, before, within: 0.8) {
+                Log.write("typed \(text.count) chars")
+                restore(saved, mark, after: 4)
+                return .typed
+            }
+        }
+        Log.write("nothing landed: left on clipboard")
+        return .failed
+    }
+
+    /// What the field looks like now: its length and where the cursor is. nil when it says neither.
+    static func snapshot(_ el: AXUIElement) -> [Int]? {
+        var out: [Int] = []
+        var n: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXNumberOfCharactersAttribute as CFString, &n) == .success, let n = n as? Int {
+            out.append(n)
+        } else if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &n) == .success, let v = n as? String {
+            out.append((v as NSString).length)
+        }
+        var range: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &range) == .success, let r = range,
+           CFGetTypeID(r) == AXValueGetTypeID() {
+            var cf = CFRange()
+            if AXValueGetValue(r as! AXValue, .cfRange, &cf) { out += [cf.location, cf.length] }
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    private static func landed(_ look: () -> AXUIElement?, _ before: [Int], within seconds: Double) async -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        repeat {
+            try? await Task.sleep(for: .milliseconds(50))
+            if let now = look().flatMap(snapshot), now != before { return true }
+        } while Date() < end
+        return false
+    }
+
+    /// The focused element, system-wide, else in app `pid`. Electron apps (ChatGPT, Slack…) report nothing focused
+    /// until an assistive app asks for their accessibility tree, so that's asked for first.
+    static func focusedElement(_ pid: pid_t?) -> (AXUIElement?, AXError) {
+        var focused: AnyObject?
+        let system = AXUIElementCreateSystemWide()
+        // A busy app would otherwise hold each question for 6 s.
+        AXUIElementSetMessagingTimeout(system, 0.5)
+        var err = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused)
+        if err != .success, let pid {
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.5)
+            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            err = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused)
+        }
+        guard err == .success, let el = focused, CFGetTypeID(el) == AXUIElementGetTypeID() else { return (nil, err == .success ? .failure : err) }
+        AXUIElementSetMessagingTimeout(el as! AXUIElement, 0.5)
+        return ((el as! AXUIElement), .success)
+    }
+
+    static func hasFocusedWindow(_ pid: pid_t?) -> Bool {
+        guard let pid else { return false }
+        var w: AnyObject?
+        return AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute as CFString, &w) == .success
+    }
+
+    /// `text` in pieces small enough for one key event (it takes 20 UTF-16 units), never splitting a character.
+    /// Line breaks are their own piece.
+    static func typingChunks(_ text: String) -> [String] {
+        var out: [String] = [], cur = ""
+        for c in text {
+            if c.isNewline {
+                if !cur.isEmpty { out.append(cur) }
+                out.append("\n")
+                cur = ""
+            } else if cur.utf16.count + c.utf16.count > 16 {
+                out.append(cur)
+                cur = String(c)
+            } else {
+                cur.append(c)
+            }
+        }
+        if !cur.isEmpty { out.append(cur) }
+        return out
+    }
+
+    /// Types `text` into the frontmost app as key events.
+    private static func type(_ text: String) async {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        for piece in typingChunks(text) {
+            let down: CGEvent?, up: CGEvent?
+            if piece == "\n" {
+                // ⇧Return: a plain Return sends the message in chat apps.
+                down = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_Return), keyDown: true)
+                up = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_Return), keyDown: false)
+                down?.flags = .maskShift
+                up?.flags = .maskShift
+            } else {
+                let units = Array(piece.utf16)
+                down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true)
+                up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
+                for e in [down, up] {
+                    e?.flags = [] // a held modifier would make it a shortcut
+                    e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+                }
+            }
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+            try? await Task.sleep(for: .milliseconds(8))
         }
     }
 
