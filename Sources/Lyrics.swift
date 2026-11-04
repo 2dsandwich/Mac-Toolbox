@@ -54,7 +54,7 @@ import SwiftUI
 
     var closedLine: Bool { !cues.isEmpty && (demo || Store.shared.settings.notchLyricLine) }
     /// Extra height the lyrics take in the open notch's music player.
-    var openHeight: CGFloat { cues.isEmpty ? 0 : LyricLines.height + 10 }
+    var openHeight: CGFloat { cues.isEmpty ? 0 : LyricLines.height + IslandView.lyricGap }
 
     func start() { follow() }
 
@@ -273,6 +273,8 @@ private let lyricMove = Animation.spring(response: 0.45, dampingFraction: 0.9)
 /// Open notch, under the song: the line being sung, the next one dimmer; they move up as the song goes on.
 struct LyricLines: View {
     let lyrics: Lyrics
+    /// Centred under the player (the open notch), instead of starting at the left.
+    var centered = false
     @State private var index: Int?
 
     static let lineHeight: CGFloat = 18
@@ -281,17 +283,18 @@ struct LyricLines: View {
     var body: some View {
         let cues = lyrics.cues
         let i = min(index ?? lyrics.index(at: lyrics.playhead(Date())), cues.count - 1)
-        ZStack(alignment: .topLeading) {
+        ZStack(alignment: centered ? .top : .topLeading) {
             if !cues.isEmpty {
                 ForEach(max(0, i - 1)...min(cues.count - 1, max(0, i + 2)), id: \.self) { k in
                     lyricText(cues[k])
+                        .frame(maxWidth: centered ? .infinity : nil, alignment: .center)
                         .frame(height: Self.lineHeight)
                         .opacity(k == i ? 1 : k == i + 1 ? 0.45 : 0)
                         .offset(y: CGFloat(k - i) * Self.lineHeight)
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: Self.height, maxHeight: Self.height, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: Self.height, maxHeight: Self.height, alignment: centered ? .top : .topLeading)
         .clipped()
         .task(id: lyricClock(lyrics)) {
             await lyrics.track { i in

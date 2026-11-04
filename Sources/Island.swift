@@ -259,7 +259,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Height of the first item's detail in the expanded notch.
     var detailHeight: CGFloat {
         switch slots.first {
-        case .media: (NowPlaying.shared.duration > 0 ? 60 : 46) + Lyrics.shared.openHeight
+        case .media: IslandView.artBig + Lyrics.shared.openHeight
         case .timer: 56
         case .stopwatch: 56
         case .pomodoro: 80
@@ -1300,7 +1300,12 @@ struct IslandView: View {
         let slots = model.slots
         let rows = Array(slots.dropFirst())
         VStack(spacing: 10) {
-            if let first = slots.first { detail(first).offset(x: first == .media ? model.pull.width : 0).contextMenu { promoteMenu(first) } }
+            if let first = slots.first {
+                detail(first)
+                    .padding(.horizontal, first == .media ? 0 : Self.rowPad)
+                    .offset(x: first == .media ? model.pull.width : 0)
+                    .contextMenu { promoteMenu(first) }
+            }
             // A row carried up toward the preview of the closed notch shrinks, step by step, into its closed-notch
             // icon; near the preview the icons there make room and it glides into the gap, and letting go settles it
             // there (that order is kept for this mix). Let go anywhere else and it slides back into its row.
@@ -1675,30 +1680,60 @@ struct IslandView: View {
         }
     }
 
+    /// The open player: big art on the left; beside it the song, the time, and the controls centred under them; the
+    /// lyrics (when there are some) centred under the whole block, under the notch.
     private var mediaDetail: some View {
         let m = NowPlaying.shared
-        return VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                AlbumArt(image: m.artwork, corner: 6, note: 20)
-                    .frame(width: 46, height: 46)
-                .matchedGeometryEffect(id: IslandModel.Slot.media.key, in: ns)
-                .onTapGesture { m.openPlayer() }
-                .help("Open \(m.appName)")
-                VStack(alignment: .leading, spacing: 2) {
-                    Marquee(text: m.songTitle, font: .system(size: 14, weight: .semibold), color: .white)
-                    Marquee(text: m.artistLine, font: .system(size: 12), color: .white.opacity(0.6))
+        return VStack(spacing: Self.lyricGap) {
+            HStack(spacing: 14) {
+                AlbumArt(image: m.artwork, corner: 12, note: 30)
+                    .frame(width: Self.artBig, height: Self.artBig)
+                    .matchedGeometryEffect(id: IslandModel.Slot.media.key, in: ns)
+                    .onTapGesture { m.openPlayer() }
+                    .help("Open \(m.appName)")
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
+                            Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
+                        }
+                        EqualizerBars(playing: m.playing, color: ArtTint.color(m.artwork)).padding(.top, 2)
+                    }
+                    Spacer(minLength: 0)
+                    if m.duration > 0 {
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            let at = min(m.livePosition, m.duration)
+                            HStack(spacing: 8) {
+                                Text(Self.songClock(at)).frame(width: 34, alignment: .leading)
+                                bar(at / max(1, m.duration), .white.opacity(0.85))
+                                Text("-" + Self.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
+                            }
+                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .frame(height: 14)
+                        Spacer(minLength: 0)
+                    }
+                    HStack(spacing: 14) {
+                        RoundButton(symbol: "backward.fill", tint: nil, size: Self.rowButton) { m.previous() }
+                        RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: Self.rowButton) { m.playPause() }
+                        RoundButton(symbol: "forward.fill", tint: nil, size: Self.rowButton) { m.next() }
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                Spacer(minLength: 0)
-                RoundButton(symbol: "backward.fill", tint: nil, size: Self.rowButton) { m.previous() }
-                RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: Self.rowButton) { m.playPause() }
-                RoundButton(symbol: "forward.fill", tint: nil, size: Self.rowButton) { m.next() }
+                .frame(height: Self.artBig)
             }
-            // Under the title, lined up with it (`openHeight` makes the room).
-            if !Lyrics.shared.cues.isEmpty { LyricLines(lyrics: Lyrics.shared).padding(.leading, 46 + 12) }
-            if m.duration > 0 {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in bar(m.livePosition / max(1, m.duration), .white.opacity(0.8)) }
-            }
+            if !Lyrics.shared.cues.isEmpty { LyricLines(lyrics: Lyrics.shared, centered: true) }
         }
+    }
+
+    /// The open player's art, as tall as the song, time and controls beside it.
+    static let artBig: CGFloat = 92
+    static let lyricGap: CGFloat = 12
+
+    static func songClock(_ t: Double) -> String {
+        let s = max(0, Int(t.rounded(.down)))
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
     }
 
     /// The next event: its title, time and calendar, with Join (when it has a call link) and dismiss.
@@ -1737,10 +1772,14 @@ struct IslandView: View {
     /// A one-line row for each slot after the first (expanded notch).
     /// The buttons on a row: their real size (not shrunk), so they line up with the ones above.
     static let rowButton: CGFloat = 32
+    /// A row's inset: the same on every side ((row height − button) / 2), and the first item's controls are inset by it
+    /// too, so every button in the open notch ends on one line.
+    static let rowPad: CGFloat = (IslandGeometry.rowHeight - 10 - rowButton) / 2
 
     @ViewBuilder private func row(_ slot: IslandModel.Slot) -> some View {
         HStack(spacing: 10) {
-            icon(slot, size: 20)
+            // In a button-sized slot, so icons line up with the buttons' lane on the other side.
+            icon(slot, size: 20).frame(width: Self.rowButton, height: Self.rowButton)
             switch slot {
             case .timer(let id):
                 let t = Timers.shared
@@ -1770,8 +1809,9 @@ struct IslandView: View {
             }
         }
         .frame(height: IslandGeometry.rowHeight - 10)
-        .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.07)))
+        .padding(.horizontal, Self.rowPad)
+        // Concentric with the round buttons, which sit `rowPad` in from every edge.
+        .background(RoundedRectangle(cornerRadius: Self.rowButton / 2 + Self.rowPad, style: .continuous).fill(Color.white.opacity(0.07)))
     }
 
     /// A one-line row for each activity after the first (expanded notch).
