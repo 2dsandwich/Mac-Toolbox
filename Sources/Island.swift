@@ -209,19 +209,26 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
     var slots: [Slot] {
         var out: [Slot] = activities.contains(.media) ? [.media] : []
         out += compactOrder.filter { $0 != .media && $0 != .dictation }
-        // Dictation sits in the strip beside the notch; it only fills the notch when it's all there is.
-        if out.isEmpty, activities.contains(.dictation) { out = [.dictation] }
+        // Dictation's waveform sits in the strip beside the notch; while it listens, its words (and hands-free, its
+        // buttons) come first, above the music and the rest.
+        let listening = [.starting, .listening].contains(dictation.phase)
+        if activities.contains(.dictation), out.isEmpty || listening { out.insert(.dictation, at: 0) }
         return Array(out.prefix(IslandGeometry.maxRows + 1))
     }
 
     /// The live words in the open notch: as tall as they need, up to five lines (then they scroll).
     var dictationTextHeight: CGFloat {
-        let w = geometry.expandedSize.width - 2 * (Self.expandedInset + (geometry.hasNotch ? 12 : 0))
+        let w = geometry.expandedSize.width - 2 * (Self.expandedInset + (geometry.hasNotch ? 12 : 0)) - (dictationControls ? Self.dictationControlsWidth : 0)
         let h = (dictation.preview as NSString).boundingRect(with: NSSize(width: w, height: .greatestFiniteMagnitude),
                                                             options: [.usesLineFragmentOrigin, .usesFontLeading],
                                                             attributes: [.font: NSFont.systemFont(ofSize: 14)]).height
         return min(ceil(h) + 2, 92)
     }
+
+    /// Hands-free: cancel and finish buttons beside the words (under the band at menu-bar height, where clicks
+    /// don't always land).
+    var dictationControls: Bool { dictation.handsFree && [.starting, .listening].contains(dictation.phase) }
+    static let dictationControlsWidth: CGFloat = 32 * 2 + 8 + 12
 
     /// Dictation shown in the top strip (beside the notch) of the expanded notch.
     var dictationInStrip: Bool {
@@ -240,7 +247,9 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         case .alarm: 48
         case .toast: 42
         case .dictation:
-            if case .failed = dictation.phase { 48 } else { dictation.preview.isEmpty ? 0 : dictationTextHeight }
+            if case .failed = dictation.phase { 48 } else {
+                max(dictation.preview.isEmpty ? 0 : dictationTextHeight, dictationControls ? 32 : 0)
+            }
         case nil: 42
         }
     }
@@ -376,7 +385,8 @@ let islandSettle = Animation.spring(response: 0.38, dampingFraction: 1)
         // Alarms and dictation first, then the order from Settings › Notch.
         let order = s.notchPriority
         list.sort { rank($0, order) < rank($1, order) }
-        if NowPlaying.shared.playing, Store.shared.settings.mediaInNotch { list.append(.media) }
+        // Paused stays: the song goes away only when Music or Spotify is quit or stopped.
+        if NowPlaying.shared.available, Store.shared.settings.mediaInNotch { list.append(.media) }
         if list != activities {
             withAnimation(list.count < activities.count ? islandSettle : islandSpring) { activities = list }
         }
@@ -1226,31 +1236,15 @@ struct IslandView: View {
                 }
             }
             Spacer(minLength: g.hasNotch ? g.seedSize.width : 0)
-            if d.handsFree || polishing {
-                stripButton("xmark", tint: nil) { d.cancel() }
-            }
-            if d.handsFree, !polishing {
-                stripButton("stop.fill", tint: focusColor) { d.stop() }.transition(.scale.combined(with: .opacity))
-            } else if !polishing {
+            if !polishing {
                 Image(systemName: d.mode == .command ? "wand.and.stars" : "mic.fill")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
             }
         }
         .animation(.spring(duration: 0.35, bounce: 0.2), value: polishing)
-        .animation(.spring(duration: 0.3), value: d.handsFree)
         .padding(.horizontal, IslandModel.expandedInset + (g.hasNotch ? 12 : 0))
         .frame(height: g.hasNotch ? g.notchHeight : 28)
         .padding(.top, g.hasNotch ? 0 : 8)
-    }
-
-    private func stripButton(_ symbol: String, tint: Color?, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(tint ?? .white)
-                .frame(width: 26, height: 26)
-                .background(Circle().fill(tint.map { $0.opacity(0.24) } ?? Color.white.opacity(0.14)))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
     }
 
     @ViewBuilder private func detail(_ slot: IslandModel.Slot) -> some View {
@@ -1318,8 +1312,22 @@ struct IslandView: View {
     private var dictationDetail: some View {
         let d = model.dictation
         let polishing = d.phase == .processing
-        // The waveform and controls are in the band beside the notch; here, only the words.
-        return VStack(alignment: .leading, spacing: 10) {
+        // The waveform is in the band beside the notch; here, the words (and, hands-free, cancel and finish).
+        return HStack(alignment: model.dictationTextHeight > 40 ? .bottom : .center, spacing: 12) {
+            words(d, polishing)
+            if model.dictationControls {
+                HStack(spacing: 8) {
+                    RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { d.cancel() }.help("Cancel")
+                    RoundButton(symbol: "stop.fill", tint: focusColor, size: Self.rowButton) { d.stop() }.help("Finish and paste")
+                }
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.3), value: model.dictationControls)
+    }
+
+    @ViewBuilder private func words(_ d: DictationController, _ polishing: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             if case .failed(let msg) = d.phase {
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
@@ -1347,6 +1355,7 @@ struct IslandView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var alarmDetail: some View {

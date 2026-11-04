@@ -767,6 +767,7 @@ private struct MeetingsPane: View {
         Form {
             Section {
                 Picker("Usual language", selection: $store.settings.meetingLanguage) {
+                    Text("Your dictation languages, mixed").tag(DictationLanguage.both)
                     Text("English").tag(DictationLanguage.english)
                     Text("日本語").tag(DictationLanguage.japanese)
                 }

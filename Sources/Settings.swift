@@ -222,7 +222,7 @@ struct Snippet: Codable, Equatable, Identifiable, Hashable {
 
 struct Settings: Codable, Equatable {
     /// 2: per-app hotkeys replaced custom shortcuts; empty search shows running apps.
-    var version = 3
+    var version = 4
 
     // Hotkeys
     var launcherHotKey = HotKey.launcherDefault
@@ -356,7 +356,7 @@ struct Settings: Codable, Equatable {
     var snippets: [Snippet] = []
 
     // Meetings
-    var meetingLanguage = DictationLanguage.english
+    var meetingLanguage = DictationLanguage.both
     var meetingSystemAudio = true
     /// The microphone meetings record ("" = the system's default).
     var meetingMicUID = ""
@@ -419,6 +419,11 @@ struct Settings: Codable, Equatable {
                 merged["clipboardWidth"] = 700.0
             }
             merged["version"] = 3
+        }
+        if (merged["version"] as? Int ?? 1) < 4 {
+            // Meetings listen in English and Japanese together now (one language was the old default).
+            if merged["meetingLanguage"] as? String == DictationLanguage.english.rawValue { merged["meetingLanguage"] = DictationLanguage.both.rawValue }
+            merged["version"] = 4
         }
         guard let data = try? JSONSerialization.data(withJSONObject: merged),
               let s = try? JSONDecoder().decode(Settings.self, from: data) else { return Settings() }

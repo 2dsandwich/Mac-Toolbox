@@ -135,6 +135,104 @@ final class LiveTranscriber: @unchecked Sendable {
     var volatileText: String { lock.withLock { volatile } }
 }
 
+/// One speaker heard in several languages at once: a recognizer per language on the same audio, their final words
+/// merged phrase by phrase (SpeechMerge) once they've all gone quiet, so a meeting in English, Japanese or both mixed
+/// comes out in the language each part was said in. With one language it simply passes the recognizer through.
+final class MixedTranscriber: @unchecked Sendable {
+    let takes: [LiveTranscriber]
+    /// Called (on any thread) with a finished phrase, or with what's being said right now.
+    var onFinal: ((String) -> Void)?
+    var onVolatile: ((String) -> Void)?
+    private let queue = DispatchQueue(label: "money.mixed-transcriber")
+    /// Audio time (seconds) already written out; words before it are never used again.
+    private var cursor: Double = 0
+    /// When each recognizer last heard anything (wall clock): one still working on a phrase is waited for.
+    private var lastHeard: [Date] = []
+    private var check: DispatchWorkItem?
+    /// The take whose language was spoken last, for showing what's being said now.
+    private var lastTake = 0
+
+    init(locales: [String]) {
+        takes = locales.map { LiveTranscriber(locale: Locale(identifier: $0)) }
+    }
+
+    func prepare() async throws {
+        for t in takes { try await t.prepare() }
+    }
+
+    func start(context words: [String]) {
+        lastHeard = takes.map { _ in Date() }
+        for (k, t) in takes.enumerated() {
+            if takes.count == 1 {
+                t.onFinal = { [weak self] text in self?.onFinal?(text) }
+                t.onVolatile = { [weak self] text in self?.onVolatile?(text) }
+            } else {
+                t.onFinal = { [weak self] _ in self?.queue.async { self?.finalArrived(k) } }
+                t.onVolatile = { [weak self] _ in
+                    self?.queue.async {
+                        self?.lastHeard[k] = Date()
+                        self?.showVolatile()
+                    }
+                }
+            }
+            Task { try? await t.start(context: words) }
+        }
+    }
+
+    /// Audio thread.
+    func append(_ buffer: AVAudioPCMBuffer) {
+        for t in takes { t.append(buffer) }
+    }
+
+    func finish() async {
+        for t in takes { _ = await t.finish() }
+        if takes.count > 1 { queue.sync { flush(upTo: .infinity) } }
+    }
+
+    private func finalArrived(_ k: Int) {
+        lastHeard[k] = Date()
+        writeOut()
+    }
+
+    /// Writes out the audio every recognizer has finished with: up to where the slowest one has got. One that has
+    /// said nothing for a while (it isn't hearing its language) isn't waited for.
+    private func writeOut() {
+        check?.cancel()
+        let now = Date()
+        let reached = takes.indices.map { k -> Double in
+            let end = takes[k].words.last?.end ?? 0
+            let busy = !takes[k].volatileText.isEmpty
+            return !busy && now.timeIntervalSince(lastHeard[k]) > 2.5 ? .infinity : end
+        }
+        let latest = takes.compactMap { $0.words.last?.end }.max() ?? 0
+        flush(upTo: min(reached.min() ?? 0, latest))
+        // Look again shortly, so a lagging recognizer that never answers doesn't hold the rest back.
+        if takes.contains(where: { ($0.words.last?.end ?? 0) > cursor }) {
+            let work = DispatchWorkItem { [weak self] in self?.writeOut() }
+            check = work
+            queue.asyncAfter(deadline: .now() + 1, execute: work)
+        }
+    }
+
+    private func flush(upTo limit: Double) {
+        guard limit > cursor else { return }
+        let fresh = takes.map { t in (locale: t.locale.identifier, words: t.words.filter { $0.mid > cursor && $0.mid <= limit }) }
+        guard fresh.contains(where: { !$0.words.isEmpty }) else { return }
+        cursor = limit.isFinite ? limit : (fresh.flatMap(\.words).map(\.end).max() ?? cursor)
+        guard let text = SpeechMerge.merge(fresh)?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return }
+        lastTake = takes.indices.max { SpeechMerge.scriptFit(text, takes[$0].locale.identifier) < SpeechMerge.scriptFit(text, takes[$1].locale.identifier) } ?? 0
+        onFinal?(text)
+        showVolatile()
+    }
+
+    /// What's being said now, from the recognizer of the language spoken last (or any that hears something).
+    private func showVolatile() {
+        let texts = takes.map(\.volatileText)
+        let text = texts[lastTake].isEmpty ? (texts.first { !$0.isEmpty } ?? "") : texts[lastTake]
+        onVolatile?(text)
+    }
+}
+
 struct TimedWord: Sendable {
     var text: String
     var start: Double

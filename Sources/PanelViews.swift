@@ -41,6 +41,7 @@ struct PillButton: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .fixedSize()
         .help(help)
         .onHover { hovering = $0 }
     }
@@ -215,7 +216,7 @@ struct MeetingControls: View {
         case .recording, .paused:
             HStack(spacing: 7) {
                 PulsingDot(active: meeting.phase == .recording)
-                Text(meeting.clock).font(.system(size: 13, weight: .semibold).monospacedDigit())
+                Text(meeting.clock).font(.system(size: 13, weight: .semibold).monospacedDigit()).fixedSize()
             }
             .padding(.trailing, 4)
             LanguageToggle(meeting: meeting)
@@ -236,30 +237,34 @@ struct MeetingControls: View {
     }
 }
 
+/// The meeting's language in one small pill: mixed (each language heard by its own recognizer), English or Japanese.
 private struct LanguageToggle: View {
     let meeting: MeetingRecorder
 
-    var body: some View {
-        HStack(spacing: 0) {
-            option(.english, "EN")
-            option(.japanese, "日本語")
-        }
-        .padding(2)
-        .background(Capsule().fill(Color.primary.opacity(0.08)))
-        .help("Language of the meeting")
-    }
+    private static let options: [(DictationLanguage, String)] = [(.both, "Mixed"), (.english, "EN"), (.japanese, "日本語")]
 
-    private func option(_ l: DictationLanguage, _ title: String) -> some View {
-        let on = meeting.language == l
-        return Button { meeting.setLanguage(l) } label: {
-            Text(title).font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(on ? .primary : .secondary)
-                .padding(.horizontal, 9)
-                .frame(height: 28)
-                .background(Capsule().fill(on ? Color.primary.opacity(0.14) : .clear))
+    var body: some View {
+        Menu {
+            ForEach(Self.options, id: \.0) { l, title in
+                Button { meeting.setLanguage(l) } label: {
+                    if meeting.language == l { Label(title, systemImage: "checkmark") } else { Text(title) }
+                }
+            }
+        } label: {
+            Text(Self.options.first { $0.0 == meeting.language }?.1 ?? "EN")
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
                 .contentShape(Capsule())
         }
+        .menuStyle(.button)
         .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Language of the meeting")
     }
 }
 

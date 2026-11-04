@@ -32,6 +32,8 @@ import SwiftUI
     @ObservationIgnored private var targetApp: NSRunningApplication?
     /// The title of the window being typed into (tells Gmail from ChatGPT inside a browser).
     @ObservationIgnored private var targetTitle: String?
+    /// The app, window and field the words are going to, read when dictation starts.
+    @ObservationIgnored private var target = Prompts.Target()
     /// The last dictation typed, and where, so the next one in the same field carries on from it.
     @ObservationIgnored private var lastTyped: (text: String, pid: pid_t, title: String?, at: Date)?
     /// What's just before the cursor when this dictation carries on from the last one.
@@ -106,6 +108,7 @@ import SwiftUI
         pressedAt = Date()
         targetApp = NSWorkspace.shared.frontmostApplication
         targetTitle = targetApp.flatMap { Self.windowTitle($0) }
+        target = Prompts.Target.current(targetApp, title: targetTitle)
         before = carryingOn()
         selection = nil
         phase = .starting
@@ -249,19 +252,19 @@ import SwiftUI
             let heard = merged.flatMap { $0.isEmpty ? nil : $0 } ?? best(said)
             if let merged, said.count > 1 { Log.write("merged \(said.count) languages → \(merged.count) chars") }
             let local = AI.choice(.dictation, s).provider.isLocal
-            let where_ = Prompts.WritingContext(s.dictationStyle, app: targetApp, title: targetTitle)
-            Log.write("polishing for \(where_) (\(targetApp?.localizedName ?? "?"))")
+            let where_ = Prompts.WritingContext(s.dictationStyle, target: target)
+            Log.write("polishing for \(where_) (\(target.name), \(target.category.isEmpty ? "no category" : target.category), field \"\(target.field.prefix(40))\")")
             let tail = before.map { String($0.suffix(300)) }
             if local {
                 text = await polishInPieces(heard, s, where_)
             } else {
                 let started = Date()
-                let app = targetApp
+                let target = target
                 // The cloud model, but never left waiting: past a few seconds (or offline) the on-device one does it.
                 let reply: String? = await withTaskGroup(of: String?.self) { g in
                     g.addTask { @MainActor in
                         try? await AI.complete(.dictation, system: Prompts.cleanup(s, context: where_),
-                                               user: Prompts.cleanupRequest(heard: said, merged: heard, app: app, context: where_, before: tail))
+                                               user: Prompts.cleanupRequest(heard: said, merged: heard, target: target, context: where_, before: tail))
                     }
                     g.addTask {
                         try? await Task.sleep(for: .seconds(heard.count > 600 ? 10 : 6))
@@ -565,43 +568,123 @@ import SwiftUI
 
 enum Prompts {
     /// Where the words are going, which decides how they're polished.
-    enum WritingContext: String {
-        case prompt, email, chat, document, code, plain
+    /// What dictation knows about where the words are going: the app, its window and the focused field.
+    struct Target {
+        var bundleID = ""
+        var name = ""
+        /// The App Store category the app declares ("social-networking", "developer-tools" …).
+        var category = ""
+        var title = ""
+        /// The focused field's placeholder, label and description ("Message #general", "Ask anything", "Search").
+        var field = ""
+        var isSearch = false
 
-        init(_ style: DictationStyle, app: NSRunningApplication?, title: String?) {
-            switch style {
-            case .casual: self = .chat; return
-            case .formal: self = .email; return
-            case .neutral: self = .plain; return
-            case .auto: break
+        @MainActor static func current(_ app: NSRunningApplication?, title: String?) -> Target {
+            var t = Target(bundleID: app?.bundleIdentifier ?? "", name: app?.localizedName ?? "", title: title ?? "")
+            if let url = app?.bundleURL, let cat = Bundle(url: url)?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String {
+                t.category = cat.replacingOccurrences(of: "public.app-category.", with: "")
             }
-            let id = app?.bundleIdentifier ?? ""
-            let t = (title ?? "").lowercased()
+            let system = AXUIElementCreateSystemWide()
+            var focused: AnyObject?
+            if AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+               let el = focused, CFGetTypeID(el) == AXUIElementGetTypeID() {
+                let e = el as! AXUIElement
+                func text(_ attr: String) -> String? {
+                    var v: AnyObject?
+                    return AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success ? v as? String : nil
+                }
+                t.field = ["AXPlaceholderValue", kAXDescriptionAttribute, kAXTitleAttribute, kAXHelpAttribute]
+                    .compactMap { text($0) }.filter { !$0.isEmpty }.joined(separator: " · ")
+                t.isSearch = [text(kAXRoleAttribute), text(kAXSubroleAttribute)].contains("AXSearchField")
+            }
+            return t
+        }
+
+        /// Every app that opens web pages, so a new browser needs no list.
+        @MainActor static let browsers: Set<String> = {
+            var ids = Set(["com.apple.Safari", "com.google.Chrome", "company.thebrowser.Browser", "company.thebrowser.dia", "com.ardia.browser"])
+            if let web = URL(string: "https://example.com") {
+                for url in NSWorkspace.shared.urlsForApplications(toOpen: web) {
+                    if let id = Bundle(url: url)?.bundleIdentifier { ids.insert(id) }
+                }
+            }
+            return ids
+        }()
+    }
+
+    enum WritingContext: String {
+        case prompt, email, chat, document, code, search, plain
+
+        @MainActor init(_ style: DictationStyle, app: NSRunningApplication?, title: String?) {
+            self.init(style, target: .current(app, title: title))
+        }
+
+        @MainActor init(_ style: DictationStyle, target: Target) {
+            switch style {
+            case .casual: self = .chat
+            case .formal: self = .email
+            case .neutral: self = .plain
+            case .auto: self = Self.guess(target, browser: Target.browsers.contains(target.bundleID))
+            }
+        }
+
+        /// The focused field first (it says the most), then the app, then its window title, then its category.
+        static func guess(_ t: Target, browser: Bool) -> WritingContext {
+            let id = t.bundleID, name = t.name.lowercased(), field = t.field.lowercased(), title = t.title.lowercased()
+            // Whole words only ("line" isn't in "online", "word" isn't in "password").
+            func has(_ s: String, _ words: [String]) -> Bool {
+                words.contains { w in
+                    guard w.first?.isASCII == true else { return s.contains(w) }
+                    return s.range(of: #"(?<![a-z0-9])"# + NSRegularExpression.escapedPattern(for: w) + #"(?![a-z0-9])"#, options: .regularExpression) != nil
+                }
+            }
+
+            let aiWords = ["chatgpt", "claude", "codex", "gemini", "perplexity", "copilot", "cursor", "grok", "deepseek", "mistral",
+                           "v0", "lovable", "bolt.new", "replit", "ai studio", "notebooklm", "poe", "hermes", "ollama", "lm studio", "siri ai"]
+            let mailWords = ["gmail", "outlook", "inbox", "mail", "メール", "proton", "superhuman", "spark", "mimestream", "hey.com"]
+            let chatWords = ["slack", "discord", "messenger", "whatsapp", "telegram", "line", "teams", "messages", "signal", "wechat",
+                             "kakaotalk", "instagram", "x.com", "twitter", "threads", "bluesky", "reddit", "chatwork", "zoom", "facetime", "google chat"]
+            let docWords = ["docs", "notion", "word", "pages", "confluence", "dropbox paper", "quip", "obsidian", "bear", "notes", "onenote",
+                            "evernote", "craft", "journal", "stickies", "reminders", "todoist", "things", "linear", "jira", "github", "coda",
+                            "google keep", "scrapbox", "cosense", "logseq", "メモ"]
+
+            // The field: "Search", an address bar, "Ask anything", "Message #general", "Subject".
+            if t.isSearch || has(field, ["search", "検索", "address and search", "find", "url"]) { return .search }
+            if has(field, ["ask anything", "ask", "prompt", "describe a task", "what do you want to build", "how can i help"] + aiWords) { return .prompt }
+            if has(field, ["message body", "compose", "subject"]) { return .email }
+            if has(field, ["message", "reply", "メッセージ", "返信", "type a message", "write a message", "send a message"]) { return .chat }
+
+            // Terminals and code editors take prompts for coding agents; Xcode takes code.
             let terminals = ["com.apple.Terminal", "com.mitchellh.ghostty", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "dev.warp.Warp",
-                             "org.alacritty", "net.kovidgoyal.kitty", "com.github.wez.wezterm", "co.zeit.hyper"]
-            let aiApps = ["com.anthropic.claudefordesktop", "com.openai.chat", "com.todesktop.230313mzl4w4u92", "com.exafunction.windsurf",
-                          "com.microsoft.VSCode", "dev.zed.Zed", "com.google.antigravity"]
-            let mail = ["com.apple.mail", "com.microsoft.Outlook", "com.readdle.SparkDesktop", "com.readdle.smartemail-Mac", "com.superhuman.electron",
-                        "com.mimestream.Mimestream", "io.canarymail.mac"]
-            let chat = ["com.tinyspeck.slackmacgap", "com.apple.MobileSMS", "jp.naver.line.mac", "com.hnc.Discord", "net.whatsapp.WhatsApp",
-                        "ru.keepcoder.Telegram", "com.facebook.archon", "com.microsoft.teams2"]
-            let docs = ["com.apple.Notes", "com.apple.iWork.Pages", "com.microsoft.Word", "notion.id", "md.obsidian", "net.shinyfrog.bear",
-                        "com.apple.TextEdit", "com.craft.craft"]
-            let browsers = ["com.apple.Safari", "com.google.Chrome", "company.thebrowser.Browser", "com.brave.Browser", "org.mozilla.firefox",
-                            "com.microsoft.edgemac", "app.zen-browser.zen", "com.vivaldi.Vivaldi", "company.thebrowser.dia"]
-            func titled(_ words: [String]) -> Bool { words.contains { t.contains($0) } }
-            if terminals.contains(id) || aiApps.contains(id) { self = .prompt }
-            else if id == "com.apple.dt.Xcode" { self = .code }
-            else if mail.contains(id) { self = .email }
-            else if chat.contains(id) { self = .chat }
-            else if docs.contains(id) { self = .document }
-            else if browsers.contains(id) || !t.isEmpty {
-                if titled(["gmail", "outlook", "inbox", "mail", "メール", "proton"]) { self = .email }
-                else if titled(["chatgpt", "claude", "gemini", "perplexity", "copilot", "v0", "lovable", "bolt.new", "cursor", "replit", "grok", "ai studio"]) { self = .prompt }
-                else if titled(["slack", "discord", "messenger", "whatsapp", "telegram", "line", "teams", "messages", "x.com", "twitter"]) { self = .chat }
-                else if titled(["docs", "notion", "word", "pages", "confluence", "dropbox paper", "quip"]) { self = .document }
-                else { self = .plain }
-            } else { self = .plain }
+                             "org.alacritty", "net.kovidgoyal.kitty", "com.github.wez.wezterm", "co.zeit.hyper", "com.raphaelamorim.rio", "app.tabby"]
+            let editors = ["com.todesktop.230313mzl4w4u92", "com.exafunction.windsurf", "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+                           "dev.zed.Zed", "dev.zed.Zed-Preview", "com.google.antigravity", "com.vscodium", "com.trae.app", "com.kiro.app"]
+            if terminals.contains(id) || editors.contains(id) || has(name, ["terminal", "iterm", "ghostty", "warp", "kitty", "alacritty", "wezterm"]) { return .prompt }
+            if id == "com.apple.dt.Xcode" || has(id.lowercased(), ["jetbrains", "nova", "sublimetext", "bbedit"]) { return .code }
+
+            // A browser is whatever page it shows.
+            if browser {
+                if has(title, mailWords) { return .email }
+                if has(title, aiWords) { return .prompt }
+                if has(title, chatWords) { return .chat }
+                if has(title, docWords) { return .document }
+                return .plain
+            }
+
+            // Any other app by its name, then by its window title, then by the kind of app it says it is.
+            if has(name, aiWords) { return .prompt }
+            if has(name, mailWords) || id == "com.apple.mail" { return .email }
+            if has(name, chatWords) { return .chat }
+            if has(name, docWords + ["textedit", "pages", "word", "powerpoint", "keynote", "freeform"]) { return .document }
+            if has(title, mailWords) { return .email }
+            if has(title, aiWords) { return .prompt }
+            if has(title, chatWords) { return .chat }
+            switch t.category {
+            case "social-networking": return .chat
+            case "developer-tools": return .prompt
+            case "productivity", "business", "education", "reference": return .document
+            default: return .plain
+            }
         }
 
         /// A one-line version for small models (the long one makes them cut words).
@@ -611,6 +694,7 @@ enum Prompts {
             case .email: return "It's an email: a greeting on its own line, short paragraphs, a sign-off on its own lines."
             case .chat: return "It's a chat message: casual, no full stop at the very end."
             case .document: return "It's notes or a document: full sentences."
+            case .search: return "It's a search query: short, no full stop at the end."
             case .code, .plain: return nil
             }
         }
@@ -640,8 +724,13 @@ enum Prompts {
                 return "Notes or a document: complete sentences, a new paragraph where the topic changes."
             case .code:
                 return "Technical context: keep identifiers, file names, commands and code exactly; no full stop after a command."
+            case .search:
+                return "A search box or address bar: a short query, no full stop at the end; keep names, URLs and terms exactly."
             case .plain:
-                return "Clear, standard punctuation."
+                return """
+                Clear, standard punctuation. Write it the way text is usually written in the app it's going to (see "Typing into"): \
+                a message in a messaging app, a prompt in an AI app, an email in a mail app, notes in a notes app.
+                """
             }
         }
     }
@@ -746,9 +835,11 @@ enum Prompts {
         return abs(cjkShare(out) - cjkShare(heard)) > 0.5
     }
 
-    static func cleanupRequest(heard: [(locale: String, text: String, confidence: Double)], merged: String, app: NSRunningApplication?,
+    static func cleanupRequest(heard: [(locale: String, text: String, confidence: Double)], merged: String, target: Target,
                                context: WritingContext, before: String? = nil) -> String {
-        var u = "Typing into: \(app?.localizedName ?? "an app") (\(context.rawValue))\n\n"
+        var into = target.name.isEmpty ? "an app" : target.name
+        if !target.field.isEmpty { into += ", a field labelled \"\(target.field.prefix(60))\"" }
+        var u = "Typing into: \(into) (\(context.rawValue))\n\n"
         if let before {
             u += """
             Already typed just before the cursor (the dictation carries on from it: match its style, language and formatting, and if it \

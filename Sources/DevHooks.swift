@@ -54,6 +54,26 @@ extension AppDelegate {
             }
             return true
         }
+        if let i = args.firstIndex(of: "--meeting-sim"), i + 1 < args.count {
+            // Plays a file through a meeting's mixed English + Japanese transcriber in real time; prints each line.
+            let path = args[i + 1]
+            Task {
+                let t = MixedTranscriber(locales: ["en_US", "ja_JP"])
+                t.onFinal = { print("line:", $0) }
+                try? await t.prepare()
+                t.start(context: [])
+                let file = try! AVAudioFile(forReading: URL(fileURLWithPath: path))
+                while true {
+                    let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 1024)!
+                    guard (try? file.read(into: buf)) != nil, buf.frameLength > 0 else { break }
+                    t.append(buf.copied()!)
+                    try? await Task.sleep(for: .seconds(Double(buf.frameLength) / file.processingFormat.sampleRate))
+                }
+                await t.finish()
+                exit(0)
+            }
+            return true
+        }
         if let i = args.firstIndex(of: "--merge-file"), i + 3 < args.count {
             let path = args[i + 1], locales = Array(args[(i + 2)...]).filter { !$0.hasPrefix("-") }
             Task {
@@ -102,9 +122,19 @@ extension AppDelegate {
                     let said = both.isEmpty ? [("en_US", heard, 0.9)] : both
                     do {
                         let out = try await AI.complete(.dictation, system: Prompts.cleanup(s, context: .prompt),
-                                                        user: Prompts.cleanupRequest(heard: said, merged: heard, app: nil, context: .prompt))
+                                                        user: Prompts.cleanupRequest(heard: said, merged: heard, target: Prompts.Target(), context: .prompt))
                         print("[\(AI.label(.dictation, s))]", String(format: "%.1fs", Date().timeIntervalSince(start)), "→", out.replacingOccurrences(of: "\n", with: " ⏎ "))
                     } catch { print("FAILED:", error.localizedDescription) }
+                }
+                // One thing said, written for different places.
+                let said = "um hey sarah so the files are uh ready i put them in the shared folder let me know if you need anything thanks tom"
+                for (ctx, name, field) in [(Prompts.WritingContext.chat, "LINE", ""), (.email, "Mail", ""), (.prompt, "ChatGPT", "Ask anything"),
+                                           (.search, "Spotify", "Search"), (.plain, "Hearth", "Write a message")] {
+                    let t = Prompts.Target(name: name, field: field)
+                    let q = ctx == .search ? "um play that song by uh fred again" : said
+                    let out = try? await AI.complete(.dictation, system: Prompts.cleanup(s, context: ctx),
+                                                     user: Prompts.cleanupRequest(heard: [("en_US", q, 0.9)], merged: q, target: t, context: ctx))
+                    print("\(ctx.rawValue) (\(name)) →", (out ?? "FAILED").replacingOccurrences(of: "\n", with: " ⏎ "))
                 }
                 exit(0)
             }
@@ -138,9 +168,31 @@ extension AppDelegate {
             for q in ["weather", "weather tokyo", "weather in new york", "weathering", "天気 大阪", "translate good morning", "forecast for paris"] {
                 print(q, "→", LauncherController.modeWithText(q).map { "\($0.0) / \($0.1)" } ?? "no")
             }
-            for (id, title) in [("com.mitchellh.ghostty", ""), ("com.google.Chrome", "Inbox - Gmail"), ("com.google.Chrome", "ChatGPT"), ("com.apple.Safari", "Apple")] {
-                let app = NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
-                print(id, title, "→", app.map { Prompts.WritingContext(.auto, app: $0, title: title).rawValue } ?? "(not running)")
+            // Where dictation would go: (bundle ID, app name, category, window title, field) → style.
+            let targets: [(String, String, String, String, String)] = [
+                ("com.mitchellh.ghostty", "Ghostty", "developer-tools", "~/Developer", ""),
+                ("com.openai.codex", "ChatGPT", "developer-tools", "ChatGPT", "Ask anything"),
+                ("com.anthropic.claudefordesktop", "Claude", "productivity", "Claude", ""),
+                ("com.ardia.browser", "Moneybag", "", "Inbox (3) - Gmail", ""),
+                ("com.ardia.browser", "Moneybag", "", "ChatGPT", ""),
+                ("com.google.Chrome", "Google Chrome", "", "Apple", "Address and search bar"),
+                ("com.apple.Safari", "Safari", "productivity", "Online timeline", ""),
+                ("jp.naver.line.mac", "LINE", "social-networking", "LINE", ""),
+                ("com.tinyspeck.slackmacgap", "Slack", "business", "general", "Message #general"),
+                ("com.microsoft.Outlook", "Microsoft Outlook", "productivity", "Inbox", ""),
+                ("com.apple.mail", "Mail", "productivity", "New Message", "Subject"),
+                ("notion.id", "Notion", "productivity", "Plans", ""),
+                ("com.apple.Notes", "Notes", "productivity", "Notes", ""),
+                ("com.microsoft.Word", "Microsoft Word", "productivity", "Essay.docx", ""),
+                ("com.spotify.client", "Spotify", "music", "Spotify", "Search"),
+                ("com.example.newchat", "Chatter", "social-networking", "Chatter", ""),
+                ("com.example.tasks", "Tasks", "productivity", "Today", "Task name"),
+                ("com.apple.dt.Xcode", "Xcode", "developer-tools", "Launcher.swift", ""),
+                ("com.example.game", "Game", "games", "Game", ""),
+            ]
+            for (id, name, cat, title, field) in targets {
+                let t = Prompts.Target(bundleID: id, name: name, category: cat, title: title, field: field)
+                print(name, "·", title, field.isEmpty ? "" : "· [\(field)]", "→", Prompts.WritingContext.guess(t, browser: Prompts.Target.browsers.contains(id)).rawValue)
             }
             exit(0)
         }
@@ -210,6 +262,23 @@ extension AppDelegate {
                 w.orderFrontRegardless()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.6))
                 if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) { hv.cacheDisplay(in: hv.bounds, to: rep); images.append(rep) }
+                if stage == .expanded, let k = args.firstIndex(of: "--click"), k + 1 < args.count {
+                    // Clicks a strip button (stop or cancel) the way the mouse would, and says what dictation did.
+                    let g = island.geometry
+                    // The buttons sit at the right of the first detail, under the band (bottom-aligned with the words).
+                    let right = size.width / 2 + g.expandedSize.width / 2 - (IslandModel.expandedInset + (g.hasNotch ? 12 : 0)) - 16
+                    let x = args[k + 1] == "stop" ? right : right - 32 - 8
+                    let top = g.topInset + (g.hasNotch ? g.notchHeight + 6 : 16 + 28)
+                    let p = NSPoint(x: x, y: size.height - top - island.detailHeight + 16)
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                            w.sendEvent(e)
+                        }
+                        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                    }
+                    print("clicked", args[k + 1], "at", p, "→ phase", island.dictation.phase, "handsFree", island.dictation.handsFree)
+                }
                 w.orderOut(nil)
             }
             for (n, rep) in images.enumerated() {

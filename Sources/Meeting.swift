@@ -23,7 +23,7 @@ import ScreenCaptureKit
     var elapsed: TimeInterval = 0
     var summary = ""
     var note: String?
-    var language = DictationLanguage.english
+    var language = DictationLanguage.both
     /// The meeting's name (editable in the meeting window); it names the saved file too.
     var name = ""
     private(set) var fileURL: URL?
@@ -34,8 +34,8 @@ import ScreenCaptureKit
     @ObservationIgnored private var system: SystemAudioCapture?
     @ObservationIgnored private let meRoute = AudioRoute()
     @ObservationIgnored private let othersRoute = AudioRoute()
-    @ObservationIgnored private var meT: LiveTranscriber? { didSet { meRoute.target = meT } }
-    @ObservationIgnored private var othersT: LiveTranscriber? { didSet { othersRoute.target = othersT } }
+    @ObservationIgnored private var meT: MixedTranscriber? { didSet { meRoute.target = meT } }
+    @ObservationIgnored private var othersT: MixedTranscriber? { didSet { othersRoute.target = othersT } }
     @ObservationIgnored private var ticker: Timer?
     /// Which recording the audio being started belongs to (a stop or a new start makes late starts stand down).
     @ObservationIgnored private var session = UUID()
@@ -47,7 +47,7 @@ import ScreenCaptureKit
 
     init(store: Store) {
         self.store = store
-        language = store.settings.meetingLanguage == .japanese ? .japanese : .english
+        language = store.settings.meetingLanguage
     }
 
     var isRunning: Bool { phase == .recording || phase == .paused }
@@ -229,14 +229,24 @@ import ScreenCaptureKit
         }
     }
 
-    private func startTranscribers() async {
-        let id = language == .japanese ? "ja_JP" : "en_US"
-        guard SpeechModels.shared.isInstalled(id) else {
-            note = "Download the \(SpeechModels.name(id)) speech model in Settings › Dictation."
-            return
+    /// The languages listened for: one, or (mixed) your dictation languages, each with its own recognizer.
+    private var locales: [String] {
+        switch language {
+        case .english, .japanese: language.locales
+        case .both:
+            store.settings.listenLocales.count > 1 ? store.settings.listenLocales : DictationLanguage.both.locales
         }
-        let me = LiveTranscriber(locale: Locale(identifier: id))
-        let others = LiveTranscriber(locale: Locale(identifier: id))
+    }
+
+    private func startTranscribers() async {
+        let wanted = locales
+        let ready = wanted.filter { SpeechModels.shared.isInstalled($0) }
+        if let missing = wanted.first(where: { !ready.contains($0) }) {
+            note = "Download the \(SpeechModels.name(missing)) speech model in Settings › Dictation."
+        }
+        guard !ready.isEmpty else { return }
+        let me = MixedTranscriber(locales: ready)
+        let others = MixedTranscriber(locales: ready)
         for (t, isMe) in [(me, true), (others, false)] {
             t.onFinal = { [weak self] text in Task { @MainActor in self?.add(text, me: isMe) } }
             t.onVolatile = { [weak self] text in
@@ -249,15 +259,15 @@ import ScreenCaptureKit
         meT = me
         othersT = others
         let words = store.settings.dictionary
-        Task { try? await me.start(context: words) }
-        Task { try? await others.start(context: words) }
+        me.start(context: words)
+        others.start(context: words)
     }
 
     private func stopTranscribers() async {
         let ts = [meT, othersT].compactMap { $0 }
         meT = nil
         othersT = nil
-        for t in ts { _ = await t.finish() }
+        for t in ts { await t.finish() }
         volatileMe = ""
         volatileOthers = ""
     }
@@ -458,7 +468,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
 /// Hands audio from a capture thread to the current transcriber (which can change mid-meeting).
 final class AudioRoute: @unchecked Sendable {
     private let lock = NSLock()
-    private var _target: LiveTranscriber?
+    private var _target: MixedTranscriber?
     private var _paused = false
     private var _muted = false
     /// Switched off in the meeting window (that side isn't transcribed).
@@ -466,7 +476,7 @@ final class AudioRoute: @unchecked Sendable {
         get { lock.withLock { _muted } }
         set { lock.withLock { _muted = newValue } }
     }
-    var target: LiveTranscriber? {
+    var target: MixedTranscriber? {
         get { lock.withLock { _target } }
         set { lock.withLock { _target = newValue } }
     }
@@ -476,7 +486,7 @@ final class AudioRoute: @unchecked Sendable {
     }
 
     func send(_ buf: AVAudioPCMBuffer) {
-        let t: LiveTranscriber? = lock.withLock { _paused || _muted ? nil : _target }
+        let t: MixedTranscriber? = lock.withLock { _paused || _muted ? nil : _target }
         t?.append(buf)
     }
 }
