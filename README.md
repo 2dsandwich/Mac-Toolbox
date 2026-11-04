@@ -10,8 +10,10 @@ A launcher for macOS that does a lot more than launch. Press ⌘Space and type: 
 - **Dictation (⌥Space or Fn)** — hold to talk, tap for hands-free. Speak English, Japanese or any mix; it's transcribed on device, cleaned up (fillers, self-corrections, lists) for wherever you're typing, and pasted at the cursor.
 - **Meetings (⌘4)** — records your mic and the Mac's sound, transcribes live, writes notes afterwards, and lets you ask questions about it. A floating window that stays out of screen shares.
 - **Clock (⌘5)** — focus sessions, several timers and stopwatches at once, and alarms.
-- **Dynamic notch** — what's going on (music, timers, meetings, dictation) around the notch, with a drag-to-arrange order it remembers.
-- **Also** — calculator, translate, weather for any place, sticky notes, a per-app volume mixer, an All Apps grid, and your stats.
+- **Ask (Tab in the empty bar)** — a quick AI answer, with web sources and follow-ups. It only opens on Tab with nothing typed.
+- **Dynamic notch** — what's going on (music with synced lyrics, timers, meetings, dictation, your next calendar event) around the notch, with a drag-to-arrange order it remembers. Swipe down to open, sideways to skip songs.
+- **Windows** — halves, quarters, thirds, maximize, centre and next display on ⌃⌥ + arrows (editable), or by typing "left half". "quit other apps" and "hide other apps" too.
+- **Also** — calculator, translate, weather for any place, calendar, sticky notes, a per-app volume mixer, an All Apps grid, and your stats.
 
 ## Requirements
 
@@ -29,7 +31,7 @@ It signs with your Apple Development identity when you have one, so permissions 
 
 ## Permissions
 
-MONEY! asks for what each feature needs: Accessibility (to paste and to read selected text), Microphone (dictation and meetings), Screen Recording (text from screen and meeting audio), Location (local weather) and Automation (now playing in Music and Spotify).
+MONEY! asks for what each feature needs: Accessibility (to paste and to read selected text), Microphone (dictation and meetings), Screen Recording (text from screen and meeting audio), Location (local weather), Calendars (upcoming events) and Automation (now playing in Music and Spotify).
 
 ## AI
 
@@ -37,4 +39,4 @@ Polishing dictation, meeting notes and translation can use Apple's on-device mod
 
 ## Privacy
 
-Clipboard history, meetings, notes and stats stay on your Mac (`~/Library/Application Support/MONEY`). Nothing is sent anywhere except to the AI service you pick and the public APIs behind the live answers (Open-Meteo, Frankfurter, CoinGecko, holidays-jp, ipify, and Apple's iTunes Search for song credits).
+Clipboard history, meetings, notes and stats stay on your Mac (`~/Library/Application Support/MONEY`). Nothing is sent anywhere except to the AI service you pick and the public APIs behind the live answers (Open-Meteo, Frankfurter, CoinGecko, holidays-jp, ipify, Apple's iTunes Search for song credits, and LRCLIB for lyrics of the song playing, only while lyrics are on).
