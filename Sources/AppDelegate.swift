@@ -112,6 +112,7 @@ import SwiftUI
         let s = store.settings
         let keys = [("launcher", s.launcherHotKey), ("clipboard", s.clipboardHotKey), ("switcher", s.switcherHotKey), ("copilot", s.copilotHotKey),
                     ("dictation", s.dictationEnabled ? s.dictationHotKey : .none), ("command", s.dictationEnabled ? s.commandHotKey : .none)]
+            + WindowLayout.allCases.map { ("window-\($0.rawValue)", s.windowLayouts ? $0.hotKey(s) : .none) }
         let wanted = keys.map { "\($0.0)=\($0.1.keyCode)/\($0.1.modifiers)" }.joined(separator: ";")
         guard force || wanted != registered else { return }
         registered = wanted
@@ -128,6 +129,9 @@ import SwiftUI
             hk.register(s.commandHotKey, released: { [weak self] in self?.dictation.released(.command) }) { [weak self] in
                 self?.dictation.pressed(.command)
             }
+        }
+        if s.windowLayouts {
+            for l in WindowLayout.allCases { hk.register(l.hotKey(s)) { WindowMover.shared.perform(l) } }
         }
         if !s.switcherHotKey.isEmpty, !s.switcherHotKey.hasShift {
             hk.register(s.switcherHotKey.withShift) { [weak self] in self?.launcher.switcherPressed(backward: true) }

@@ -372,6 +372,7 @@ private struct HotkeysPane: View {
                 Text("The switcher opens with the previous app selected. Keep holding the modifier and tap the key again to move down (add ⇧ to move up), then let go to switch. Let go without moving and it stays open: pick with ↑↓ and Return.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            WindowHotkeysSection(store: store)
             Section {
                 Button("Open Keyboard Shortcuts…") {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension")!)

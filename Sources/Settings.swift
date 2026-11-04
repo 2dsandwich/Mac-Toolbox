@@ -229,6 +229,9 @@ struct Settings: Codable, Equatable {
     var clipboardHotKey = HotKey.clipboardDefault
     var switcherHotKey = HotKey.switcherDefault
     var holdToSwitch = true
+    /// Rectangle-style window hotkeys; `windowHotKeys` only holds the ones changed from their defaults.
+    var windowLayouts = true
+    var windowHotKeys: [String: HotKey] = [:]
 
     // Appearance (defaults match the Moneybag ⌘T popup)
     var width: Double = 700

@@ -61,7 +61,10 @@ struct ToolInfo {
 
     /// Random results (passwords, dice) stay put while the popup is open.
     private static var stable: [String: [Answer]] = [:]
-    static func reset() { stable = [:] }
+    static func reset() {
+        stable = [:]
+        WindowCommands.popupOpened()
+    }
 
     /// What's playing, with controls (also the top of the empty popup).
     static func mediaAnswer() -> Answer {
@@ -94,7 +97,7 @@ struct ToolInfo {
     }
 
     private static let handlers: [(ToolGroup?, (String, String, Settings) -> [Answer])] = [
-        (nil, help), (nil, alarm), (.text, textTools), (.weather, weather), (.system, system), (.generators, generators), (.colors, colors),
+        (nil, help), (nil, alarm), (.text, textTools), (.weather, weather), (.system, system), (.system, WindowCommands.answers), (.generators, generators), (.colors, colors),
         (.colors, bases), (.dates, timestamps), (.dates, dates), (.time, timeZones), (.currency, currency), (.units, units),
         (.calculator, calculator), (.dates, moon), (.dates, holidays),
     ]
