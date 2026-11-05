@@ -602,7 +602,7 @@ private struct ReceiptRow: View {
         .padding(.vertical, PanelLayout.gap)
         .frame(minHeight: 48)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(AskCards.outline)
+        .background(AskCards.well)
         .animation(.easeOut(duration: 0.2), value: receipt.undone)
     }
 }
