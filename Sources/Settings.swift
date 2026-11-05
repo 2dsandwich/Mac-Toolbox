@@ -196,6 +196,42 @@ enum NotchKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// What the open notch shows left of the hardware notch, at menu-bar height (one or two of these).
+enum BandItem: String, Codable, CaseIterable, Identifiable {
+    case battery, time, date, weather, event, cpu, memory, network, wifi, privacy, disk
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .battery: "Battery"
+        case .time: "Time"
+        case .date: "Date"
+        case .weather: "Weather"
+        case .event: "Next event"
+        case .cpu: "CPU"
+        case .memory: "Memory"
+        case .network: "Network speed"
+        case .wifi: "Wi-Fi"
+        case .privacy: "Microphone and camera in use"
+        case .disk: "Free disk space"
+        }
+    }
+    /// The most room it takes beside the notch (the notch opens wider to fit two).
+    var width: CGFloat {
+        switch self {
+        case .battery: 58
+        case .time: 58
+        case .date: 60
+        case .weather: 46
+        case .event: 64
+        case .cpu, .memory: 58
+        case .network: 56
+        case .wifi: 84
+        case .privacy: 36
+        case .disk: 70
+        }
+    }
+}
+
 /// Groups of search-bar answers that can be switched off.
 enum ToolGroup: String, Codable, CaseIterable, Identifiable {
     case calculator, units, currency, weather, time, dates, calendar, text, generators, colors, system, emoji, translate, define
@@ -317,6 +353,8 @@ struct Settings: Codable, Equatable {
     var notchHideInFullScreen = true
     /// Let the notch appear in screenshots, recordings and screen sharing.
     var notchInCaptures = false
+    /// Left of the notch while it's open: one or two glances.
+    var notchBand: [BandItem] = [.battery]
     var notchOrder: [NotchKind] = [.media, .timer, .meeting, .focus, .stopwatch, .message, .event]
     /// The closed notch's order for each mix of activities you've dragged into place.
     var notchArrangements: [String: [String]] = [:]

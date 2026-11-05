@@ -17,9 +17,10 @@ struct IslandGeometry: Equatable {
     var compactSize: CGSize
     var expandedSize: CGSize
 
-    /// Room for the closed notch at its widest, and the open one with every column of tiles (or the camera).
+    /// Room for the closed notch at its widest, and the open one with every column of tiles (or the camera), with two
+    /// glances in the band.
     var panelSize: CGSize {
-        CGSize(width: max(expandedSize.width + CGFloat(Self.maxColumns) * (Self.tileWidth + Self.gap), compactSize.width + 460) + 48,
+        CGSize(width: max(expandedSize.width + 200 + CGFloat(Self.maxColumns) * (Self.tileWidth + Self.gap), compactSize.width + 460) + 48,
                height: expandedSize.height + CGFloat(Self.maxRows) * Self.rowHeight + topInset + 24)
     }
     static let rowHeight: CGFloat = 52
@@ -44,10 +45,14 @@ struct IslandGeometry: Equatable {
                                   seedSize: CGSize(width: width, height: height), compactSize: CGSize(width: width + 150, height: height),
                                   expandedSize: CGSize(width: max(400, width + 200), height: height + 112))
         }
-        let frame = (NSScreen.main ?? NSScreen.screens.first)?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        return IslandGeometry(hasNotch: false, notchHeight: 32, screenFrame: frame, centerX: frame.midX, topInset: 5,
-                              seedSize: CGSize(width: 64, height: 32), compactSize: CGSize(width: 190, height: 32),
-                              expandedSize: CGSize(width: 380, height: 124))
+        return plain((NSScreen.main ?? NSScreen.screens.first)?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900))
+    }
+
+    /// A screen without a notch: a pill just under the top edge.
+    static func plain(_ frame: NSRect) -> IslandGeometry {
+        IslandGeometry(hasNotch: false, notchHeight: 32, screenFrame: frame, centerX: frame.midX, topInset: 5,
+                       seedSize: CGSize(width: 64, height: 32), compactSize: CGSize(width: 190, height: 32),
+                       expandedSize: CGSize(width: 380, height: 124))
     }
 }
 
@@ -69,7 +74,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
     /// The open notch shows the front camera as a mirror (the camera runs only while it shows).
     var camera = false { didSet { if !camera { CameraMirror.shared.stop() } } }
-    /// Opened by hovering the bare notch with nothing running: the clock, the battery and the camera button.
+    /// Opened by hovering the bare notch with nothing running: the idle home (time, next event, weather, quick starts).
     var idleOpen = false
     /// A tile tapped in the open notch: it takes the main spot until the notch closes.
     var focus: Slot?
@@ -249,9 +254,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var slots: [Slot] {
         var out: [Slot] = activities.contains(.media) ? [.media] : []
         out += compactOrder.filter { $0 != .media && $0 != .dictation }
-        // Dictation's waveform sits in the strip beside the notch; while it listens, its words (and hands-free, its
-        // buttons) come first, above the music and the rest.
-        let listening = [.starting, .listening].contains(dictation.phase)
+        // Dictation's waveform sits in the strip beside the notch; while it listens (and polishes), its words (and
+        // hands-free, its buttons) come first, above the music and the rest. Polishing kept them first: the notch
+        // closes as it starts, and the player used to swap in under the closing shape.
+        let listening = [.starting, .listening, .processing].contains(dictation.phase)
         if activities.contains(.dictation), out.isEmpty || listening { out.insert(.dictation, at: 0) }
         // A tapped tile goes first (dictation that's listening keeps the lead).
         if let focus, out.first != .dictation || !listening, let k = out.firstIndex(of: focus) { out.insert(out.remove(at: k), at: 0) }
@@ -273,7 +279,27 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Space between the open notch's content and the shape's sides (past the ears).
     var sideInset: CGFloat { Self.expandedInset + (geometry.hasNotch ? 12 : 0) }
     /// The first thing's width in the open notch.
-    var mainWidth: CGFloat { geometry.expandedSize.width - 2 * sideInset }
+    var mainWidth: CGFloat { openWidth - 2 * sideInset }
+    /// Each side of the band: the room the buttons on the right or the glances on the left need, whichever is more.
+    var bandLane: CGFloat {
+        let items = bandItems
+        return max(Self.bandButtons, items.map(\.width).reduce(0, +) + CGFloat(max(0, items.count - 1)) * Self.bandGap)
+    }
+    /// The glances left of the notch (Settings › Notch).
+    var bandItems: [BandItem] { bandOverride ?? Array(Store.shared.settings.notchBand.prefix(2)) }
+    /// `--island-snapshot --band a,b`: other glances without touching the saved settings.
+    var bandOverride: [BandItem]?
+    static let bandButtons: CGFloat = 2 * IslandView.rowButton + IslandGeometry.gap
+    static let bandGap: CGFloat = 12
+    /// Kept clear between the band and the camera housing, on each side. The housing reaches a couple of points past
+    /// the gap the menu bar leaves (`auxiliaryTopLeftArea`/`…RightArea`), so this leaves a real 10 pt.
+    static let notchClearance: CGFloat = 12
+    /// The open notch's width before tiles: the base, or wider so each side of the band clears the camera housing.
+    var openWidth: CGFloat {
+        let g = geometry
+        let middle = g.hasNotch ? g.seedSize.width + 2 * Self.notchClearance : Self.bandGap
+        return max(g.expandedSize.width, middle + 2 * (sideInset + bandLane))
+    }
     /// The band at the top of the open notch (beside the notch, at menu-bar height), and where the content starts.
     var bandHeight: CGFloat { geometry.hasNotch ? geometry.notchHeight : 32 }
     var bandTop: CGFloat { geometry.hasNotch ? 0 : 8 }
@@ -317,7 +343,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             if case .failed = dictation.phase { 48 } else {
                 max(dictation.preview.isEmpty ? 0 : dictationTextHeight, dictationControls ? 32 : 0)
             }
-        case nil: 56 // the clock, opened with nothing running
+        case nil: IslandView.artBig // the idle home, opened with nothing running (as tall as the player)
         }
     }
 
@@ -433,7 +459,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .expanded:
             // The band, then the first thing with the tiles beside it (wider before taller), or the mirror.
             let content = camera ? cameraHeight : max(detailHeight, tilesHeight)
-            return CGSize(width: geometry.expandedSize.width + (camera ? 0 : tilesWidth), height: contentTop + content + Self.expandedInset)
+            return CGSize(width: openWidth + (camera ? 0 : tilesWidth), height: contentTop + content + Self.expandedInset)
         }
     }
 
@@ -675,7 +701,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 
     func expand(haptic: Bool = true) {
         guard stage == .compact || stage == .seed else { return }
-        if hiding { hiding = false; generation += 1 } // opened again while closing: the close is called off
+        // Called off: a close under way, and the steps of a `show()` still to come (they used to land a moment later and
+        // close the notch again, so dictation starting hands-free opened, closed and opened).
+        hiding = false
+        generation += 1
         if haptic { self.haptic() }
         lastInteraction = Date()
         withAnimation(islandSpring) {
@@ -746,6 +775,15 @@ final class IslandPanel: NSPanel {
     var mouseOverride: NSPoint?
     func trackOnce() { track() }
     var notchRect: NSRect { shapeRect() }
+    /// Off-screen snapshots: the pointer checks stop, so nothing brings the real panel forward.
+    func freeze() {
+        frozen = true
+        tracker?.invalidate()
+        tracker = nil
+        moveMonitors.forEach(NSEvent.removeMonitor)
+        moveMonitors = []
+    }
+    private var frozen = false
     private var clickMonitor: Any?
     private var moveMonitors: [Any] = []
     private var hoverSince: Date?
@@ -868,7 +906,7 @@ final class IslandPanel: NSPanel {
 
     /// A new Space came in: the notch, left behind on the old one, comes over and fades in.
     private func followSpace() {
-        guard model.stage != .hidden, !panel.isOnActiveSpace else { return }
+        guard !frozen, model.stage != .hidden, !panel.isOnActiveSpace else { return }
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
@@ -899,7 +937,7 @@ final class IslandPanel: NSPanel {
     /// Near the notch the pointer is checked 20 times a second. Farther off, there's only a check a second plus a
     /// look at each pointer move, which brings back the fast checks the moment it comes near (so hovering isn't slower).
     private func setTracking(fast: Bool) {
-        guard tracker == nil || self.fast != fast else { return }
+        guard !frozen, tracker == nil || self.fast != fast else { return }
         self.fast = fast
         tracker?.invalidate()
         let t = Timer(timeInterval: fast ? 1.0 / 20.0 : 1, repeats: true) { [weak self] _ in
@@ -941,6 +979,7 @@ final class IslandPanel: NSPanel {
 
     /// Clicks only land on the island itself; hovering it for a moment expands it.
     private func track() {
+        guard !frozen else { return }
         let mouse = mouseOverride ?? NSEvent.mouseLocation
         if model.stage != .hidden { followSpace() }
         if model.stage == .hidden {
@@ -1196,6 +1235,8 @@ struct IslandView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .top) { ClosedLyricLine(model: model) }
         .environment(\.colorScheme, .dark)
+        // The first words open the notch for them (dictation doesn't report each word itself).
+        .onChange(of: model.dictation.preview.isEmpty) { _, _ in model.refresh() }
     }
 
     // MARK: Compact: something on each side of the notch
@@ -1300,7 +1341,8 @@ struct IslandView: View {
             case .processing: Image(systemName: "mic.fill").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
             case .done: Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.green)
             case .failed: Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundStyle(.yellow)
-            default: MiniWave(levels: model.dictation.levels)
+            case .starting, .listening: MiniWave(levels: model.dictation.levels)
+            case .idle: EmptyView() // on its way out: nothing new flashes up as it fades
             }
         case .toast:
             if let t = model.toast { Image(systemName: t.symbol).font(.system(size: 13, weight: .semibold)).foregroundStyle(t.color) }
@@ -1395,8 +1437,11 @@ struct IslandView: View {
                             .frame(width: model.mainWidth)
                             .offset(x: first == .media ? model.pull.width : 0)
                             .contextMenu { promoteMenu(first) }
+                            .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.08)), removal: .opacity.animation(.easeOut(duration: 0.1))))
                     } else {
-                        idleClock.frame(width: model.mainWidth)
+                        // Something starting from here (dictation from its button) takes over without the two overlapping.
+                        idleHome.frame(width: model.mainWidth)
+                            .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.08)), removal: .opacity.animation(.easeOut(duration: 0.1))))
                     }
                     if !model.tiles.isEmpty { tileGrid }
                 }
@@ -1413,10 +1458,8 @@ struct IslandView: View {
                 if let d = drag, let plan = arrangement() {
                     closedPreview(model.layout(for: Array(plan.order.prefix(IslandModel.compactMax))), hole: plan.near ? d.slot : nil, faded: plan.near ? nil : d.slot)
                         .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
-                } else if model.dictationInStrip {
-                    dictationStrip
                 } else {
-                    band.transition(.opacity)
+                    band
                 }
             }
             .padding(.top, model.bandTop)
@@ -1433,20 +1476,90 @@ struct IslandView: View {
         }
     }
 
-    /// Nothing running: the time and the date.
-    private var idleClock: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { ctx in
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(ctx.date, format: .dateTime.hour().minute())
-                    .font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit()
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-                Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
-                    .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
-                Spacer(minLength: 0)
+    /// Nothing running: the time and date with what's next today, the weather, and on the button lane four quick starts
+    /// (dictate, record a meeting, a timer, the clipboard). With Music or Spotify open but stopped, the last song, to
+    /// play again. As tall as the player.
+    private var idleHome: some View {
+        let b = Self.rowButton
+        let app = NSApp.delegate as? AppDelegate
+        let weather = BandData.shared.weather
+        return VStack(alignment: .leading, spacing: 0) {
+            TimelineView(.everyMinute) { ctx in
+                HStack(alignment: .center, spacing: 12) {
+                    Text(ctx.date, format: .dateTime.hour().minute())
+                        .font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(.white)
+                        .contentTransition(.numericText())
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
+                            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+                        if let e = BandData.nextToday {
+                            HStack(spacing: 6) {
+                                Circle().fill(Color(nsColor: e.color)).frame(width: 7, height: 7)
+                                Text(e.title).foregroundStyle(.white.opacity(0.85))
+                                Text(e.start > ctx.date ? e.start.formatted(date: .omitted, time: .shortened) : "Now").foregroundStyle(.white.opacity(0.55))
+                            }
+                            .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+                        }
+                    }
+                    .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if let w = weather {
+                        VStack(alignment: .trailing, spacing: 1) {
+                            HStack(spacing: 6) {
+                                Image(systemName: w.symbol).font(.system(size: 15, weight: .medium))
+                                Text("\(w.temp)°").font(.system(size: 20, weight: .semibold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            Text("\(w.hi)° / \(w.lo)°").font(.system(size: 10.5, weight: .medium).monospacedDigit()).foregroundStyle(.white.opacity(0.55))
+                        }
+                        .transition(.opacity)
+                    }
+                }
             }
-            .frame(maxHeight: .infinity)
+            .frame(height: 44)
+            Spacer(minLength: 0)
+            HStack(spacing: IslandGeometry.gap) {
+                if let last = NowPlaying.shared.last { lastSong(last) }
+                Spacer(minLength: 0)
+                RoundButton(symbol: "mic.fill", tint: nil, size: b) { model.dictation.startHandsFree() }.help("Dictate")
+                RoundButton(symbol: "record.circle", tint: nil, size: b) {
+                    let m = model.meeting
+                    if !m.isRunning, m.phase != .summarizing { m.reset(); m.start() }
+                    app?.showMeetingWindow()
+                }
+                .help("Record a Meeting")
+                RoundButton(symbol: "timer", tint: nil, size: b) { model.collapse(); app?.launcher.show(.timer) }.help("Timer")
+                RoundButton(symbol: "doc.on.clipboard", tint: nil, size: b) { model.collapse(); app?.launcher.show(.clipboard) }.help("Clipboard")
+            }
+            .frame(height: b)
         }
+        .frame(height: Self.artBig)
+        .animation(.easeOut(duration: 0.25), value: weather?.temp)
+        .onAppear { BandData.shared.watch(.weather, true) }
+        .onDisappear { BandData.shared.watch(.weather, false) }
+    }
+
+    /// The song from before the player stopped: its art (tap to play it again) and its name.
+    private func lastSong(_ s: NowPlaying.Last) -> some View {
+        Button { NowPlaying.shared.play(s) } label: {
+            HStack(spacing: 10) {
+                AlbumArt(image: s.artwork, corner: 8, note: 11)
+                    .frame(width: Self.rowButton, height: Self.rowButton)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.4))
+                        Image(systemName: "play.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                    }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(s.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white)
+                    Text(s.artist).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                }
+                .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .help("Play in \(s.appID == "com.spotify.client" ? "Spotify" : "Music")")
     }
 
     /// The tiles beside the first thing, two to a column. Tap one to bring it to the front (with all its controls);
@@ -1621,54 +1734,55 @@ struct IslandView: View {
         }
     }
 
-    /// The band beside the notch (at menu-bar height) while nothing else needs it: the battery left of the notch, the
-    /// camera button right of it, in the lane every other button ends on.
+    /// The band beside the notch, at menu-bar height: the glances from Settings left of the notch and the settings and
+    /// camera buttons right of it; while dictating, the waveform (a spinner while it polishes) and the mic in the same
+    /// two lanes, crossing over in place. Each lane stops well short of the camera housing.
     private var band: some View {
-        let g = model.geometry
-        // Two equal sides with the hardware notch's width between them, so the gap sits right over the notch.
-        return HStack(spacing: 0) {
-            BatteryGlance().frame(maxWidth: .infinity, alignment: .leading)
-            Color.clear.frame(width: g.hasNotch ? g.seedSize.width + IslandGeometry.gap : 0)
-            HStack(spacing: IslandGeometry.gap) {
-                RoundButton(symbol: "gearshape", tint: nil, size: Self.rowButton) {
-                    model.collapse()
-                    (NSApp.delegate as? AppDelegate)?.showSettings(pane: .notch)
-                }
-                .help("Settings")
-                if CameraMirror.available {
-                    RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
-                        withAnimation(islandSpring) { model.camera.toggle() }
-                    }
-                    .help(model.camera ? "Close Mirror" : "Mirror")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.horizontal, model.sideInset)
-        .frame(height: model.bandHeight)
-    }
-
-    /// Dictation in the band beside the notch (at menu-bar height) while the notch is open: the waveform (a spinner
-    /// while it polishes) left of the notch, its controls right. The words go underneath.
-    private var dictationStrip: some View {
-        let g = model.geometry
+        let lane = model.bandLane
+        let dictating = model.dictationInStrip
         let d = model.dictation
         let polishing = d.phase == .processing
-        return HStack(spacing: 8) {
+        return HStack(spacing: 0) {
             ZStack(alignment: .leading) {
-                if polishing {
+                if !dictating {
+                    HStack(spacing: IslandModel.bandGap) {
+                        ForEach(model.bandItems) { BandGlance(item: $0) }
+                    }
+                    .transition(.opacity)
+                } else if polishing {
                     PolishSpinner().transition(.scale(scale: 0.4).combined(with: .opacity))
                 } else {
-                    Waveform(levels: Array(d.levels.suffix(14)), active: d.phase == .listening)
+                    Waveform(levels: Array(d.levels.suffix(Int((lane + 2.5) / 5.5))), active: d.phase == .listening)
                         .transition(.scale(scale: 0.6, anchor: .leading).combined(with: .opacity))
                 }
             }
-            Spacer(minLength: g.hasNotch ? g.seedSize.width : 0)
-            if !polishing {
-                Image(systemName: d.mode == .command ? "wand.and.stars" : "mic.fill")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
+            .frame(width: lane, alignment: .leading)
+            Spacer(minLength: 0)
+            ZStack(alignment: .trailing) {
+                if !dictating {
+                    HStack(spacing: IslandGeometry.gap) {
+                        RoundButton(symbol: "gearshape", tint: nil, size: Self.rowButton) {
+                            model.collapse()
+                            (NSApp.delegate as? AppDelegate)?.showSettings(pane: .notch)
+                        }
+                        .help("Settings")
+                        if CameraMirror.available {
+                            RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
+                                withAnimation(islandSpring) { model.camera.toggle() }
+                            }
+                            .help(model.camera ? "Close Mirror" : "Mirror")
+                        }
+                    }
+                    .transition(.opacity)
+                } else if !polishing {
+                    Image(systemName: d.mode == .command ? "wand.and.stars" : "mic.fill")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
+                        .transition(.opacity)
+                }
             }
+            .frame(width: lane, alignment: .trailing)
         }
+        .animation(.easeInOut(duration: 0.22), value: dictating)
         .animation(.spring(duration: 0.35, bounce: 0.2), value: polishing)
         .padding(.horizontal, model.sideInset)
         .frame(height: model.bandHeight)

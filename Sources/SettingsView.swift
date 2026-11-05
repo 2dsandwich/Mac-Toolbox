@@ -1714,6 +1714,7 @@ private struct NotchPane: View {
             store.settings.notchLyricsOpen = d.notchLyricsOpen
             store.settings.notchLyricLine = d.notchLyricLine
             store.settings.notchInCaptures = d.notchInCaptures
+            store.settings.notchBand = d.notchBand
             store.settings.notchHideInFullScreen = d.notchHideInFullScreen
             store.settings.notchHoverExpand = d.notchHoverExpand
             store.settings.notchHoverDelay = d.notchHoverDelay
@@ -1742,6 +1743,20 @@ private struct NotchPane: View {
                 Toggle("Lyric line under the closed notch", isOn: $store.settings.notchLyricLine)
                     .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
                 Toggle("Upcoming events", isOn: $store.settings.notchEvents)
+            }
+            .disabled(!store.settings.notchEnabled)
+            Section("Beside the notch when open") {
+                Picker("Left of the notch", selection: Binding(get: { store.settings.notchBand.first ?? .battery }, set: { item in
+                    store.settings.notchBand = [item] + store.settings.notchBand.dropFirst().filter { $0 != item }
+                })) {
+                    ForEach(BandItem.allCases) { Text($0.title).tag($0) }
+                }
+                Picker("Beside it", selection: Binding(get: { store.settings.notchBand.dropFirst().first }, set: { item in
+                    store.settings.notchBand = Array(store.settings.notchBand.prefix(1)) + (item.map { [$0] } ?? [])
+                })) {
+                    Text("Nothing").tag(BandItem?.none)
+                    ForEach(BandItem.allCases.filter { $0 != store.settings.notchBand.first }) { Text($0.title).tag(Optional($0)) }
+                }
             }
             .disabled(!store.settings.notchEnabled)
             Section("Upcoming events") {
