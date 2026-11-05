@@ -655,17 +655,47 @@ struct AlarmDraft: Equatable {
         return min(duration, position + Date().timeIntervalSince(updated))
     }
 
+    /// Spotify and Music announce every play, pause and new song, and the workspace announces them opening and
+    /// quitting: those drive the updates. The poll is only a safety net (a seek, a missed notice), and stops when
+    /// neither app is open.
     func start() {
-        guard poller == nil else { return }
+        guard !started else { return }
+        started = true
+        let dnc = DistributedNotificationCenter.default()
+        for name in ["com.spotify.client.PlaybackStateChanged", "com.apple.Music.playerInfo"] {
+            dnc.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        }
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+                guard id == Self.spotifyID || id == Self.musicID else { return }
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        }
         refresh()
-        let t = Timer(timeInterval: 2, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
-        t.tolerance = 0.5
+    }
+
+    @ObservationIgnored private var started = false
+    private static let spotifyID = "com.spotify.client", musicID = "com.apple.Music"
+
+    /// Every 3 s while playing (keeps lyrics right after a seek), every 15 s while paused, none with both apps closed.
+    private func schedulePoll(open: Bool) {
+        let every: TimeInterval? = !open ? nil : playing ? 3 : 15
+        guard every != poller?.timeInterval || (every == nil) != (poller == nil) else { return }
+        poller?.invalidate()
+        poller = nil
+        guard let every else { return }
+        let t = Timer(timeInterval: every, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
+        t.tolerance = every / 4
         RunLoop.main.add(t, forMode: .common)
         poller = t
     }
 
     private static func running(_ id: String) -> Bool {
-        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == id }
+        !NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty
     }
 
     /// Off the main thread, so a busy Music (an iCloud sync, a beachball) can't freeze the launcher, the hotkeys or the
@@ -676,7 +706,8 @@ struct AlarmDraft: Equatable {
     func refresh() {
         guard !demo else { return }
         // Only ask apps that are already open (asking would launch them).
-        let spotify = Self.running("com.spotify.client"), music = Self.running("com.apple.Music")
+        let spotify = Self.running(Self.spotifyID), music = Self.running(Self.musicID)
+        defer { schedulePoll(open: spotify || music) }
         guard spotify || music else { return apply(nil, source: nil) }
         guard !asking else { return }
         asking = true
@@ -686,6 +717,7 @@ struct AlarmDraft: Equatable {
                 MainActor.assumeIsolated {
                     self?.asking = false
                     self?.apply(info, source: source)
+                    self?.schedulePoll(open: true) // playing or paused now decides the next poll
                 }
             }
         }
@@ -727,23 +759,32 @@ struct AlarmDraft: Equatable {
         guard !frozen else { return }
         let wasPlaying = playing, wasTitle = title
         let started = info.map { $0.first == "playing" } ?? false
+        // Only what changed is written: every write redraws whatever shows the song, and most polls change nothing.
+        // The position moves on by itself between polls (`livePosition`), so it's only corrected when it drifted.
         let change = { [self] in
             if let f = info, f.count >= 7 {
-                playing = f[0] == "playing"
-                title = f[1]
-                artist = f[2]
-                album = f[3]
-                position = Double(f[5].replacingOccurrences(of: ",", with: ".")) ?? 0
-                duration = Double(f[6].replacingOccurrences(of: ",", with: ".")) ?? 0
-                updated = Date()
-                appID = source
+                let nowPlaying = f[0] == "playing"
+                let pos = Double(f[5].replacingOccurrences(of: ",", with: ".")) ?? 0
+                let dur = Double(f[6].replacingOccurrences(of: ",", with: ".")) ?? 0
+                let newSong = title != f[1] || artist != f[2]
+                if newSong || nowPlaying != playing || abs(pos - livePosition) > 1 {
+                    position = pos
+                    updated = Date()
+                }
+                if playing != nowPlaying { playing = nowPlaying }
+                if title != f[1] { title = f[1] }
+                if artist != f[2] { artist = f[2] }
+                if album != f[3] { album = f[3] }
+                if duration != dur { duration = dur }
+                if appID != source { appID = source }
                 loadArtwork(url: f[4], source: source)
                 lookUpCredits()
-            } else {
+            } else if !title.isEmpty || playing || appID != nil {
                 playing = false
                 title = ""
                 artist = ""
                 artwork = nil
+                artKey = "" // the same song coming back loads its artwork again
                 appID = nil
             }
         }
@@ -752,9 +793,14 @@ struct AlarmDraft: Equatable {
         if wasPlaying != playing || wasTitle != title { clockChange { onChange?() } }
     }
 
+    /// Compiled once per script and kept (only ever run on `queue`).
+    nonisolated(unsafe) private static var compiled: [String: NSAppleScript] = [:]
+
     nonisolated private static func ask(_ script: String) -> [String]? {
         var err: NSDictionary?
-        guard let out = NSAppleScript(source: script)?.executeAndReturnError(&err).stringValue, err == nil, !out.isEmpty else { return nil }
+        let s = compiled[script] ?? NSAppleScript(source: script)
+        compiled[script] = s
+        guard let out = s?.executeAndReturnError(&err).stringValue, err == nil, !out.isEmpty else { return nil }
         return out.components(separatedBy: "||")
     }
 
