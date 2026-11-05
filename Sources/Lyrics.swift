@@ -51,12 +51,14 @@ import SwiftUI
 
     /// The current song's timed lines. Empty when it has none: plain lyrics have no timing, so they aren't shown.
     private(set) var cues: [Cue] = []
-    /// A new song's lines are on their way: the lyrics face stays up (empty) instead of flipping to the player and back.
+    /// A new song's lines are on their way (the player shows meanwhile; the face comes up only once there are lines).
     private(set) var loading = false
     /// Changes with each song's lines, so a view starts afresh rather than scrolling from the last song's place.
     private(set) var version = 0
-    /// Lines to show, or about to be.
-    var hasLines: Bool { !cues.isEmpty || loading }
+    /// Lines to show. Never just the hope of some: a song without lyrics never flashes the face up and away.
+    var hasLines: Bool { !cues.isEmpty }
+    /// When the lines last changed (a new song): the reel spins in only when the face opens, not as songs change.
+    @ObservationIgnored private(set) var changed = Date.distantPast
     /// Scrolled through the lyrics face: the line (fractional) in its middle. Nil follows the song; back by itself 5 s after.
     private(set) var browse: Double?
     @ObservationIgnored private var browseEnd: Task<Void, Never>?
@@ -118,8 +120,8 @@ import SwiftUI
 
     private func show(_ e: Entry, _ song: Song) {
         let lines = e.instrumental ? [] : e.synced.map { Self.parse($0, duration: song.duration) } ?? []
-        // None after all: the face folds back into the player as one move.
-        withAnimation(lines.isEmpty && loading ? islandSpring : nil) {
+        // Lines found after the song started: the face opens onto them as one move.
+        withAnimation(!lines.isEmpty && loading ? islandSpring : nil) {
             loading = false
             cues = lines
             newLines()
@@ -419,6 +421,7 @@ import SwiftUI
 
     private func newLines() {
         version += 1
+        changed = Date()
         stopBrowsing()
     }
 
@@ -511,6 +514,7 @@ struct LyricLines: View {
         // A fresh position from the player as the face opens, so the first line starts on time; the reel spins in.
         .onAppear {
             NowPlaying.shared.refresh()
+            guard Date().timeIntervalSince(lyrics.changed) > 1 else { return }
             spin = 14
             DispatchQueue.main.async { withAnimation(reelSpin) { spin = 0 } }
         }
