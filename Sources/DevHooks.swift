@@ -406,21 +406,24 @@ extension AppDelegate {
             islandController.freeze()
             typealias S = Battery.State
             let states: [(String, S?)] = [
-                ("on battery 80%", S(pct: 80)), ("on battery 45%", S(pct: 45)), ("low 18%", S(pct: 18)), ("critical 7%", S(pct: 7)),
-                ("charging 35%", S(pct: 35, charging: true, plugged: true)), ("charging 92%", S(pct: 92, charging: true, plugged: true)),
-                ("plugged, held at 80%", S(pct: 80, plugged: true)), ("full, plugged", S(pct: 100, plugged: true, charged: true)),
-                ("Low Power Mode 55%", S(pct: 55, lowPower: true)), ("Low Power Mode 15%", S(pct: 15, lowPower: true)),
+                ("on battery 100%", S(pct: 100)), ("on battery 90%", S(pct: 90)), ("on battery 50%", S(pct: 50)), ("low 18%", S(pct: 18)),
+                ("low 10%", S(pct: 10)), ("charging 50%", S(pct: 50, charging: true, plugged: true)),
+                ("charging 90%", S(pct: 90, charging: true, plugged: true)), ("charging 100%", S(pct: 100, charging: true, plugged: true)),
+                ("plugged, held at 90%", S(pct: 90, plugged: true)), ("full, plugged", S(pct: 100, plugged: true, charged: true)),
+                ("Low Power Mode 50%", S(pct: 50, lowPower: true)), ("Low Power Mode 10%", S(pct: 10, lowPower: true)),
                 ("real: " + (Battery.shared.state?.detail ?? "no battery"), Battery.shared.state),
             ]
             let view = VStack(alignment: .leading, spacing: 10) {
                 ForEach(states.indices, id: \.self) { k in
                     HStack(spacing: 16) {
-                        BatteryGlance(fixed: states[k].1).frame(width: 70, alignment: .leading)
+                        BatteryGlance(fixed: states[k].1).frame(width: 50, alignment: .leading)
+                        // Three times as big, to see the cut-out.
+                        BatteryGlance(fixed: states[k].1).scaleEffect(3, anchor: .leading).frame(width: 110, height: 42, alignment: .leading)
                         Text(states[k].0).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
                     }
                 }
             }
-            .padding(16).frame(width: 360, alignment: .leading).background(Color.black).environment(\.colorScheme, .dark)
+            .padding(16).frame(width: 420, alignment: .leading).background(Color.black).environment(\.colorScheme, .dark)
             let hv = NSHostingView(rootView: view)
             hv.frame = NSRect(origin: .zero, size: hv.fittingSize)
             let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: hv.fittingSize), styleMask: .borderless, backing: .buffered, defer: false)
@@ -471,6 +474,24 @@ extension AppDelegate {
                 print(String(format: "%6.2f–%6.2f", c.time, c.end), c.text == nil ? "dots" : "line, \(w.count) words",
                       w.map { String(format: "%.2f", $0.start) }.joined(separator: " "),
                       w.isEmpty ? "" : "| words rejoined match: \(w.map(\.text).joined().trimmingCharacters(in: .whitespaces) == c.text)")
+            }
+            exit(0)
+        }
+        if args.contains("--lyrics-timing-test") {
+            // Made-up song: when each line's words finish filling against its time on screen (short gaps, long rests, a
+            // break, a long line in a short gap, Japanese), and the pace taken from the song.
+            let lrc = "[00:10.00]Short line here\n[00:12.50]Another short one\n[00:15.00]Then a much longer line that keeps on going for a while\n[00:18.00]Quick\n[00:20.00]A line before a long rest\n[00:34.00]Back after the rest\n[00:37.00]\n[00:52.00]After the instrumental break\n[00:55.50]これは日本語の歌詞の行です\n[00:59.00]Last line of the song"
+            let lines = [(10.0, "Short line here"), (12.5, "Another short one"), (15.0, "Then a much longer line that keeps on going for a while"), (18.0, "Quick"), (20.0, "A line before a long rest"), (34.0, "Back after the rest"), (37.0, ""), (52.0, "After the instrumental break"), (55.5, "これは日本語の歌詞の行です"), (59.0, "Last line of the song")]
+            print(String(format: "pace: %.2f syllables a second", Lyrics.singingRate(lines.map { (time: $0.0, text: $0.1) }, songEnd: 65)))
+            let cues = Lyrics.parse(lrc, duration: 65)
+            for (k, c) in cues.enumerated() {
+                let next = k + 1 < cues.count ? cues[k + 1].time : 65
+                if let t = c.text {
+                    print(String(format: "%5.2f–%5.2f (%4.1f s) fill ends %5.2f (%4.1f s, %3.0f%% of the window), %4.1f syllables", c.time, next, next - c.time,
+                                 c.end, c.end - c.time, (c.end - c.time) / (next - c.time) * 100, Lyrics.syllables(t)), "|", t.count, "chars")
+                } else {
+                    print(String(format: "%5.2f–%5.2f dots", c.time, c.end))
+                }
             }
             exit(0)
         }
@@ -635,7 +656,7 @@ extension AppDelegate {
             // `--karaoke-frames` the lyrics face across a line change.
             let m = NowPlaying.shared
             // The notch's own first steps (seed, then closed) land before a hook picks the stage it starts from.
-            if ["--open-frames", "--song-frames", "--eq-frames", "--karaoke-frames"].contains(where: args.contains) {
+            if ["--open-frames", "--song-frames", "--eq-frames", "--karaoke-frames", "--lyrics-scroll-frames", "--lyrics-click", "--cpu-test"].contains(where: args.contains) {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.5))
             }
             if args.contains("--open-frames") {
@@ -669,6 +690,103 @@ extension AppDelegate {
                 island.stage = .compact
                 island.contentVisible = true
                 islandFrames(args, args[i + 1] + "-eq.png", total: 720, every: 40, height: 40, columns: 2, [])
+                exit(0)
+            }
+            if let k = args.firstIndex(of: "--cpu-test"), k + 1 < args.count {
+                // This test process's CPU over 10 s with the song playing, in the off-screen window: `closed` (the closed
+                // notch with its lyric line) or `face` (the open lyrics face), and how often the karaoke line drew.
+                let face = args[k + 1] == "face"
+                island.lastInteraction = .distantFuture
+                island.stage = face ? .expanded : .compact
+                island.contentVisible = true
+                island.lyricsOverride = face
+                m.position = 62
+                m.updated = Date()
+                let (w, _) = islandWindow(args)
+                RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+                func cpu() -> Double {
+                    var u = rusage()
+                    getrusage(RUSAGE_SELF, &u)
+                    return Double(u.ru_utime.tv_sec + u.ru_stime.tv_sec) + Double(u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1e6
+                }
+                let c0 = cpu(), t0 = Date(), d0 = karaokeDraws
+                RunLoop.main.run(until: t0.addingTimeInterval(10))
+                let secs = Date().timeIntervalSince(t0)
+                print(String(format: "%@: %.1f%% CPU over %.1f s, karaoke drew %.0f times a second", args[k + 1], (cpu() - c0) / secs * 100, secs,
+                             Double(karaokeDraws - d0) / secs))
+                w.orderOut(nil)
+                exit(0)
+            }
+            // The lyrics face's lines: `--lyrics-scroll-frames` a trackpad scroll sent to the off-screen window (it should
+            // move the lines, not swipe) and the return to the line being sung 5 s later; `--lyrics-click` a click on the
+            // line under the one being sung, which should seek the stand-in player there.
+            if args.contains("--lyrics-scroll-frames") || args.contains("--lyrics-click") {
+                island.lastInteraction = .distantFuture
+                island.stage = .expanded
+                island.contentVisible = true
+                island.lyricsOverride = true
+                var skipped: [Bool] = []
+                island.skip = { skipped.append($0) }
+                final class Got: @unchecked Sendable { let lock = NSLock(); var list: [String] = [] }
+                let got = Got()
+                m.appID = "com.spotify.client"
+                m.fakePlayer = { script in got.lock.withLock { got.list.append(script) }; return true }
+                m.position = 80
+                m.updated = Date()
+                let size = island.geometry.panelSize
+                let x = size.width / 2 - island.shapeSize.width / 2 + island.sideInset + 60
+                let middle = island.geometry.topInset + island.contentTop + IslandView.rowButton + 10 + (IslandView.lyricsHeight - IslandView.rowButton - 10) / 2
+                if args.contains("--lyrics-click") {
+                    let (w, hv) = islandWindow(args)
+                    RunLoop.main.run(until: Date().addingTimeInterval(1))
+                    var frames: [(String, NSBitmapImageRep)] = []
+                    let crop = NSRect(x: size.width / 2 - 300, y: hv.isFlipped ? 0 : size.height - 220, width: 600, height: 220)
+                    func grab(_ label: String) {
+                        if let rep = hv.bitmapImageRepForCachingDisplay(in: crop) { hv.cacheDisplay(in: crop, to: rep); frames.append((label, rep)) }
+                    }
+                    grab("before")
+                    let p = NSPoint(x: x, y: size.height - (middle + 36))
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                            w.sendEvent(e)
+                        }
+                        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                    }
+                    for ms in [100, 250, 600] {
+                        RunLoop.main.run(until: Date().addingTimeInterval(ms == 100 ? 0.1 : ms == 250 ? 0.15 : 0.35))
+                        grab("\(ms) ms after the click")
+                    }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                    print(String(format: "clicked at depth %.0f → song at %.2f, line %d", middle + 36, m.position, Lyrics.shared.index(at: Lyrics.shared.playhead(Date()))))
+                    for s in got.lock.withLock({ got.list }) { print("player got:", s) }
+                    w.orderOut(nil)
+                    try? Self.contactSheet(frames, columns: 2).flatMap { $0.representation(using: .png, properties: [:]) }?
+                        .write(to: URL(fileURLWithPath: args[i + 1] + "-lyrics-click.png"))
+                    exit(0)
+                }
+                // Finger travel up the trackpad (later lines), 12 events of 8 pt, as a real scroll sends them.
+                func scroll(_ w: NSWindow) {
+                    let top = NSScreen.screens.first?.frame.maxY ?? 0
+                    for k in 0..<14 {
+                        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: k == 0 || k == 13 ? 0 : -8, wheel2: 0, wheel3: 0) else { continue }
+                        cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                        cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: k == 0 ? 1 : k == 13 ? 4 : 2)
+                        let at = w.convertPoint(toScreen: NSPoint(x: x, y: size.height - middle))
+                        cg.location = CGPoint(x: at.x, y: top - at.y)
+                        cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(w.windowNumber))
+                        cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(w.windowNumber))
+                        if let e = NSEvent(cgEvent: cg) {
+                            if k == 1 { print("scroll event: window", e.window == nil ? "none" : "set", "at", e.locationInWindow, "precise", e.hasPreciseScrollingDeltas, "dy", e.scrollingDeltaY) }
+                            w.sendEvent(e)
+                        }
+                    }
+                    print(String(format: "after scrolling: browsing line %.2f, stage %@, skipped %@", Lyrics.shared.browse ?? -1, "\(island.stage)", "\(skipped)"))
+                }
+                islandFrames(args, args[i + 1] + "-lyrics-scroll.png", total: 6600, every: 300, height: 220, columns: 4, [
+                    (300, { if let w = NSApp.windows.first(where: { $0 is IslandPanel && $0.frame.minX < -1000 }) { scroll(w) } }),
+                ])
+                print("browsing at the end:", Lyrics.shared.browse.map { "\($0)" } ?? "no (back on the line being sung)")
                 exit(0)
             }
             if args.contains("--karaoke-frames") {
@@ -1141,8 +1259,9 @@ extension AppDelegate {
                 }
             }
             .background(Color(white: 0.85))
-        let hv = NSHostingView(rootView: root)
-        let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+        let hv = FirstMouseHostingView(rootView: root)
+        let w = IslandPanel(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+        w.onScroll = { [weak c = islandController] e, at in c?.scrolled(e, at: at) ?? false }
         w.contentView = hv
         w.orderFrontRegardless()
         return (w, hv)

@@ -11,40 +11,36 @@ import SwiftUI
 // What the open notch adds beside the hardware notch and behind its camera button: glances (the battery and others from
 // Settings), and a mirror from the front camera. The camera runs only while the mirror shows.
 
-/// The battery as iPhone shows it with its percentage: the number inside the battery, cut out of it, over the level;
-/// green while charging (a bolt beside it), a plug beside it when plugged in but not charging, red when low on
-/// battery, yellow in Low Power Mode. Nothing on Macs without one.
+/// The battery as macOS draws it with its percentage: the level filling a rounded body, the number (and a bolt while
+/// charging, a plug when plugged in but not charging) in black inside it, as if cut out; green while charging,
+/// red when low on battery, yellow in Low Power Mode. Nothing on Macs without one.
 struct BatteryGlance: View {
     /// `--battery-states`: drawn for a made-up state.
     var fixed: Battery.State?
 
     var body: some View {
         if let b = fixed ?? Battery.shared.state {
-            HStack(spacing: 3) {
-                Self.icon(b)
-                if b.charging || b.plugged {
-                    Image(systemName: b.charging ? "bolt.fill" : "powerplug.fill").font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-            }
-            .fixedSize()
-            .help(b.detail)
+            Self.icon(b).fixedSize().help(b.detail)
         }
     }
 
-    /// The battery body filled to its level, the percentage knocked out of it so it reads over either part.
     static func icon(_ b: Battery.State) -> some View {
-        let w: CGFloat = 27, h: CGFloat = 13
+        let w: CGFloat = 28, h: CGFloat = 13
         let color: Color = b.lowPower ? .yellow : b.low ? .red : b.charging ? .green : .white
         let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
         return HStack(spacing: 1) {
             ZStack(alignment: .leading) {
                 shape.fill(Color.white.opacity(0.35))
                 Rectangle().fill(color).frame(width: w * CGFloat(min(100, max(0, b.pct))) / 100)
-                // Cut out of the battery: on the black notch, that's black.
-                Text("\(b.pct)").font(.system(size: b.pct >= 100 ? 9 : 10, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.black)
-                    .frame(width: w, height: h)
+                HStack(spacing: 0) {
+                    Text("\(b.pct)").font(.system(size: b.pct >= 100 ? 9 : 10, weight: .bold, design: .rounded))
+                    if b.charging || b.plugged {
+                        Image(systemName: b.charging ? "bolt.fill" : "powerplug.portrait.fill").font(.system(size: 7.5, weight: .black))
+                    }
+                }
+                .fixedSize()
+                .foregroundStyle(.black) // on the black notch, the same as cut out
+                .frame(width: w, height: h)
             }
             .frame(width: w, height: h)
             .clipShape(shape)

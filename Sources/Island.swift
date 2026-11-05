@@ -686,9 +686,11 @@ final class IslandPanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     /// Trackpad swipes over the notch; true when the notch took the event.
-    var onScroll: ((NSEvent) -> Bool)?
+    var onScroll: ((NSEvent, NSPoint) -> Bool)?
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .scrollWheel, onScroll?(event) == true { return }
+        // With where it happened in the panel (a test's made-up event has no window yet: its location is on the screen).
+        if event.type == .scrollWheel,
+           onScroll?(event, event.window == nil ? convertPoint(fromScreen: event.locationInWindow) : event.locationInWindow) == true { return }
         super.sendEvent(event)
     }
 }
@@ -749,7 +751,7 @@ final class IslandPanel: NSPanel {
                 self.model.collapse()
             }
         }
-        panel.onScroll = { [weak self] e in self?.scrolled(e) ?? false }
+        panel.onScroll = { [weak self] e, at in self?.scrolled(e, at: at) ?? false }
         // Watched from the start: with nothing running yet the notch is hidden, and hovering it must still open it.
         setTracking(fast: false)
         // Entering or leaving full screen switches Spaces; the window settles a moment later, so look twice.
@@ -803,17 +805,29 @@ final class IslandPanel: NSPanel {
     }
 
     /// Trackpad only (a mouse wheel's clicks would open it by accident), and never the coasting after the fingers lift.
-    private func scrolled(_ e: NSEvent) -> Bool {
+    /// Over the lyrics face's lines, scrolling (mouse wheel too) moves through the song instead, and never swipes.
+    func scrolled(_ e: NSEvent, at local: NSPoint) -> Bool {
+        let g = model.geometry
+        // On the screen: the panel sits at `panelFrame` (tests send it to an off-screen copy of the same size).
+        let p = NSPoint(x: g.panelFrame.minX + local.x, y: g.panelFrame.minY + local.y)
+        let depth = g.screenFrame.maxY - g.topInset - p.y
+        let left = g.centerX - model.shapeSize.width / 2 + model.sideInset
+        if !model.swiping, model.stage == .expanded, model.slots.first == .media, model.lyricsFace,
+           depth > model.contentTop + IslandView.rowButton + 10, depth < model.contentTop + IslandView.lyricsHeight,
+           p.x > left, p.x < left + model.mainWidth {
+            // A mouse wheel moves a line a click, eased; a trackpad follows the fingers.
+            withAnimation(e.hasPreciseScrollingDeltas ? nil : .easeOut(duration: 0.2)) {
+                Lyrics.shared.scroll(by: -e.scrollingDeltaY / (e.hasPreciseScrollingDeltas ? 26 : 1))
+            }
+            return true
+        }
         guard e.hasPreciseScrollingDeltas, e.momentumPhase.isEmpty else { return model.swiping }
         let phase: IslandModel.SwipePhase
         if e.phase.contains(.began) { phase = .began } else if e.phase.contains(.ended) || e.phase.contains(.cancelled) { phase = .ended } else { phase = .changed }
         // Finger travel, whatever the scrolling direction is set to.
         let k: CGFloat = e.isDirectionInvertedFromDevice ? 1 : -1
-        let g = model.geometry
-        let p = NSEvent.mouseLocation
-        let depth = g.screenFrame.maxY - g.topInset - p.y
         // The player is the first thing, left of the tiles.
-        let playerRight = g.centerX - model.shapeSize.width / 2 + model.sideInset + model.mainWidth
+        let playerRight = left + model.mainWidth
         let over = depth < model.contentTop + model.detailHeight + 8 && p.x < playerRight + 4
         let took = model.swipe(phase, dx: e.scrollingDeltaX * k, dy: e.scrollingDeltaY * k, overPlayer: over)
         if took { setTracking(fast: true) }
@@ -1663,7 +1677,7 @@ struct IslandView: View {
         return ZStack(alignment: .topLeading) {
             // Under everything, so lines still fading out never draw over the art growing back.
             if on {
-                LyricLines(lyrics: Lyrics.shared, tint: tint)
+                LyricLines(lyrics: Lyrics.shared, tint: tint, live: model.contentVisible)
                     .id(Lyrics.shared.version) // each song's lines start at their own top
                     .frame(width: w, height: Self.lyricsHeight - b - 10, alignment: .topLeading)
                     .offset(y: b + 10)
@@ -1681,7 +1695,7 @@ struct IslandView: View {
             }
             .frame(width: titleWidth, alignment: .leading)
             .offset(x: textX)
-            EqualizerBars(playing: m.playing, color: tint)
+            EqualizerBars(playing: m.playing && !on, color: tint) // hidden on the lyrics face: resting, not animating
                 .frame(width: w - textX, alignment: .trailing)
                 .offset(x: textX, y: 2)
                 .opacity(on ? 0 : 1)
@@ -1707,7 +1721,7 @@ struct IslandView: View {
     private var lyricsButton: some View {
         let on = model.lyricsFace
         return RoundButton(symbol: on ? "quote.bubble.fill" : "quote.bubble", tint: on ? .white : nil, size: Self.rowButton,
-                           breathing: NowPlaying.shared.playing) {
+                           breathing: NowPlaying.shared.playing && !on) { // the face it opens is already up
             withAnimation(islandSpring) {
                 if model.lyricsOverride != nil { model.lyricsOverride?.toggle() } else { Store.shared.settings.notchLyricsOpen.toggle() }
             }
@@ -2000,34 +2014,74 @@ private struct PlayerTimeline: View {
     }
 }
 
-/// A little equalizer beside the notch while music plays, in the album art's colour; resting while paused. Each bar
-/// springs to a new height five times a second, so it moves smoothly (the old one stepped eight times a second).
-private struct EqualizerBars: View {
+/// A little equalizer beside the notch while music plays, in the album art's colour; resting while paused. Core
+/// Animation moves the bars (a made-up level five times a second, eased, on an 8 s loop), so the app does no work per
+/// frame for it.
+private struct EqualizerBars: NSViewRepresentable {
     let playing: Bool
     var color: Color = .pink
 
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.2, paused: !playing)) { ctx in
-            let tick = Int(ctx.date.timeIntervalSinceReferenceDate * 5)
-            HStack(spacing: 2.5) {
-                ForEach(0..<4, id: \.self) { i in
-                    Capsule().fill(color).frame(width: 3, height: playing ? 4 + 12 * Self.level(i, tick) : 3)
-                }
-            }
-            .frame(width: IslandModel.artSize, height: 18)
-            .opacity(playing ? 1 : 0.5)
-            .animation(.spring(response: 0.28, dampingFraction: 0.62), value: tick)
-            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: playing)
-            .animation(.easeInOut(duration: 0.45), value: color) // in step with the cover fading to the next song's
-        }
-    }
+    func makeNSView(context: Context) -> Bars { Bars() }
+    func updateNSView(_ view: Bars, context: Context) { view.show(playing: playing, color: NSColor(color).cgColor) }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: Bars, context: Context) -> CGSize? { CGSize(width: IslandModel.artSize, height: 18) }
 
-    /// A made-up level for a bar at a tick, never the same twice in a row by much: the middle bars run higher.
-    private static func level(_ bar: Int, _ tick: Int) -> CGFloat {
-        var h = UInt64(truncatingIfNeeded: tick &* 4 &+ bar) &* 0x9E37_79B9_7F4A_7C15
-        h ^= h >> 29
-        let r = CGFloat(h % 1000) / 1000
-        return (bar == 1 || bar == 2 ? 0.35 : 0.15) + r * (bar == 1 || bar == 2 ? 0.65 : 0.6)
+    final class Bars: NSView {
+        private let bars = (0..<4).map { _ in CALayer() }
+        private var playing: Bool?
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            for b in bars {
+                b.cornerRadius = 1.5
+                layer?.addSublayer(b)
+            }
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for (i, b) in bars.enumerated() { b.position = CGPoint(x: bounds.midX + (CGFloat(i) - 1.5) * 5.5, y: bounds.midY) }
+            CATransaction.commit()
+        }
+
+        func show(playing: Bool, color: CGColor) {
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.45) // in step with the cover fading to the next song's
+            for b in bars {
+                b.backgroundColor = color
+                b.opacity = playing ? 1 : 0.5
+            }
+            CATransaction.commit()
+            guard playing != self.playing else { return }
+            self.playing = playing
+            for (i, b) in bars.enumerated() {
+                b.removeAnimation(forKey: "level")
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.4)
+                b.bounds = CGRect(x: 0, y: 0, width: 3, height: playing ? Self.height(i, 0) : 3)
+                CATransaction.commit()
+                guard playing else { continue }
+                let a = CAKeyframeAnimation(keyPath: "bounds.size.height")
+                a.values = (0...40).map { Self.height(i, $0 % 40) }
+                a.timingFunctions = Array(repeating: CAMediaTimingFunction(name: .easeInEaseOut), count: 40)
+                a.duration = 8
+                a.repeatCount = .infinity
+                a.beginTime = CACurrentMediaTime() + 0.4
+                b.add(a, forKey: "level")
+            }
+        }
+
+        /// A made-up height for a bar at a tick, never the same twice in a row by much: the middle bars run higher.
+        private static func height(_ bar: Int, _ tick: Int) -> CGFloat {
+            var h = UInt64(truncatingIfNeeded: tick &* 4 &+ bar) &* 0x9E37_79B9_7F4A_7C15
+            h ^= h >> 29
+            let r = CGFloat(h % 1000) / 1000
+            return 4 + 12 * ((bar == 1 || bar == 2 ? 0.35 : 0.15) + r * (bar == 1 || bar == 2 ? 0.65 : 0.6))
+        }
     }
 }
 

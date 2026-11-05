@@ -57,6 +57,9 @@ import SwiftUI
     private(set) var version = 0
     /// Lines to show, or about to be.
     var hasLines: Bool { !cues.isEmpty || loading }
+    /// Scrolled through the lyrics face: the line (fractional) in its middle. Nil follows the song; back by itself 5 s after.
+    private(set) var browse: Double?
+    @ObservationIgnored private var browseEnd: Task<Void, Never>?
     /// `--island-snapshot --lyrics`: made-up lines, with the line under the closed notch on.
     @ObservationIgnored private(set) var demo = false
     @ObservationIgnored private var current: Song?
@@ -93,7 +96,7 @@ import SwiftUI
         current = song
         if let e = Self.cached(song) { return show(e, song) }
         cues = []
-        version += 1
+        newLines()
         loading = true
         pending = song
         pump()
@@ -119,7 +122,7 @@ import SwiftUI
         withAnimation(lines.isEmpty && loading ? islandSpring : nil) {
             loading = false
             cues = lines
-            version += 1
+            newLines()
         }
     }
 
@@ -226,6 +229,7 @@ import SwiftUI
         lines.sort { $0.time < $1.time }
         let songEnd = duration > 0 ? duration : (lines.last?.time ?? 0) + 8
         guard lines.contains(where: { !wordless($0.text) }) else { return [] }
+        let rate = singingRate(lines, songEnd: songEnd)
         var out: [Cue] = []
         if let first = lines.first(where: { !wordless($0.text) }), first.time >= gapMin { out.append(Cue(time: 0, text: nil, end: first.time)) }
         for (k, l) in lines.enumerated() {
@@ -234,7 +238,7 @@ import SwiftUI
                 guard next - l.time >= gapMin, !out.isEmpty, out.last?.text != nil else { continue }
                 out.append(Cue(time: l.time, text: nil, end: next))
             } else {
-                let cue = timed(l.text, at: l.time, until: next)
+                let cue = timed(l.text, at: l.time, until: next, rate: rate)
                 out.append(cue)
                 // Sung well before the next line (and no blank line says so): dots for the rest.
                 if k + 1 < lines.count, next - cue.end > 9 { out.append(Cue(time: cue.end + 1.5, text: nil, end: next)) }
@@ -255,9 +259,61 @@ import SwiftUI
         text.replacingOccurrences(of: #"<\d+:\d+(?:[.:]\d+)?>"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// One line with each word's time: from its own stamps, else spread over the time it likely takes to sing (each
-    /// word's share by its length; kana and kanji take longer than letters), never past the next line.
-    static func timed(_ raw: String, at time: Double, until next: Double) -> Cue {
+    /// How fast this song is sung, in syllables a second: the middle of its lines' own pace (a line's syllables over the
+    /// time to the next line, leaving out lines followed by a long rest), a little faster since lines rarely fill their
+    /// time; 3 to 6, and 4.5 when the song has too few lines to tell.
+    static func singingRate(_ lines: [(time: Double, text: String)], songEnd: Double) -> Double {
+        func median(_ v: [Double]) -> Double? { v.isEmpty ? nil : v.sorted()[v.count / 2] }
+        let sung = lines.indices.compactMap { k -> (syl: Double, gap: Double)? in
+            guard !wordless(lines[k].text) else { return nil }
+            let gap = (k + 1 < lines.count ? lines[k + 1].time : songEnd) - lines[k].time
+            let syl = syllables(lines[k].text.replacingOccurrences(of: #"<\d+:\d+(?:[.:]\d+)?>"#, with: "", options: .regularExpression))
+            return gap > 0.5 && syl > 0 ? (syl, gap) : nil
+        }
+        guard let typical = median(sung.map(\.gap)), let pace = median(sung.filter { $0.gap <= typical * 1.6 }.map { $0.syl / $0.gap }) else { return 4.5 }
+        return min(6, max(3, pace * 1.15))
+    }
+
+    /// About how many syllables a bit of a line takes to sing: vowel groups in a word written in letters (a final silent
+    /// "e" left out, at least one a word), each kana or Hangul syllable (small kana join the one before), a kanji as
+    /// nearly two, a digit as one.
+    static func syllables(_ s: String) -> Double {
+        var n = 0.0, word: [Unicode.Scalar] = []
+        let vowels = "aeiouyàáâãäåèéêëìíîïòóôõöùúûüýÿæœ".unicodeScalars
+        func endWord() {
+            guard !word.isEmpty else { return }
+            var groups = 0, was = false
+            for u in word {
+                let v = vowels.contains(u)
+                if v && !was { groups += 1 }
+                was = v
+            }
+            if groups > 1, word.last == "e", word.count > 2, !vowels.contains(word[word.count - 2]), word[word.count - 2] != "l" { groups -= 1 }
+            n += Double(max(1, groups))
+            word = []
+        }
+        for u in s.lowercased().unicodeScalars {
+            let v = u.value
+            if CharacterSet.letters.contains(u) && v < 0x3000 {
+                word.append(u)
+                continue
+            }
+            endWord()
+            if (0x3040...0x30FF).contains(v) || (0xAC00...0xD7AF).contains(v) {
+                if !"ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ・".unicodeScalars.contains(u) { n += 1 }
+            } else if (0x3400...0x9FFF).contains(v) {
+                n += 1.7
+            } else if CharacterSet.decimalDigits.contains(u) {
+                n += 1
+            }
+        }
+        endWord()
+        return n
+    }
+
+    /// One line with each word's time: from its own stamps, else spread over the time it likely takes to sing at the
+    /// song's pace (each word's share by its syllables), never past the next line; the rest of the time it stays lit.
+    static func timed(_ raw: String, at time: Double, until next: Double, rate: Double = 4.5) -> Cue {
         let marks = raw.matches(of: #/<(\d+:\d+(?:[.:]\d+)?)>/#)
         if !marks.isEmpty {
             var words: [Word] = []
@@ -276,9 +332,9 @@ import SwiftUI
         }
         let text = raw.trimmingCharacters(in: .whitespaces)
         let parts = tokens(text)
-        let weights = parts.map { p in 1 + p.unicodeScalars.reduce(0.0) { $0 + (wide($1) ? 2.2 : $1.properties.isWhitespace ? 0.3 : 1) } }
+        let weights = parts.map { 0.25 + syllables($0) }
         let total = weights.reduce(0, +)
-        let sung = min(max(0.8, total * 0.07), max(0.6, (next - time) * 0.92))
+        let sung = min(max(0.6, (total - 0.25 * Double(parts.count)) / rate), max(0.5, (next - time) * 0.95))
         var words: [Word] = []
         var t = time
         for (p, w) in zip(parts, weights) {
@@ -301,20 +357,31 @@ import SwiftUI
         return zip(starts, Array(starts.dropFirst()) + [text.endIndex]).map { String(text[$0..<$1]) }
     }
 
-    private static func wide(_ u: Unicode.Scalar) -> Bool {
-        (0x3040...0x30FF).contains(u.value) || (0x3400...0x9FFF).contains(u.value) || (0xAC00...0xD7AF).contains(u.value)
-    }
-
     /// The cue being sung at a time (-1 before the first).
     func index(at t: Double) -> Int { cues.lastIndex { $0.time <= t } ?? -1 }
 
-    /// Where the song is at a moment, moving on from the last poll while it plays.
+    /// Where the song is at a moment, moving on from the last poll while it plays. A poll that finds the song a little
+    /// off (under a second) eases there over half a second rather than jumping the words; a seek jumps.
     func playhead(_ date: Date) -> Double {
         let m = NowPlaying.shared
-        guard m.playing else { return m.position }
-        let p = m.position + date.timeIntervalSince(m.updated) + Self.lead
+        func at(_ r: Reading) -> Double { r.playing ? r.position + date.timeIntervalSince(r.updated) + Self.lead : r.position }
+        let now = Reading(position: m.position, updated: m.updated, playing: m.playing)
+        if now != reading {
+            let off = reading.map(at).map { $0 - at(now) } ?? 0
+            slip = abs(off) < 1 && m.playing ? (off, date) : (0, date)
+            reading = now
+        }
+        let fade = max(0, 1 - date.timeIntervalSince(slip.at) / 0.5)
+        let p = at(now) + slip.by * fade * fade
         return m.duration > 0 ? min(m.duration, p) : p
     }
+    private struct Reading: Equatable {
+        var position: Double
+        var updated: Date
+        var playing: Bool
+    }
+    @ObservationIgnored private var reading: Reading?
+    @ObservationIgnored private var slip: (by: Double, at: Date) = (0, .distantPast)
 
     /// Keeps a view on the cue being sung: woken at each cue's time while playing. The views start it again at every
     /// poll, so a seek or a pause shows up there.
@@ -338,7 +405,7 @@ import SwiftUI
         withAnimation(loading ? islandSpring : nil) {
             loading = false
             cues = none ? [] : Self.parse(lrc, duration: 200)
-            version += 1
+            newLines()
         }
     }
 
@@ -347,7 +414,29 @@ import SwiftUI
         demo = true
         loading = true
         cues = []
+        newLines()
+    }
+
+    private func newLines() {
         version += 1
+        stopBrowsing()
+    }
+
+    /// The lyrics face scrolled by some lines (down the song is positive); it eases back to the line being sung 5 s later.
+    func scroll(by lines: Double) {
+        guard !cues.isEmpty else { return }
+        browse = min(Double(cues.count - 1), max(0, (browse ?? Double(max(0, index(at: playhead(Date()))))) + lines))
+        browseEnd?.cancel()
+        browseEnd = Task {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            withAnimation(islandSettle) { browse = nil }
+        }
+    }
+
+    func stopBrowsing() {
+        browseEnd?.cancel()
+        if browse != nil { browse = nil }
     }
 }
 
@@ -373,39 +462,32 @@ private let lyricMove = Animation.spring(response: 0.5, dampingFraction: 0.82)
     }
 }
 
-/// The open player's lyrics face, after Apple Music: the line being sung big and bright, its words filling in as
-/// they're sung with a soft glow in the cover's colour; the next lines dimmer and smaller under it; past lines drift up
-/// and fade. Long lines wrap. Breaks are dots that fill up over the break.
+/// The open player's lyrics face, after Apple Music: every line of the song in a column, the one being sung in the
+/// middle, big and bright, its words filling in as they're sung with a soft glow in the cover's colour; the others
+/// smaller and dimmer the further they are. Scrolling moves through the song (back to the line being sung 5 s later);
+/// clicking a line plays the song from there. Long lines wrap. Breaks are dots that fill up over the break.
 struct LyricLines: View {
     let lyrics: Lyrics
     var tint: Color
+    /// On screen (the notch open and showing): only then does the line being sung redraw as it goes.
+    var live = true
     @State private var index: Int?
-    @State private var heights: [Int: CGFloat] = [:]
 
-    static let size: CGFloat = 17
-    private static let spacing: CGFloat = 9
+    /// The line being sung, and the rest.
+    static let size: CGFloat = 21
+    static let small: CGFloat = 14
 
     var body: some View {
         let cues = lyrics.cues
         let i = min(index ?? lyrics.index(at: lyrics.playhead(Date())), cues.count - 1)
-        let lo = max(0, i - 1), hi = min(cues.count - 1, max(0, i) + 3)
-        // Up by the lines above the one being sung, so it sits at the top.
-        let top = (lo..<max(lo, i)).reduce(CGFloat(0)) { $0 + (heights[$1] ?? 22) + Self.spacing }
-        VStack(alignment: .leading, spacing: Self.spacing) {
-            if lo <= hi {
-                ForEach(lo...hi, id: \.self) { k in
-                    line(cues[k], k: k, i: i)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights[k] = $0 }
-                }
-            }
+        let focus = lyrics.browse ?? Double(max(0, i))
+        LyricStack(focus: focus) {
+            ForEach(cues.indices, id: \.self) { k in line(cues[k], k: k, i: i, focus: focus) }
         }
-        .padding(.top, 6)
-        .offset(y: -top)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // Lines leaving at the top fade out under the header, never over it; the last ones fade at the bottom.
+        // Lines fade out at the top (under the header, never over it) and at the bottom.
         .mask {
-            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.05),
-                                   .init(color: .black, location: 0.72), .init(color: .clear, location: 1)],
+            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.16),
+                                   .init(color: .black, location: 0.84), .init(color: .clear, location: 1)],
                            startPoint: .top, endPoint: .bottom)
         }
         .clipped()
@@ -414,17 +496,108 @@ struct LyricLines: View {
                 if index == nil { index = i } else if i != index { withAnimation(lyricMove) { index = i } }
             }
         }
+        // A fresh position from the player as the face opens, so the first line starts on time.
+        .onAppear { NowPlaying.shared.refresh() }
+        .onDisappear { lyrics.stopBrowsing() }
     }
 
-    private func line(_ cue: Lyrics.Cue, k: Int, i: Int) -> some View {
-        let now = k == i
+    private func line(_ cue: Lyrics.Cue, k: Int, i: Int, focus: Double) -> some View {
+        let now = k == i, far = abs(Double(k) - focus)
         return Group {
-            if cue.text == nil { GapDots(cue: cue, active: now) } else { KaraokeLine(cue: cue, active: now, tint: tint) }
+            if cue.text == nil { GapDots(cue: cue, active: now && live).scaleEffect(now ? 1 : 0.7, anchor: .leading) }
+            else { KaraokeLine(cue: cue, active: now, live: live, tint: tint) }
         }
+        .modifier(LyricFont(size: now ? Self.size : Self.small))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .scaleEffect(now ? 1 : 0.9, anchor: .leading)
-        .opacity(k < i ? 0 : now ? 1 : k == i + 1 ? 0.42 : 0.2)
-        .blur(radius: k > i + 1 ? 0.6 : 0)
+        .opacity(now ? 1 : max(0.2, 0.6 - 0.18 * far))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // Plays from this line; the column follows at once.
+            NowPlaying.shared.seek(to: cue.time)
+            lyrics.stopBrowsing()
+            withAnimation(lyricMove) { index = k }
+        }
+    }
+}
+
+/// The lines top to bottom, moved so the line at `focus` (fractional while scrolling) sits in the middle.
+private struct LyricStack: Layout {
+    var focus: Double
+    var spacing: CGFloat = 8
+    var animatableData: Double {
+        get { focus }
+        set { focus = newValue }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize { proposal.replacingUnspecifiedDimensions() }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let width = ProposedViewSize(width: bounds.width, height: nil)
+        let heights = subviews.map { $0.sizeThatFits(width).height }
+        guard !heights.isEmpty else { return }
+        var tops: [CGFloat] = [], y: CGFloat = 0
+        for h in heights { tops.append(y); y += h + spacing }
+        func middle(_ k: Int) -> CGFloat { tops[k] + heights[k] / 2 }
+        let k = min(heights.count - 1, max(0, Int(focus.rounded(.down)))), f = CGFloat(focus) - CGFloat(k)
+        let at = k + 1 < heights.count ? middle(k) + (middle(k + 1) - middle(k)) * f : middle(k)
+        for (n, v) in subviews.enumerated() {
+            v.place(at: CGPoint(x: bounds.minX, y: bounds.midY - at + tops[n]), proposal: width)
+        }
+    }
+}
+
+/// The lines' font: its size springs (and the line rewraps) as a line becomes the one being sung.
+private struct LyricFont: ViewModifier, Animatable {
+    var size: CGFloat
+    var animatableData: CGFloat {
+        get { size }
+        set { size = newValue }
+    }
+
+    func body(content: Content) -> some View { content.font(.system(size: size, weight: .bold)).environment(\.lyricSize, size) }
+}
+
+extension EnvironmentValues {
+    /// The lyrics face's font size for a line, for the parts drawn in a hosting view of their own.
+    @Entry var lyricSize: CGFloat = LyricLines.small
+}
+
+/// Drawn in a hosting view of its own: its redraws (30 a second) lay out and commit only itself, never the notch
+/// around it. Clicks go through to the line under it.
+private struct Isolated<Content: View>: NSViewRepresentable {
+    let content: Content
+
+    final class Host: NSHostingView<Content> {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> Host {
+        let h = Host(rootView: content)
+        h.sizingOptions = []
+        return h
+    }
+
+    func updateNSView(_ h: Host, context: Context) { h.rootView = content }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: Host, context: Context) -> CGSize? { proposal.replacingUnspecifiedDimensions() }
+}
+
+/// `--cpu-test`: how many times a karaoke line was drawn.
+nonisolated(unsafe) var karaokeDraws = 0
+
+/// The lyrics face's moving parts: 30 frames a second while on and seen, else none.
+private struct Frames: TimelineSchedule {
+    var on: Bool
+
+    func entries(from start: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
+        var next = start, first = true
+        return AnyIterator {
+            guard on, mode == .normal else {
+                defer { first = false }
+                return first ? start : nil
+            }
+            defer { next += 1.0 / 30 }
+            return next
+        }
     }
 }
 
@@ -442,6 +615,7 @@ private struct Karaoke: TextRenderer {
     var on: Bool
 
     func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        karaokeDraws += 1
         for line in layout {
             for run in line {
                 guard on, let w = run[Sung.self] else { ctx.draw(run); continue }
@@ -466,21 +640,42 @@ private struct Karaoke: TextRenderer {
     }
 }
 
-/// One line of the lyrics face; while it's the one being sung (and the song plays) it redraws every frame.
+/// One line of the lyrics face. While it's the one being sung, a copy of it laid over it (in a hosting view of its
+/// own) carries each word's time and redraws 30 times a second while the song plays and the face is on screen.
 private struct KaraokeLine: View {
     let cue: Lyrics.Cue
     let active: Bool
+    let live: Bool
     var tint: Color
+    @Environment(\.lyricSize) private var size
 
     var body: some View {
-        let text = cue.words.isEmpty ? Text(cue.text ?? "")
-            : cue.words.reduce(Text("")) { Text("\($0)\(Text($1.text).customAttribute(Sung(start: $1.start, end: $1.end)))") }
-        TimelineView(.animation(paused: !active || !NowPlaying.shared.playing)) { ctx in
-            text.font(.system(size: LyricLines.size, weight: .bold))
-                .foregroundStyle(.white)
-                .fixedSize(horizontal: false, vertical: true)
-                .textRenderer(Karaoke(t: Lyrics.shared.playhead(ctx.date), tint: tint, on: active))
-        }
+        Text(verbatim: cue.text ?? "")
+            .foregroundStyle(.white)
+            .fixedSize(horizontal: false, vertical: true)
+            // Swapped with the copy at once, never cross-faded (that showed the line twice as it moved).
+            .animation(nil) { $0.opacity(active ? 0 : 1) }
+            .overlay {
+                if active {
+                    let words = sung, on = live && NowPlaying.shared.playing, tint = tint, size = size
+                    Isolated(content: TimelineView(Frames(on: on)) { ctx in
+                        words.font(.system(size: size, weight: .bold))
+                            .foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textRenderer(Karaoke(t: Lyrics.shared.playhead(ctx.date), tint: tint, on: true))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    })
+                    .transition(.identity)
+                }
+            }
+    }
+
+    /// The line with each word's time on it, in one flat interpolation (nesting a Text per word made every redraw
+    /// resolve the line once per word).
+    private var sung: Text {
+        var s = LocalizedStringKey.StringInterpolation(literalCapacity: 0, interpolationCount: cue.words.count)
+        for w in cue.words { s.appendInterpolation(Text(verbatim: w.text).customAttribute(Sung(start: w.start, end: w.end))) }
+        return cue.words.isEmpty ? Text(verbatim: cue.text ?? "") : Text(LocalizedStringKey(stringInterpolation: s))
     }
 }
 
@@ -491,21 +686,31 @@ private struct GapDots: View {
     let active: Bool
 
     var body: some View {
-        TimelineView(.animation(paused: !active || !NowPlaying.shared.playing)) { ctx in
-            let t = Lyrics.shared.playhead(ctx.date)
-            let p = active ? min(1, max(0, (t - cue.time) / max(1, cue.end - cue.time))) : 0
-            let breathe = active ? 1 + 0.1 * sin(ctx.date.timeIntervalSinceReferenceDate * 2.6) : 1
-            let away = p > 0.94 ? max(0, (1 - p) / 0.06) : 1
-            HStack(spacing: 7) {
-                ForEach(0..<3, id: \.self) { k in
-                    let lit = min(1, max(0, p * 3 - Double(k)))
-                    Circle().fill(Color.white.opacity(0.28 + 0.72 * lit)).frame(width: 9, height: 9)
-                        .scaleEffect(0.8 + 0.2 * lit)
-                }
+        if active {
+            let cue = cue
+            Color.clear.frame(height: 22).overlay {
+                Isolated(content: TimelineView(Frames(on: NowPlaying.shared.playing)) { ctx in Self.dots(cue, at: ctx.date, active: true) })
             }
-            .scaleEffect(breathe * away, anchor: .leading)
-            .frame(height: 22, alignment: .leading)
+            .transition(.identity)
+        } else {
+            Self.dots(cue, at: .now, active: false).transition(.identity)
         }
+    }
+
+    private static func dots(_ cue: Lyrics.Cue, at date: Date, active: Bool) -> some View {
+        let t = Lyrics.shared.playhead(date)
+        let p = active ? min(1, max(0, (t - cue.time) / max(1, cue.end - cue.time))) : 0
+        let breathe = active ? 1 + 0.1 * sin(date.timeIntervalSinceReferenceDate * 2.6) : 1
+        let away = p > 0.94 ? max(0, (1 - p) / 0.06) : 1
+        return HStack(spacing: 7) {
+            ForEach(0..<3, id: \.self) { k in
+                let lit = min(1, max(0, p * 3 - Double(k)))
+                Circle().fill(Color.white.opacity(0.28 + 0.72 * lit)).frame(width: 9, height: 9)
+                    .scaleEffect(0.8 + 0.2 * lit)
+            }
+        }
+        .scaleEffect(breathe * away, anchor: .leading)
+        .frame(maxWidth: .infinity, minHeight: 22, maxHeight: .infinity, alignment: .leading)
     }
 }
 
