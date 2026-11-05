@@ -183,6 +183,7 @@ import SwiftUI
         Names keep their usual spelling in that language. \
         Be as short as the question allows: the answer first, at most 2 sentences (about 50 words; in Japanese about 100 characters), \
         or up to 5 one-line bullets when a list is clearer. Longer only when the user asks for detail. \
+        When one of the cards below fits, always use it: a card doesn't count toward that length, and the text around it stays a sentence at most. \
         No preamble, no headings, no restating the question, no caveats unless they matter, no offers of more help. \
         \(web ? "Search the web whenever the answer could be recent, local, changing or something you aren't sure of (news, prices, scores, weather, schedules, releases, opening hours, people, products, places); answer from memory only for settled facts. Don't say that you are searching. " : "")\
         Today is \(f.string(from: Date())); the user's time zone is \(TimeZone.current.identifier).
