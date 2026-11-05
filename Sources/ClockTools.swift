@@ -386,7 +386,7 @@ struct AlarmDraft: Equatable {
     static let shared = Alarms()
     private static let key = "alarms"
 
-    var list: [Alarm] = [] { didSet { save() } }
+    var list: [Alarm] = [] { didSet { save(); schedule() } }
     var ringing: Alarm?
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var checker: Timer?
@@ -398,7 +398,28 @@ struct AlarmDraft: Equatable {
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: Self.key), let saved = try? JSONDecoder().decode([Alarm].self, from: data) { list = saved }
-        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.check() } }
+        // After sleep or a clock or time-zone change, the next alarm is worked out again.
+        let again = { [weak self] (_: Notification) in MainActor.assumeIsolated { self?.check(); self?.schedule() } }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: again)
+        for name in [Notification.Name.NSSystemClockDidChange, .NSSystemTimeZoneDidChange] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main, using: again)
+        }
+        schedule()
+    }
+
+    /// When the alarm timer will next look (tests).
+    var nextCheck: Date? { checker?.fireDate }
+
+    /// One timer, set for the next alarm (it used to look every second, alarm or not).
+    private func schedule() {
+        checker?.invalidate()
+        checker = nil
+        let times = list.filter(\.enabled).map { ($0.id, $0.next) }
+        guard let when = times.map(\.1).min() else { return }
+        let due = times.filter { $0.1 == when }.map(\.0)
+        let t = Timer(fire: when.addingTimeInterval(0.5), interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fire(due, at: when) }
+        }
         t.tolerance = 0.3
         RunLoop.main.add(t, forMode: .common)
         checker = t
@@ -442,6 +463,22 @@ struct AlarmDraft: Equatable {
     func clearPast() {
         list.removeAll { !$0.enabled }
         onChange?()
+    }
+
+    /// The alarms the timer was set for. macOS can run a background app's timer late, so they still ring if it
+    /// comes up to five minutes after their time (a check for "this exact minute" would miss them).
+    private func fire(_ ids: [UUID], at when: Date) {
+        let now = Date()
+        if now.timeIntervalSince(when) < 300 {
+            for id in ids {
+                guard let i = list.firstIndex(where: { $0.id == id }), list[i].enabled else { continue }
+                if let last = list[i].lastRang, now.timeIntervalSince(last) < 90 { continue }
+                list[i].lastRang = now
+                if list[i].weekdays.isEmpty { list[i].enabled = false }
+                ring(list[i])
+            }
+        }
+        schedule()
     }
 
     private func check() {

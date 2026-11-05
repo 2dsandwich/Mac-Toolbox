@@ -834,6 +834,7 @@ enum Metrics {
     }
 
     func show(_ requested: Scope, prepared: Bool = false) {
+        clipboard.poll() // a copy made just before opening is there even if the watch had slowed down
         let scope = model.resolve(requested)
         let wasShown = isShown
         // While hidden, the card still has its last size. Switch to the new state without animation, and lay it
