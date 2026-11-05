@@ -475,7 +475,7 @@ private struct KaraokeLine: View {
     var body: some View {
         let text = cue.words.isEmpty ? Text(cue.text ?? "")
             : cue.words.reduce(Text("")) { Text("\($0)\(Text($1.text).customAttribute(Sung(start: $1.start, end: $1.end)))") }
-        TimelineView(.animation(paused: !active || !NowPlaying.shared.playing)) { ctx in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !active || !NowPlaying.shared.playing)) { ctx in
             text.font(.system(size: LyricLines.size, weight: .bold))
                 .foregroundStyle(.white)
                 .fixedSize(horizontal: false, vertical: true)
@@ -491,7 +491,7 @@ private struct GapDots: View {
     let active: Bool
 
     var body: some View {
-        TimelineView(.animation(paused: !active || !NowPlaying.shared.playing)) { ctx in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !active || !NowPlaying.shared.playing)) { ctx in
             let t = Lyrics.shared.playhead(ctx.date)
             let p = active ? min(1, max(0, (t - cue.time) / max(1, cue.end - cue.time))) : 0
             let breathe = active ? 1 + 0.1 * sin(ctx.date.timeIntervalSinceReferenceDate * 2.6) : 1
