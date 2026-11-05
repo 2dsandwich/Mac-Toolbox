@@ -122,7 +122,8 @@ import SwiftUI
         Task {
             let shot = withScreen ? await Self.screenshot() : nil
             let system = """
-            You help the user ("Me") with their meetings. "Others" is everyone else on a call, mixed into one voice. \(about) \
+            You help the user ("Me") with their meetings. Other speakers are labelled by name when known; "Others" is everyone else \
+            on a call, mixed into one voice. \(about) \
             Transcripts come from speech recognition and have errors: infer what was meant, never invent facts. \
             \(length) No headings, no preamble, no restating the question, no em dashes. \
             Answer in the language the user asks in (Japanese question, Japanese answer). \
@@ -130,7 +131,12 @@ import SwiftUI
             """
             let user = context + "\n\n---\n\n" + (instruction ?? "My question: \(q)")
             do {
-                let answer = try await AI.complete(.meetingChat, system: system, user: user, imageJPEG: shot)
+                // Streamed, so the answer fades in as it comes (a screenshot needs the one-shot call).
+                let answer = shot == nil
+                    ? try await AI.stream(.meetingChat, system: system, user: user) { partial in
+                        if self.exchanges.indices.contains(index) { self.exchanges[index].answer = partial }
+                    }
+                    : try await AI.complete(.meetingChat, system: system, user: user, imageJPEG: shot)
                 if exchanges.indices.contains(index) { exchanges[index].answer = answer }
             } catch {
                 if exchanges.indices.contains(index) {
@@ -228,6 +234,7 @@ struct CopilotView: View {
     var opaque = false
     var tab = PageTab.notes
     var chatOpen = false
+    var editing = false
 
     private let inset = PanelLayout.inset
 
@@ -239,7 +246,8 @@ struct CopilotView: View {
             case .idle, .failed:
                 idle
             default:
-                MeetingPage(doc: meeting.doc, recorder: meeting, chat: copilot, outerRadius: ChatLayout.windowRadius, tab: tab, chatOpen: chatOpen)
+                MeetingPage(doc: meeting.doc, recorder: meeting, chat: copilot, outerRadius: ChatLayout.windowRadius, tab: tab, chatOpen: chatOpen,
+                            editing: editing)
                     .id(meeting.doc.id)
             }
         }
@@ -431,101 +439,96 @@ private struct ResizeGrip: View {
     }
 }
 
-/// One inset inside the meeting window; the message box is a capsule, and the window's corners are its radius plus
-/// the inset, so the curves are concentric.
+/// One inset inside the meeting window; the window's corners are its buttons' radius plus the inset, so the curves are
+/// concentric.
 enum ChatLayout {
     static let inset: CGFloat = PanelLayout.inset
-    static let fieldHeight: CGFloat = 40
     /// Concentric with the bar's 32 pt round buttons, one inset in.
     static var windowRadius: CGFloat { 16 + inset }
     /// The chat's colour (MONEY! green rather than the system blue).
     static let tint = Color(red: 0.18, green: 0.72, blue: 0.45)
 }
 
-/// Chat about a meeting (live in the floating window, or a saved one in the popup).
+/// Chat about a meeting, laid out like Ask: the message field on top, the prompts under it, then the thread with the
+/// newest exchange first (your message a grey bubble on the right, the answer plain text that fades in). In a side
+/// panel the field sits where Ask's bar is, so the newest answer is always right under where you typed.
 struct MeetingChat: View {
     let copilot: MeetingCopilot
+    let placeholder: String
+    /// The close button's size and its distance from the panel's corner (concentric with it).
+    var closeSize: CGFloat = 20
+    var closeInset: CGFloat = 8
+    let close: () -> Void
     @State private var question = ""
     @FocusState private var focused: Bool
 
+    private var typed: Bool { !question.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        VStack(spacing: 8) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 10) {
-                        ForEach(copilot.exchanges) { ex in
-                            VStack(spacing: 6) {
-                                HStack {
-                                    Spacer(minLength: 40)
-                                    Text(ex.question)
-                                        .font(.system(size: 13))
-                                        .padding(.horizontal, 12).padding(.vertical, 8)
-                                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(ChatLayout.tint.opacity(0.9)))
-                                        .foregroundStyle(.white)
-                                }
-                                // The answer sits on the panel itself, like a page (no bubble behind it).
-                                Group {
-                                    if let a = ex.answer {
-                                        NotesView(markdown: a, spaced: true).foregroundStyle(ex.failed ? Color.orange : .primary)
-                                    } else {
-                                        ThinkingDots().foregroundStyle(.secondary).frame(height: 18)
-                                    }
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .id(ex.id)
-                        }
-                        Color.clear.frame(height: 1).id("chatEnd")
-                    }
-                    .padding(.horizontal, ChatLayout.inset)
-                    .padding(.top, 8)
-                }
-                .onChange(of: copilot.exchanges.count) { _, _ in withAnimation(.smooth(duration: 0.2)) { proxy.scrollTo("chatEnd", anchor: .bottom) } }
-                .onChange(of: copilot.exchanges.last?.answer) { _, _ in withAnimation(.smooth(duration: 0.2)) { proxy.scrollTo("chatEnd", anchor: .bottom) } }
-            }
-            // Suggestions sit above the message box.
-            ScrollView(.horizontal) {
-                HStack(spacing: 6) {
-                    ForEach(copilot.recipes) { r in
-                        SuggestionChip(title: r.title, on: false) { copilot.run(r) }
-                    }
-                    if copilot.isLive {
-                        SuggestionChip(title: "Screen", on: copilot.useScreen) { copilot.useScreen.toggle() }
-                            .help("Let answers look at your screen")
-                    }
-                }
-                .padding(.horizontal, ChatLayout.inset)
-            }
-            .scrollIndicators(.never)
-            .disabled(copilot.busy)
-            HStack(spacing: 8) {
-                TextField("Message", text: $question)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: PanelLayout.gap) {
+                TextField(placeholder, text: $question)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(.system(size: 13.5))
                     .focused($focused)
                     .onSubmit(send)
-                // Only once something is typed (or while an answer is coming).
-                if copilot.busy || !question.trimmingCharacters(in: .whitespaces).isEmpty {
+                if copilot.busy || typed {
                     Button(action: send) {
                         Image(systemName: copilot.busy ? "ellipsis" : "arrow.up")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(width: ChatLayout.fieldHeight - 12, height: ChatLayout.fieldHeight - 12)
-                            .background(Circle().fill(ChatLayout.tint))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.white)
+                            .frame(width: closeSize, height: closeSize)
+                            .background(Circle().fill(ChatLayout.tint))
                     }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.return, modifiers: .command)
                     .transition(.scale(scale: 0.5).combined(with: .opacity))
                 }
+                Button(action: close) {
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                        .frame(width: closeSize, height: closeSize)
+                        .background(Circle().fill(Color.primary.opacity(0.1)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Close")
             }
-            .padding(.leading, ChatLayout.fieldHeight / 2)
-            .padding(.trailing, 6)
-            .frame(height: ChatLayout.fieldHeight)
-            .background(Capsule().fill(Color.white.opacity(0.07)))
-            .animation(.spring(duration: 0.25, bounce: 0.3), value: copilot.busy || !question.trimmingCharacters(in: .whitespaces).isEmpty)
-            .padding(.horizontal, ChatLayout.inset)
-            .padding(.bottom, ChatLayout.inset)
+            .animation(.spring(duration: 0.25, bounce: 0.3), value: copilot.busy || typed)
+            .padding(.leading, PanelLayout.inset)
+            .padding(.trailing, closeInset)
+            .frame(height: closeSize + closeInset * 2)
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ForEach(copilot.recipes) { r in PromptChip(title: r.title, on: false) { copilot.run(r) } }
+                    if copilot.isLive {
+                        PromptChip(title: "Screen", on: copilot.useScreen) { copilot.useScreen.toggle() }
+                            .help("Let answers look at your screen")
+                    }
+                }
+                .padding(.horizontal, PanelLayout.inset)
+            }
+            .scrollIndicators(.never)
+            .disabled(copilot.busy)
+            .padding(.top, 4)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        ForEach(copilot.exchanges.reversed()) { ex in
+                            ChatTurn(exchange: ex, busy: copilot.busy && ex.id == copilot.exchanges.last?.id)
+                                .transition(.opacity)
+                        }
+                    }
+                    .padding(PanelLayout.inset)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id("thread")
+                }
+                .scrollIndicators(.never)
+                // A new question goes to the top: show it there.
+                .onChange(of: copilot.exchanges.count) { _, _ in proxy.scrollTo("thread", anchor: .top) }
+            }
+            .animation(AssistantView.animates ? .smooth(duration: 0.3) : nil, value: copilot.exchanges.count)
         }
+        .onAppear { focused = true }
     }
 
     /// Return (or ⌘↩) sends the question; ⌘↩ with nothing typed runs the first prompt.
@@ -534,10 +537,61 @@ struct MeetingChat: View {
         if q.isEmpty { if let r = copilot.recipes.first { copilot.run(r) } } else { copilot.ask(q) }
         question = ""
     }
-
 }
 
-private struct SuggestionChip: View {
+/// One exchange, as in Ask: the question as a bubble, then the answer, which dissolves in as it arrives.
+private struct ChatTurn: View {
+    let exchange: MeetingCopilot.Exchange
+    let busy: Bool
+    /// How much of the answer is revealed (see `NotesView.shown`); a turn still being answered starts hidden.
+    @State private var shown: Double
+
+    init(exchange: MeetingCopilot.Exchange, busy: Bool) {
+        self.exchange = exchange
+        self.busy = busy
+        _shown = State(initialValue: busy ? 0 : Self.full(exchange.answer ?? ""))
+    }
+
+    private static func full(_ s: String) -> Double { Double(s.count) + FadeIn.ramp }
+
+    var body: some View {
+        let answer = exchange.answer ?? ""
+        VStack(alignment: .leading, spacing: 10) {
+            Text(exchange.question)
+                .font(.system(size: 13.5))
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.primary.opacity(0.1)))
+                .padding(.leading, 56)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            if exchange.failed {
+                Label(answer, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
+            } else if !answer.isEmpty {
+                NotesView(markdown: answer, spaced: true, shown: shown)
+            } else {
+                ThinkingDots().colorMultiply(.primary).frame(height: 18)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: answer) { old, new in reveal(old, new) }
+    }
+
+    /// Paces the reveal: each arrival takes longer the more it brings, so bursts glide in instead of jumping.
+    private func reveal(_ old: String, _ new: String) {
+        guard AssistantView.animates else { shown = Self.full(new); return }
+        if !new.hasPrefix(old) {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { shown = 0 }
+        }
+        let fresh = Double(new.count - (new.hasPrefix(old) ? old.count : 0))
+        withAnimation(.linear(duration: min(1.4, max(0.35, fresh / 110)))) { shown = Self.full(new) }
+    }
+}
+
+/// A prebuilt prompt, styled like the app's other chips.
+private struct PromptChip: View {
     let title: String
     let on: Bool
     let action: () -> Void
@@ -546,11 +600,11 @@ private struct SuggestionChip: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(on ? Color.white : Color.primary.opacity(0.85))
-                .padding(.horizontal, 11)
-                .frame(height: 28)
-                .background(Capsule().fill(on ? ChatLayout.tint.opacity(0.85) : Color.white.opacity(hover ? 0.14 : 0.08)))
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(on ? ChatLayout.tint : Color.primary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(on ? ChatLayout.tint.opacity(0.2) : Color.primary.opacity(hover ? 0.14 : 0.075)))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -586,26 +640,8 @@ struct ExpandingChat: View {
         // One shape that changes size: the button itself opens into the chat.
         ZStack(alignment: .topLeading) {
             if open {
-                VStack(spacing: 0) {
-                    HStack(spacing: 8) {
-                        Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                        Spacer()
-                        Button { open = false } label: {
-                            Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
-                                .frame(width: closeSize, height: closeSize)
-                                .background(Circle().fill(Color.white.opacity(0.12)))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Close")
-                    }
-                    .padding(.leading, radius)
-                    .padding(.trailing, Self.closeInset)
-                    .padding(.top, Self.closeInset)
-                    .frame(height: closeSize + Self.closeInset * 2, alignment: .top)
-                    MeetingChat(copilot: copilot)
-                }
-                .transition(.opacity.animation(.easeOut(duration: 0.18).delay(0.12)))
+                MeetingChat(copilot: copilot, placeholder: title, closeSize: closeSize, closeInset: Self.closeInset) { open = false }
+                    .transition(.opacity.animation(.easeOut(duration: 0.18).delay(0.12)))
                 resizeGrip
             } else {
                 Button { open = true } label: {
