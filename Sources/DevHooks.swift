@@ -718,6 +718,7 @@ extension AppDelegate {
             if scope == .assistant, args.contains("--demo") {
                 Assistant.shared.demo(busy: args.contains("--busy") || args.contains("--stream"))
                 if args.contains("--first") { Assistant.shared.turns.removeFirst(Assistant.shared.turns.count - 1) } // only the open question
+                if let c = value("--cards") { Assistant.shared.demoCards(c) } // one canned answer with cards (AskCards.demos)
             }
             // Made-up events, never the real calendar ("calendar", "予定"); the real notch stays hidden.
             island.onStage = nil

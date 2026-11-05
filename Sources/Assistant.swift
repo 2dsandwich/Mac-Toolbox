@@ -182,6 +182,8 @@ import SwiftUI
         No preamble, no headings, no restating the question, no offers of more help. \
         \(web ? "Search the web whenever the answer could be recent, local, changing or something you aren't sure of (news, prices, scores, weather, schedules, releases, opening hours, people, products, places); answer from memory only for settled facts. Don't say that you are searching. " : "")\
         Today is \(f.string(from: Date())); the user's time zone is \(TimeZone.current.identifier).
+
+        \(AskCards.prompt)
         """
     }
 
@@ -318,7 +320,7 @@ private struct AssistantTurn: View {
             if turn.failed {
                 Label(turn.answer, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
             } else if !turn.answer.isEmpty {
-                NotesView(markdown: turn.answer, shown: shown)
+                AskAnswer(text: turn.answer, shown: shown)
             } else if busy {
                 StatusLine(status: turn.status)
             }
