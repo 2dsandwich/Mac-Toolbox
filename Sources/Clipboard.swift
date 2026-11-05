@@ -106,12 +106,7 @@ struct Clip: Codable, Identifiable, Equatable {
         if store.settings.clipboardEnabled {
             if timer == nil {
                 lastChange = NSPasteboard.general.changeCount
-                let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.poll() }
-                }
-                t.tolerance = 0.3
-                RunLoop.main.add(t, forMode: .common)
-                timer = t
+                schedule(every: 0.5)
             }
         } else {
             timer?.invalidate()
@@ -120,8 +115,25 @@ struct Clip: Codable, Identifiable, Equatable {
         prune()
     }
 
-    private func poll() {
+    /// Copies only happen while you're using the Mac, so the watch is quick then (every 0.5 s) and slow after 30 s
+    /// with no keyboard or mouse (every 3 s, for apps that copy on their own). Opening the popup checks at once.
+    private func schedule(every interval: TimeInterval) {
+        timer?.invalidate()
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.poll() }
+        }
+        t.tolerance = interval * 0.6
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func poll() {
         let pb = NSPasteboard.general
+        if let t = timer {
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+            let want: TimeInterval = idle > 30 ? 3 : 0.5
+            if t.timeInterval != want { schedule(every: want) }
+        }
         guard pb.changeCount != lastChange else { return }
         lastChange = pb.changeCount
         capture(pb)

@@ -474,6 +474,15 @@ extension AppDelegate {
             }
             exit(0)
         }
+        if args.contains("--alarm-schedule-test") {
+            // Read-only: when the alarm timer is set to look, against when the next enabled alarm is due.
+            let due = Alarms.shared.list.filter(\.enabled).map(\.next).min()
+            let at = Alarms.shared.nextCheck
+            print("enabled alarms:", Alarms.shared.list.filter(\.enabled).count, "| due:", due.map { "\($0)" } ?? "none",
+                  "| timer:", at.map { "\($0)" } ?? "none",
+                  "| ok:", (due == nil && at == nil) || (due != nil && at != nil && abs(at!.timeIntervalSince(due!) - 0.5) < 1))
+            exit(0)
+        }
         if args.contains("--idle-track-test") {
             // Hover the bare notch with a pretend pointer, then move away: it should open, then close all the way.
             // The real panel never comes on screen (no onStage).
