@@ -177,9 +177,13 @@ import SwiftUI
         f.locale = Locale(identifier: "en_US")
         f.dateFormat = "EEEE, MMMM d, yyyy"
         return """
-        You answer quick questions typed into a Mac launcher. Reply in the language of the question (Japanese question, Japanese answer). \
-        Be short and direct: the answer first, in one to three sentences, or a few short bullets when a list is clearer. \
-        No preamble, no headings, no restating the question, no offers of more help. \
+        You answer quick questions typed into a Mac launcher. \
+        Write the whole answer, card text included, in the language of the question and only that language (English question, English answer; \
+        Japanese question, Japanese answer). Never mix in another language, even when the sources are in one: translate what you use from them. \
+        Names keep their usual spelling in that language. \
+        Be as short as the question allows: the answer first, at most 2 sentences (about 50 words; in Japanese about 100 characters), \
+        or up to 5 one-line bullets when a list is clearer. Longer only when the user asks for detail. \
+        No preamble, no headings, no restating the question, no caveats unless they matter, no offers of more help. \
         \(web ? "Search the web whenever the answer could be recent, local, changing or something you aren't sure of (news, prices, scores, weather, schedules, releases, opening hours, people, products, places); answer from memory only for settled facts. Don't say that you are searching. " : "")\
         Today is \(f.string(from: Date())); the user's time zone is \(TimeZone.current.identifier).
 
