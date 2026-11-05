@@ -947,6 +947,7 @@ extension AppDelegate {
         }
 
         if runMeetingHook(args) { return true }
+        if runAskToolsHook(args) { return true }
         if args.contains("--meeting-ai-test") {
             // Two real requests on Haiku with the made-up meeting: its notes, then the follow-up email prompt. Prints both.
             island.onStage = nil

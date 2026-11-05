@@ -179,6 +179,26 @@ struct TaskItem: Codable, Equatable, Identifiable {
         }
     }
 
+    /// Adds one task exactly as given (Ask) and waits for Google, so it comes back with its real id; nil if refused.
+    func add(title: String, notes: String?, due: Date?, list: String?) async -> TaskItem? {
+        guard let target = list ?? lists.first?.id else { return nil }
+        let temp = TaskItem(id: (demo ? "demo-" : "local-") + UUID().uuidString, list: target, title: title, notes: notes, due: due)
+        tasks.insert(temp, at: 0)
+        var made: TaskItem? = demo ? temp : nil
+        var body: [String: Any] = ["title": title]
+        if let notes { body["notes"] = notes }
+        if let due { body["due"] = Self.dueString(due) }
+        await write(undo: { $0.tasks.removeAll { $0.id == temp.id } }) {
+            let data = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(target)/tasks")!, method: "POST", body: body)
+            if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let t = Self.task(json, list: target),
+               let i = self.tasks.firstIndex(where: { $0.id == temp.id }) {
+                self.tasks[i] = t
+                made = t
+            }
+        }
+        return made
+    }
+
     func setDone(_ t: TaskItem, _ done: Bool) {
         guard !t.local, let i = tasks.firstIndex(where: { $0.id == t.id }) else { return }
         tasks[i].done = done

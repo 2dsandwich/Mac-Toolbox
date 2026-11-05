@@ -405,6 +405,8 @@ struct Settings: Codable, Equatable {
     var homeCurrency = "JPY"
     var worldClocks = ["New York", "London", "Los Angeles"]
     var modelTools = ClaudeModel.haiku
+    /// What Ask may look up on this Mac (AskSource raw values); missing ones use the source's default.
+    var askSources: [String: Bool] = [:]
 
     // AI: a service and model per job (Settings › AI). Unset jobs use Apple's on-device model.
     var aiTasks: [String: TaskModel] = [:]

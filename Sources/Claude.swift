@@ -51,6 +51,9 @@ enum Claude {
 
     static var hasKey: Bool { !(apiKey ?? "").isEmpty }
 
+    /// Tests: answers `stream` instead of the API (messages and tools in, blocks and stop reason out).
+    @MainActor static var canned: (([[String: Any]], [[String: Any]]) -> (blocks: [[String: Any]], stop: String))?
+
     enum Failure: LocalizedError {
         case noKey, http(Int, String), refused, empty
         var errorDescription: String? {
@@ -108,6 +111,11 @@ enum Claude {
     @MainActor static func stream(system: String, messages: [[String: Any]], model: String, effort: String, maxTokens: Int,
                                   tools: [[String: Any]], timeout: TimeInterval, fallback: Bool,
                                   onUpdate: @escaping @MainActor ([[String: Any]]) -> Void) async throws -> (blocks: [[String: Any]], stop: String) {
+        if let canned {
+            let r = canned(messages, tools)
+            onUpdate(r.blocks)
+            return r
+        }
         guard let key = apiKey, !key.isEmpty else { throw Failure.noKey }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!, timeoutInterval: timeout)
         req.httpMethod = "POST"

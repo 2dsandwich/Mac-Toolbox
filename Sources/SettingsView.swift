@@ -927,6 +927,8 @@ private struct AIPane: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            AskSourcesSection(store: store)
+
             Section {
                 LabeledContent("Apple Intelligence") {
                     if let why = AI.appleStatus { Text(why).foregroundStyle(.orange) } else { Label("Ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }

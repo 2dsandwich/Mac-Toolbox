@@ -1,11 +1,10 @@
 import AppKit
-import CoreLocation
 import IOKit.ps
 import IOKit.pwr_mgt
 
 /// Answers that need the network (weather, exchange rates, holidays, public IP, translation).
 /// Results are cached; when one arrives the launcher redraws its answers.
-@MainActor final class LiveData: NSObject, CLLocationManagerDelegate {
+@MainActor final class LiveData: NSObject {
     static let shared = LiveData()
     var onUpdate: (() -> Void)?
 
@@ -257,89 +256,26 @@ import IOKit.pwr_mgt
         }
     }
 
-    // Current location (asked once; type a city or set one in Settings when it's off).
+    // Current location (Location.swift asks once; type a city or set one in Settings when it's off).
 
-    private lazy var locator: CLLocationManager = {
-        let m = CLLocationManager()
-        m.delegate = self
-        m.desiredAccuracy = kCLLocationAccuracyKilometer
-        return m
-    }()
-    private var here: Place?
-    private var hereTime = Date.distantPast
-    private var locating = false
-    private var locationOff = false
+    private var followsLocation = false
 
     private func currentPlace() -> Place? {
-        if Date().timeIntervalSince(hereTime) > 1800 { requestLocation() }
-        return here
-    }
-
-    private func requestLocation() {
-        guard !locating else { return }
-        switch locator.authorizationStatus {
-        case .denied, .restricted:
-            locationOff = true
-        case .notDetermined:
-            locating = true
-            locator.requestWhenInUseAuthorization()
-        default:
-            locating = true
-            locator.requestLocation()
+        let loc = Location.shared
+        if !followsLocation {
+            followsLocation = true
+            loc.onChange { [weak self] in self?.onUpdate?() }
         }
+        if loc.undecided { loc.requestPermission() } else { loc.refresh() }
+        return loc.fix.map { Place(name: $0.name, lat: $0.lat, lon: $0.lon) }
     }
 
     private func locationRow() -> Answer {
-        if locationOff {
+        if Location.shared.denied || Location.shared.failed {
             return Answer(title: "Location is off for MONEY!", subtitle: "Settings › Tools", symbol: "location.slash.fill",
                           color: .systemBlue, action: .run(keepOpen: false) { Tools.openSettings() }, hint: "Settings ↩")
         }
         return loadingRow("Finding where you are…", "location.fill", .systemBlue)
-    }
-
-    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        MainActor.assumeIsolated {
-            switch manager.authorizationStatus {
-            case .notDetermined: break
-            case .denied, .restricted:
-                locating = false
-                locationOff = true
-                onUpdate?()
-            default:
-                locationOff = false
-                locating = true
-                manager.requestLocation()
-            }
-        }
-    }
-
-    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let loc = locations.last else { return }
-        let lat = loc.coordinate.latitude, lon = loc.coordinate.longitude
-        MainActor.assumeIsolated {
-            locating = false
-            hereTime = Date()
-            here = Place(name: here?.name ?? "Current location", lat: lat, lon: lon)
-            onUpdate?()
-            CLGeocoder().reverseGeocodeLocation(loc) { [weak self] marks, _ in
-                let name = marks?.first.flatMap { $0.locality ?? $0.subAdministrativeArea ?? $0.administrativeArea }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self, let name else { return }
-                        self.here = Place(name: name, lat: lat, lon: lon)
-                        self.onUpdate?()
-                    }
-                }
-            }
-        }
-    }
-
-    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        MainActor.assumeIsolated {
-            locating = false
-            if here == nil { locationOff = true }
-            onUpdate?()
-        }
     }
 
     // MARK: Exchange rates (ECB via Frankfurter) and crypto (CoinGecko)

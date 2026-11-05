@@ -104,6 +104,13 @@ import AppKit
         return events.filter { $0.start < to && $0.end > from && !off.contains($0.calendarId) }.map(\.event)
     }
 
+    /// Fetches from..<to now unless that range is fresh, for callers that can't wait for a redraw (Ask).
+    func load(from: Date, to: Date, maxAge: TimeInterval = 120) async {
+        guard Google.shared.ready, !Google.shared.demo,
+              !spans.contains(where: { $0.from <= from && $0.to >= to && Date().timeIntervalSince($0.at) < maxAge }) else { return }
+        await fetch(from, to)
+    }
+
     private func ensure(_ from: Date, _ to: Date, _ maxAge: TimeInterval) {
         guard Google.shared.ready, !Google.shared.demo else { return }
         let fresh = spans.contains { $0.from <= from && $0.to >= to && Date().timeIntervalSince($0.at) < maxAge }
