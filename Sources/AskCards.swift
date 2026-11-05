@@ -29,11 +29,12 @@ import SwiftUI
     Comparisons ("A vs B", "A or B", "difference between", "which is better") are always a Markdown table: a column per option, a row per point that matters, then one short line with the pick. No bullets. Code goes in a fenced block with its language.
     """
 
-    /// Concentric with the thread: its card's inner radius, minus the inset.
-    static var radius: CGFloat { PanelLayout.inner(PanelLayout.inner(CGFloat(Store.shared.settings.scopedCornerRadius))) }
+    /// A card's corner: round enough to sit calmly next to the question bubbles.
+    static let radius: CGFloat = 14
 
-    static var outline: some View {
-        RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+    /// What sets a card apart from the text around it: a slightly darker well behind it, no line and no light fill.
+    static var well: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Color.black.opacity(0.24))
     }
 
     static func head(_ type: String?) -> (symbol: String, title: String, color: NSColor) {
@@ -389,7 +390,9 @@ struct AskAnswer: View {
 
     @ViewBuilder private func part(_ p: AskPart) -> some View {
         switch p {
-        case .text(let t, let at): NotesView(markdown: t, shown: shown - Double(at))
+        case .text(let t, let at):
+            // Streaming: words fade in. All there: a text view you can select across and click links in.
+            if shown - Double(at) >= Double(t.count) + FadeIn.ramp { SelectableNotes(markdown: t) } else { NotesView(markdown: t, shown: shown - Double(at)) }
         case .card(let c): AskCardView(card: c)
         case .pending(let type): AskSkeleton(type: type)
         case .code(let code, let lang): CodeBlock(code: code, lang: lang)
@@ -450,7 +453,7 @@ private struct AskBox<Content: View>: View {
         }
         .padding(cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(AskCards.outline)
+        .background(AskCards.well)
     }
 }
 
@@ -505,7 +508,7 @@ private struct ToolCardBox: View {
     var body: some View {
         AnswerCardView(card: card, hint: "", selected: false, hovered: false, radius: AskCards.radius, onAction: AskCards.perform)
             .fixedSize(horizontal: false, vertical: true)
-            .overlay(AskCards.outline)
+            .background(AskCards.well)
     }
 }
 
@@ -560,7 +563,7 @@ private struct CodeBlock: View {
         .padding(.horizontal, cardPadding)
         .padding(.top, cardPadding - 8)
         .padding(.bottom, cardPadding)
-        .overlay(AskCards.outline)
+        .background(AskCards.well)
     }
 }
 
@@ -589,7 +592,7 @@ private struct TableCard: View {
         .padding(.horizontal, cardPadding)
         .padding(.vertical, cardPadding - 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(AskCards.outline)
+        .background(AskCards.well)
     }
 }
 

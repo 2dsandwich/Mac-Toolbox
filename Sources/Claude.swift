@@ -5,7 +5,13 @@ import Security
 enum Keychain {
     private static let service = "dev.masashik.flick"
 
+    /// Only the installed app touches the Keychain. A copy run from anywhere else (a test build) counts as another app
+    /// to macOS: reading asks for the login password every time, and writing re-creates the item so that only that copy
+    /// is trusted and the real app has to ask again, whatever "Always Allow" said.
+    static var allowed: Bool { Bundle.main.bundlePath.hasPrefix("/Applications/") }
+
     static func get(_ account: String) -> String? {
+        guard allowed else { return nil }
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                 kSecAttrAccount as String: account, kSecReturnData as String: true]
         var out: AnyObject?
@@ -14,6 +20,7 @@ enum Keychain {
     }
 
     static func set(_ value: String?, account: String) {
+        guard allowed else { return }
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                    kSecAttrAccount as String: account]
         SecItemDelete(base as CFDictionary)

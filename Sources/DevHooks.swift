@@ -776,6 +776,8 @@ extension AppDelegate {
         if args.contains("--google-test") {
             GoogleTests.run()
         }
+        if args.contains("--chats") { AskChats.shared.useDemo() } // made-up Ask chats (settings and ask snapshots)
+        if args.contains("--ask-test") { askTest(); exit(0) }
         if let i = args.firstIndex(of: "--settings-snapshot"), i + 1 < args.count {
             // Google: a made-up account (or signed out), never the Keychain.
             Google.shared.useDemo(signedIn: !args.contains("--signed-out"), email: "ben@example.com")
@@ -789,7 +791,13 @@ extension AppDelegate {
             exit(0)
         }
         if let i = args.firstIndex(of: "--menu-snapshot"), i + 1 < args.count {
-            let hv = NSHostingView(rootView: MenuView(store: store, clipboard: clipboard, meeting: MeetingRecorder(store: store), pomodoro: Pomodoro()) { _ in })
+            // --live: a made-up meeting recording and a timer running.
+            if args.contains("--live") {
+                island.onStage = nil
+                demoMeeting([])
+                Timers.shared.add(minutes: 25, label: "Tea")
+            }
+            let hv = NSHostingView(rootView: MenuView(store: store, meeting: args.contains("--live") ? meeting : MeetingRecorder(store: store), pomodoro: Pomodoro()) { _ in })
             setbuf(stdout, nil)
             let w = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 320, height: 10), styleMask: .borderless, backing: .buffered, defer: false)
             w.appearance = NSAppearance(named: args.contains("--dark") ? .darkAqua : .aqua)
@@ -1237,4 +1245,131 @@ extension AppDelegate {
         print(failures == 0 ? "\nall layout checks passed" : "\n\(failures) layout check(s) FAILED")
         exit(failures == 0 ? 0 : 1)
     }
+}
+
+// MARK: --ask-test
+
+extension AppDelegate {
+    /// Ask's chat list, keys and links, on made-up chats only (the real ones are never read, written or printed).
+    /// No AI is called and nothing shows on screen.
+    func askTest() {
+        var failures = 0
+        func check(_ ok: Bool, _ what: String) {
+            if !ok { failures += 1 }
+            print(ok ? "  ok  " : "  FAIL", what)
+        }
+        let a = Assistant.shared, chats = AskChats.shared, l = launcher!, m = l.model
+        chats.useDemo()
+        let key = { (s: Selector) in _ = l.handle(s) }
+
+        // Saved chats keep the thread and Claude's raw blocks exactly.
+        let raw: [[String: Any]] = [["role": "user", "content": "q"],
+                                    ["role": "assistant", "content": [["type": "text", "text": "a", "citations": [["url": "https://example.com"]]]]]]
+        let json = String(data: try! JSONSerialization.data(withJSONObject: raw, options: .sortedKeys), encoding: .utf8)!
+        let chat = AskChat(title: "q", date: Date(), turns: [Assistant.Turn(question: "q", answer: "a", sources: [.init(title: "E", url: URL(string: "https://example.com")!)])],
+                           messages: json)
+        let back = try! JSONDecoder().decode(AskChat.self, from: JSONEncoder().encode(chat))
+        check(back.id == chat.id && back.turns.first?.answer == "a" && back.turns.first?.sources.count == 1 && back.messages == json, "a chat survives saving")
+
+        // The list: newest picked, ↑↓ move, ↩ continues, typing searches.
+        m.scope = .assistant
+        a.reset()
+        m.setQuery("")
+        check(a.pick == 0 && AssistantView.height(a, query: "", store.settings) > 0, "empty Ask lists earlier chats, newest picked")
+        key(#selector(NSResponder.moveDown(_:)))
+        key(#selector(NSResponder.moveDown(_:)))
+        let third = chats.all[2]
+        key(#selector(NSResponder.insertNewline(_:)))
+        check(a.turns.first?.question == third.title && a.chatID == third.id, "↓↓↩ continues the third chat")
+        key(#selector(NSResponder.moveUp(_:)))
+        check(m.query == a.turns.last?.question, "↑ in an empty bar brings back the last question")
+        m.setQuery("")
+        key(#selector(NSResponder.deleteBackward(_:)))
+        check(a.turns.isEmpty && m.scope == .assistant, "⌫ in an empty bar goes back to the list")
+        m.setQuery("kyoto")
+        check(a.pick == nil && chats.matching("kyoto").count == 1, "typing searches the chats; ↩ would ask")
+        key(#selector(NSResponder.moveDown(_:)))
+        check(a.pick == 0, "↓ picks the match")
+
+        // Esc stops an answer being written and keeps what came; the chat is saved.
+        m.setQuery("")
+        a.demo(busy: true)
+        a.demoStream()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        let got = a.turns.last?.answer.count ?? 0
+        key(#selector(NSResponder.cancelOperation(_:)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        check(!a.busy && got > 0 && a.turns.last?.answer.count == got && l.isShown == false, "Esc stops the answer at \(got) characters")
+        check(chats.all.first?.id == a.chatID && chats.all.first?.turns.count == a.turns.count, "the stopped chat is saved, at the top")
+        let n = a.turns.count
+        check(a.takeBackLast() == "Which trail is easiest for a first climb?" && a.turns.count == n - 1, "regenerate takes the last question back to ask again")
+
+        // Leaving keeps the draft; Tab brings it back with a fresh thread.
+        m.setQuery("half a question")
+        m.scope = .apps
+        check(a.turns.isEmpty && a.draft == "half a question", "leaving Ask keeps the draft")
+        m.setQuery("")
+        key(#selector(NSResponder.insertTab(_:)))
+        check(m.scope == .assistant && m.query == "half a question", "Tab puts the draft back")
+
+        // Links: Markdown, bare addresses and sources; the right-click menu.
+        let t = Assistant.Turn(question: "q", answer: "See [the docs](https://example.com/docs) or https://example.org/page.",
+                               sources: [.init(title: "S", url: URL(string: "https://example.net")!)])
+        check(Assistant.links(t).compactMap(\.host) == ["example.com", "example.org", "example.net"], "links: Markdown, bare and sources")
+        print("       menu:", Assistant.menu(t).map(\.title).joined(separator: " | "))
+
+        // A click on a link goes to the link handler: the view drawn in a window off screen that only says it's key
+        // (it never takes the keyboard), the link found by its colour, and a click sent to that window.
+        var opened: URL?
+        Assistant.onOpen = { opened = $0 }
+        func click(_ view: some View) -> URL? {
+            opened = nil
+            let hv = FirstMouseHostingView(rootView: view.padding(16).frame(width: 600, height: 300, alignment: .top))
+            let w = SeemsKeyWindow(contentRect: NSRect(x: -5000, y: -5000, width: 600, height: 300), styleMask: .borderless, backing: .buffered, defer: false)
+            w.appearance = NSAppearance(named: .darkAqua)
+            w.contentView = hv
+            w.orderFrontRegardless()
+            defer { w.close() }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+            let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds)!
+            hv.cacheDisplay(in: hv.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / hv.bounds.width
+            for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+                for x in stride(from: 0, to: rep.pixelsWide / 2, by: 2) {
+                    guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), c.blueComponent > 0.6, c.blueComponent - c.redComponent > 0.3 else { continue }
+                    let p = NSPoint(x: CGFloat(x) / scale + 6, y: hv.bounds.height - CGFloat(y) / scale - 2)
+                    // The release waits in this app's own queue (a text view's click loop reads it from there), then the press.
+                    func event(_ type: NSEvent.EventType) -> NSEvent {
+                        NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                    }
+                    if CommandLine.arguments.contains("--debug-click") { print("       link pixel at", p) }
+                    NSApp.postEvent(event(.leftMouseUp), atStart: false)
+                    w.sendEvent(event(.leftMouseDown))
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                    return opened
+                }
+            }
+            return nil
+        }
+        // One exchange (the thread's scroll view takes no synthetic clicks at all, not even on tap rows, so it's left out).
+        let doc = "[Read the full documentation here](https://example.com/docs)", bare = "https://example.org/a/long/page/address"
+        for (answer, url) in [(doc, "https://example.com/docs"), (bare, bare)] {
+            check(click(AssistantTurn(turn: Assistant.Turn(question: "Docs?", answer: answer), busy: false))?.absoluteString == url,
+                  "\(answer.hasPrefix("[") ? "Markdown" : "bare") link in an answer: tinted, and a click opens it")
+        }
+        // A finished answer is a text view: selectable across lines, and its links still open on a click.
+        check(click(SelectableNotes(markdown: doc))?.absoluteString == "https://example.com/docs", "finished answer: selectable, and a link click opens it")
+        Assistant.onOpen = nil
+
+        print(failures == 0 ? "\nall Ask checks passed" : "\n\(failures) Ask check(s) FAILED")
+        exit(failures == 0 ? 0 : 1)
+    }
+}
+
+/// Says it's the key window without taking the keyboard, so clicks in an off-screen test reach selectable text.
+final class SeemsKeyWindow: NSWindow {
+    override var isKeyWindow: Bool { true }
+    override var canBecomeKey: Bool { true }
 }

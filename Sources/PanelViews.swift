@@ -325,6 +325,8 @@ struct NotesView: View, Animatable {
     /// Room above headings and where the text has a blank line (meeting notes, emails).
     var spaced = false
     var shown = Double.infinity
+    /// Selectable text takes every click, links included: Ask turns it off so its links open.
+    var selectable = true
 
     var animatableData: Double {
         get { shown }
@@ -351,15 +353,15 @@ struct NotesView: View, Animatable {
         }
     }
 
-    private func text(_ md: String, shown: Double) -> some View {
+    @ViewBuilder private func text(_ md: String, shown: Double) -> some View {
         // One text for the whole thing, so a selection can run across every line.
-        Text(Self.attributed(md, mine: mine, spaced: spaced))
+        let text = Text(Self.attributed(md, mine: mine, spaced: spaced))
             .font(.system(size: 13.5))
             .lineSpacing(5)
             .textRenderer(FadeIn(shown: shown))
             .contentTransition(.identity) // new text fades in by `shown`, never by cross-fading the whole thing
-            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
+        if selectable { text.textSelection(.enabled) } else { text }
     }
 
     static func attributed(_ markdown: String, mine: [String] = [], spaced: Bool = false) -> AttributedString {
@@ -451,7 +453,22 @@ struct NotesView: View, Animatable {
         // A line still streaming in can end inside **bold** or `code`: close it so the markers never show.
         var s = raw
         for mark in ["**", "`"] where s.components(separatedBy: mark).count % 2 == 0 { s += mark }
-        return (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+        return linked((try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s))
+    }
+
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Bare web addresses become links too (Markdown links already are).
+    private static func linked(_ text: AttributedString) -> AttributedString {
+        var a = text
+        let plain = String(a.characters)
+        for m in detector?.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) ?? [] {
+            guard let url = m.url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let r = Range(m.range, in: plain) else { continue }
+            let lo = a.characters.index(a.startIndex, offsetBy: plain.distance(from: plain.startIndex, to: r.lowerBound))
+            let hi = a.characters.index(lo, offsetBy: plain.distance(from: r.lowerBound, to: r.upperBound))
+            if a[lo..<hi].runs.allSatisfy({ $0.link == nil }) { a[lo..<hi].link = url }
+        }
+        return a
     }
 }
 

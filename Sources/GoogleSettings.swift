@@ -37,10 +37,11 @@ struct GooglePane: View {
         .onAppear(perform: prefill)
     }
 
-    /// Your saved client, else the one Moneybag uses on this Mac.
+    /// Your saved client. (Moneybag's is only read when you press Sign In: reading another app's item makes macOS
+    /// ask for the password, which shouldn't happen just because this page opened.)
     private func prefill() {
         guard id.isEmpty, !google.demo else { return }
-        if let c = google.client ?? (Google.moneybagHasClient ? Google.moneybagClient() : nil) {
+        if let c = google.client {
             id = c.id
             secret = c.secret
         }

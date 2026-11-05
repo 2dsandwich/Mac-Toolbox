@@ -71,7 +71,6 @@ import Observation
 
     func total(_ m: Metric) -> Double { days.values.reduce(0) { $0 + ($1[m.rawValue] ?? 0) } }
     func on(_ date: Date, _ m: Metric) -> Double { days[Self.key(date)]?[m.rawValue] ?? 0 }
-    func today(_ m: Metric) -> Double { on(Date(), m) }
 
     /// The last `n` days, oldest first.
     func daily(_ m: Metric, last n: Int) -> [(day: Date, value: Double)] {
@@ -80,19 +79,6 @@ import Observation
         return (0..<n).reversed().compactMap { back in
             cal.date(byAdding: .day, value: -back, to: start).map { ($0, on($0, m)) }
         }
-    }
-
-    /// Days in a row, up to today (or yesterday, if nothing yet today), with anything done.
-    var streak: Int {
-        let cal = Calendar.current
-        var day = cal.startOfDay(for: Date())
-        if days[Self.key(day)]?.isEmpty ?? true { day = cal.date(byAdding: .day, value: -1, to: day)! }
-        var n = 0
-        while !(days[Self.key(day)]?.isEmpty ?? true) {
-            n += 1
-            day = cal.date(byAdding: .day, value: -1, to: day)!
-        }
-        return n
     }
 
     /// Typing at 40 words a minute versus speaking them.

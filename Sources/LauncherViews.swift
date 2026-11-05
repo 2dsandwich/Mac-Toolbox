@@ -86,7 +86,7 @@ struct LauncherRoot: View {
                     TranslateView(model: model, translator: Translator.shared, radius: radius)
                         .transition(.opacity)
                 } else if model.scope == .assistant {
-                    AssistantView(assistant: Assistant.shared, radius: radius)
+                    AssistantView(assistant: Assistant.shared, model: model, s: s, radius: radius)
                         .transition(.opacity)
                 } else if model.scope == .mixer {
                     MixerView(mixer: AudioMixer.shared, radius: radius, query: model.query)
