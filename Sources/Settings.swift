@@ -174,33 +174,6 @@ enum QuickButton: Codable, Hashable, Identifiable {
     }
 }
 
-/// What the closed notch shows first when more than three things are going on (alarms and dictation always lead).
-enum NotchKind: String, Codable, CaseIterable, Identifiable {
-    case media, timer, meeting, focus, stopwatch, message, event
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .media: "What’s playing"
-        case .timer: "Timers"
-        case .meeting: "Meetings"
-        case .focus: "Focus"
-        case .stopwatch: "Stopwatches"
-        case .message: "Messages"
-        case .event: "Upcoming events"
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .media: "music.note"
-        case .timer: "timer"
-        case .meeting: "waveform"
-        case .focus: "brain.head.profile"
-        case .stopwatch: "stopwatch"
-        case .message: "checkmark.circle"
-        case .event: "calendar"
-        }
-    }
-}
 
 /// What the open notch shows left of the hardware notch, at menu-bar height (one or two of these).
 enum BandItem: String, Codable, CaseIterable, Identifiable {
@@ -389,12 +362,6 @@ struct Settings: Codable, Equatable {
     var notchInCaptures = false
     /// Left of the notch while it's open: one or two glances.
     var notchBand: [BandItem] = [.battery]
-    var notchOrder: [NotchKind] = [.media, .timer, .meeting, .focus, .stopwatch, .message, .event]
-    /// The closed notch's order for each mix of activities you've dragged into place.
-    var notchArrangements: [String: [String]] = [:]
-
-    /// The saved order, with any kinds added in later versions at the end.
-    var notchPriority: [NotchKind] { notchOrder + NotchKind.allCases.filter { !notchOrder.contains($0) } }
 
     // Other
     var scanQR = true
@@ -445,7 +412,6 @@ struct Settings: Codable, Equatable {
     var modelMeetingChat = ClaudeModel.opus
     var modelMeetingNotes = ClaudeModel.opus
     var dictationStyle = DictationStyle.auto
-    var livePreview = true
     var dictationSounds = true
     var saveDictations = true
     var dictionary: [String] = []
@@ -507,7 +473,11 @@ struct Settings: Codable, Equatable {
 
     private init() {
         settings = Store.load()
+        if Store.stale { save() }
     }
+
+    /// The saved settings still had keys that are gone (written back without them).
+    private static var stale = false
 
     /// Decodes saved settings over the defaults, so keys added in later versions keep their defaults.
     private static func load() -> Settings {
@@ -538,6 +508,8 @@ struct Settings: Codable, Equatable {
             if merged["meetingLanguage"] as? String == DictationLanguage.english.rawValue { merged["meetingLanguage"] = DictationLanguage.both.rawValue }
             merged["version"] = 4
         }
+        // The notch has one fixed order now, and dictation no longer shows its words: old choices are dropped.
+        for gone in ["notchOrder", "notchArrangements", "livePreview"] where merged.removeValue(forKey: gone) != nil { Store.stale = true }
         guard let data = try? JSONSerialization.data(withJSONObject: merged),
               let s = try? JSONDecoder().decode(Settings.self, from: data) else { return Settings() }
         return s

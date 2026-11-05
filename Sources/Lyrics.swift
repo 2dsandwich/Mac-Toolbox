@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import NaturalLanguage
 import Observation
 import SwiftUI
 
@@ -11,10 +12,21 @@ import SwiftUI
 @MainActor @Observable final class Lyrics {
     static let shared = Lyrics()
 
-    /// One timed line. No text is an instrumental break of 5 s or more (shown as a music note).
+    /// One timed line. No text is an instrumental break of 5 s or more (shown as dots filling up over it).
     struct Cue: Equatable {
         var time: Double
         var text: String?
+        /// When the singing (or the break) ends.
+        var end: Double = .infinity
+        /// Each word (Japanese: each token) and when it's sung, from the file's own word stamps or spread over the line.
+        var words: [Word] = []
+    }
+
+    /// A word with the spaces after it, so the words put back together are the line.
+    struct Word: Equatable {
+        var start: Double
+        var end: Double
+        var text: String
     }
 
     /// A song as LRCLIB knows it. `name` is the title without "(feat. …)", for the search fallback.
@@ -39,6 +51,12 @@ import SwiftUI
 
     /// The current song's timed lines. Empty when it has none: plain lyrics have no timing, so they aren't shown.
     private(set) var cues: [Cue] = []
+    /// A new song's lines are on their way: the lyrics face stays up (empty) instead of flipping to the player and back.
+    private(set) var loading = false
+    /// Changes with each song's lines, so a view starts afresh rather than scrolling from the last song's place.
+    private(set) var version = 0
+    /// Lines to show, or about to be.
+    var hasLines: Bool { !cues.isEmpty || loading }
     /// `--island-snapshot --lyrics`: made-up lines, with the line under the closed notch on.
     @ObservationIgnored private(set) var demo = false
     @ObservationIgnored private var current: Song?
@@ -68,12 +86,15 @@ import SwiftUI
             current = nil
             pending = nil
             if !cues.isEmpty { cues = [] }
+            loading = false
             return
         }
         guard song.key != current?.key else { return }
         current = song
-        cues = []
         if let e = Self.cached(song) { return show(e, song) }
+        cues = []
+        version += 1
+        loading = true
         pending = song
         pump()
     }
@@ -86,16 +107,20 @@ import SwiftUI
         Task {
             let (entry, _) = await fetch(song)
             busy = false
-            if let entry {
-                Self.save(entry, song)
-                if song.key == current?.key { show(entry, song) }
-            }
+            if let entry { Self.save(entry, song) }
+            if song.key == current?.key { show(entry ?? Entry(), song) }
             pump()
         }
     }
 
     private func show(_ e: Entry, _ song: Song) {
-        cues = e.instrumental ? [] : e.synced.map { Self.parse($0, duration: song.duration) } ?? []
+        let lines = e.instrumental ? [] : e.synced.map { Self.parse($0, duration: song.duration) } ?? []
+        // None after all: the face folds back into the player as one move.
+        withAnimation(lines.isEmpty && loading ? islandSpring : nil) {
+            loading = false
+            cues = lines
+            version += 1
+        }
     }
 
     /// Cache first, then LRCLIB; says where it came from (for `--lyrics-test`). Nil means the network failed.
@@ -179,39 +204,105 @@ import SwiftUI
         if let data = try? JSONEncoder().encode(e) { try? data.write(to: file(song), options: .atomic) }
     }
 
+
     // MARK: Timing
 
     /// "[mm:ss.xx] words" lines in time order (a line with several stamps is sung at each). Tags such as [ar:…] are
-    /// skipped. A blank line is a break: a music note when it's 5 s or more (as is a long intro), else the line
-    /// before stays.
+    /// skipped. A blank line is a break: dots when it's 5 s or more (as is a long intro), else the line before stays.
+    /// Word stamps ("<mm:ss.xx>word", enhanced LRC) time each word; without them the line's words share its time.
     static func parse(_ lrc: String, duration: Double) -> [Cue] {
         var lines: [(time: Double, text: String)] = []
         for raw in lrc.components(separatedBy: .newlines) {
             var rest = Substring(raw.trimmingCharacters(in: .whitespaces))
             var times: [Double] = []
             while rest.hasPrefix("["), let close = rest.firstIndex(of: "]") {
-                let stamp = rest[rest.index(after: rest.startIndex)..<close].split(separator: ":", maxSplits: 1)
-                guard stamp.count == 2, let m = Double(stamp[0]), let s = Double(stamp[1].replacingOccurrences(of: ":", with: ".")) else { break }
-                times.append(m * 60 + s)
+                guard let t = stamp(rest[rest.index(after: rest.startIndex)..<close]) else { break }
+                times.append(t)
                 rest = rest[rest.index(after: close)...]
             }
             let text = rest.trimmingCharacters(in: .whitespaces)
             lines += times.map { ($0, text) }
         }
         lines.sort { $0.time < $1.time }
-        guard lines.contains(where: { !$0.text.isEmpty }) else { return [] }
+        let songEnd = duration > 0 ? duration : (lines.last?.time ?? 0) + 8
+        guard lines.contains(where: { !wordless($0.text) }) else { return [] }
         var out: [Cue] = []
-        if let first = lines.first(where: { !$0.text.isEmpty }), first.time >= gapMin { out.append(Cue(time: 0, text: nil)) }
+        if let first = lines.first(where: { !wordless($0.text) }), first.time >= gapMin { out.append(Cue(time: 0, text: nil, end: first.time)) }
         for (k, l) in lines.enumerated() {
-            if l.text.isEmpty {
-                let end = k + 1 < lines.count ? lines[k + 1].time : (duration > 0 ? duration : .infinity)
-                guard end - l.time >= gapMin, !out.isEmpty, out.last?.text != nil else { continue }
-                out.append(Cue(time: l.time, text: nil))
+            let next = k + 1 < lines.count ? lines[k + 1].time : songEnd
+            if wordless(l.text) {
+                guard next - l.time >= gapMin, !out.isEmpty, out.last?.text != nil else { continue }
+                out.append(Cue(time: l.time, text: nil, end: next))
             } else {
-                out.append(Cue(time: l.time, text: l.text))
+                let cue = timed(l.text, at: l.time, until: next)
+                out.append(cue)
+                // Sung well before the next line (and no blank line says so): dots for the rest.
+                if k + 1 < lines.count, next - cue.end > 9 { out.append(Cue(time: cue.end + 1.5, text: nil, end: next)) }
             }
         }
         return out
+    }
+
+    /// "mm:ss.xx" (or "mm:ss:xx") in seconds.
+    private static func stamp(_ s: Substring) -> Double? {
+        let p = s.split(separator: ":", maxSplits: 1)
+        guard p.count == 2, let m = Double(p[0]), let sec = Double(p[1].replacingOccurrences(of: ":", with: ".")) else { return nil }
+        return m * 60 + sec
+    }
+
+    /// A line with nothing to sing (blank, or only word stamps).
+    private static func wordless(_ text: String) -> Bool {
+        text.replacingOccurrences(of: #"<\d+:\d+(?:[.:]\d+)?>"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// One line with each word's time: from its own stamps, else spread over the time it likely takes to sing (each
+    /// word's share by its length; kana and kanji take longer than letters), never past the next line.
+    static func timed(_ raw: String, at time: Double, until next: Double) -> Cue {
+        let marks = raw.matches(of: #/<(\d+:\d+(?:[.:]\d+)?)>/#)
+        if !marks.isEmpty {
+            var words: [Word] = []
+            for (k, m) in marks.enumerated() {
+                let to = k + 1 < marks.count ? marks[k + 1].range.lowerBound : raw.endIndex
+                let text = String(raw[m.range.upperBound..<to])
+                guard let t = stamp(m.output.1), !text.isEmpty else { continue }
+                if let last = words.indices.last { words[last].end = t }
+                words.append(Word(start: t, end: t, text: text))
+            }
+            if let last = words.indices.last { words[last].end = min(next, words[last].start + max(0.4, Double(words[last].text.count) * 0.09)) }
+            let text = words.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+            if let first = words.first, !text.isEmpty {
+                return Cue(time: time, text: text, end: words.last?.end ?? next, words: words.map { var w = $0; w.start = max(w.start, first.start); return w })
+            }
+        }
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        let parts = tokens(text)
+        let weights = parts.map { p in 1 + p.unicodeScalars.reduce(0.0) { $0 + (wide($1) ? 2.2 : $1.properties.isWhitespace ? 0.3 : 1) } }
+        let total = weights.reduce(0, +)
+        let sung = min(max(0.8, total * 0.07), max(0.6, (next - time) * 0.92))
+        var words: [Word] = []
+        var t = time
+        for (p, w) in zip(parts, weights) {
+            let d = sung * w / total
+            words.append(Word(start: t, end: t + d, text: p))
+            t += d
+        }
+        return Cue(time: time, text: text, end: time + sung, words: words)
+    }
+
+    /// The line cut into words, each keeping what follows it (spaces, punctuation): NLTokenizer finds the words in
+    /// languages written without spaces too.
+    static func tokens(_ text: String) -> [String] {
+        let tok = NLTokenizer(unit: .word)
+        tok.string = text
+        var starts: [String.Index] = []
+        tok.enumerateTokens(in: text.startIndex..<text.endIndex) { r, _ in starts.append(r.lowerBound); return true }
+        guard !starts.isEmpty else { return [text] }
+        starts[0] = text.startIndex
+        return zip(starts, Array(starts.dropFirst()) + [text.endIndex]).map { String(text[$0..<$1]) }
+    }
+
+    private static func wide(_ u: Unicode.Scalar) -> Bool {
+        (0x3040...0x30FF).contains(u.value) || (0x3400...0x9FFF).contains(u.value) || (0xAC00...0xD7AF).contains(u.value)
     }
 
     /// The cue being sung at a time (-1 before the first).
@@ -237,12 +328,26 @@ import SwiftUI
         }
     }
 
-    /// Made-up lines for the snapshot (never real lyrics), with a break after the fourth.
-    func showDemo() {
+    /// Made-up lines for the snapshot (never real lyrics), with a break after the fourth; `second` is another song's,
+    /// one line with its own word stamps and one in Japanese (`none`: the next song has no lines).
+    func showDemo(second: Bool = false, none: Bool = false) {
         demo = true
-        cues = [Cue(time: 62, text: "Line one of the song"), Cue(time: 70, text: "Line two, a little longer than the first one"),
-                Cue(time: 78.5, text: "Line three of the song"), Cue(time: 84, text: "Line four comes next"),
-                Cue(time: 90, text: nil), Cue(time: 100, text: "Line five after the break")]
+        let lrc = second
+            ? "[01:00.00]<01:00.00>Second <01:00.40>song <01:00.90>starts <01:01.60>here\n[01:05.00]A line long enough that it has to wrap onto a second row in the notch\n[01:12.00]これは二番目の歌の行です\n[01:18.00]Short one"
+            : "[01:02.00]Line one of the song\n[01:10.00]Line two, a little longer than the first one so it wraps\n[01:18.50]Line three of the song\n[01:24.00]Line four comes next\n[01:30.00]\n[01:40.00]Line five after the break"
+        withAnimation(loading ? islandSpring : nil) {
+            loading = false
+            cues = none ? [] : Self.parse(lrc, duration: 200)
+            version += 1
+        }
+    }
+
+    /// `--song-frames`: a song change with the lines still on their way.
+    func demoLoading() {
+        demo = true
+        loading = true
+        cues = []
+        version += 1
     }
 }
 
@@ -250,54 +355,156 @@ import SwiftUI
 private struct LyricClock: Hashable {
     var updated: Date
     var playing: Bool
-    var count: Int
+    var version: Int
 }
 
 @MainActor private func lyricClock(_ lyrics: Lyrics) -> LyricClock {
-    LyricClock(updated: NowPlaying.shared.updated, playing: NowPlaying.shared.playing, count: lyrics.cues.count)
+    LyricClock(updated: NowPlaying.shared.updated, playing: NowPlaying.shared.playing, version: lyrics.version)
 }
 
-private let lyricMove = Animation.spring(response: 0.45, dampingFraction: 0.9)
+private let lyricMove = Animation.spring(response: 0.5, dampingFraction: 0.82)
 
-/// A lyric line, or the quiet note for a break.
+/// The closed notch's lyric line, or dots for a break.
 @ViewBuilder private func lyricText(_ cue: Lyrics.Cue, size: CGFloat = 12.5) -> some View {
     if let text = cue.text {
         Text(text).font(.system(size: size, weight: size > 13 ? .semibold : .medium)).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
     } else {
-        Image(systemName: "music.note").font(.system(size: size - 1.5, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+        Image(systemName: "ellipsis").font(.system(size: size - 1.5, weight: .bold)).foregroundStyle(.white.opacity(0.6))
     }
 }
 
-/// The open notch's player, lyrics face: the line being sung, the next one dimmer; they move up as the song goes on.
+/// The open player's lyrics face, after Apple Music: the line being sung big and bright, its words filling in as
+/// they're sung with a soft glow in the cover's colour; the next lines dimmer and smaller under it; past lines drift up
+/// and fade. Long lines wrap. Breaks are dots that fill up over the break.
 struct LyricLines: View {
     let lyrics: Lyrics
-    /// Centred, instead of starting at the left.
-    var centered = false
-    var size: CGFloat = 12.5
+    var tint: Color
     @State private var index: Int?
+    @State private var heights: [Int: CGFloat] = [:]
 
-    private var lineHeight: CGFloat { (size * 1.45).rounded() }
+    static let size: CGFloat = 17
+    private static let spacing: CGFloat = 9
 
     var body: some View {
         let cues = lyrics.cues
         let i = min(index ?? lyrics.index(at: lyrics.playhead(Date())), cues.count - 1)
-        ZStack(alignment: centered ? .top : .topLeading) {
-            if !cues.isEmpty {
-                ForEach(max(0, i - 1)...min(cues.count - 1, max(0, i + 2)), id: \.self) { k in
-                    lyricText(cues[k], size: size)
-                        .frame(maxWidth: centered ? .infinity : nil, alignment: .center)
-                        .frame(height: lineHeight)
-                        .opacity(k == i ? 1 : k == i + 1 ? 0.45 : 0)
-                        .offset(y: CGFloat(k - i) * lineHeight)
+        let lo = max(0, i - 1), hi = min(cues.count - 1, max(0, i) + 3)
+        // Up by the lines above the one being sung, so it sits at the top.
+        let top = (lo..<max(lo, i)).reduce(CGFloat(0)) { $0 + (heights[$1] ?? 22) + Self.spacing }
+        VStack(alignment: .leading, spacing: Self.spacing) {
+            if lo <= hi {
+                ForEach(lo...hi, id: \.self) { k in
+                    line(cues[k], k: k, i: i)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights[k] = $0 }
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: lineHeight * 2, maxHeight: lineHeight * 2, alignment: centered ? .top : .topLeading)
+        .padding(.top, 6)
+        .offset(y: -top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Lines leaving at the top fade out under the header, never over it; the last ones fade at the bottom.
+        .mask {
+            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.05),
+                                   .init(color: .black, location: 0.72), .init(color: .clear, location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+        }
         .clipped()
         .task(id: lyricClock(lyrics)) {
             await lyrics.track { i in
                 if index == nil { index = i } else if i != index { withAnimation(lyricMove) { index = i } }
             }
+        }
+    }
+
+    private func line(_ cue: Lyrics.Cue, k: Int, i: Int) -> some View {
+        let now = k == i
+        return Group {
+            if cue.text == nil { GapDots(cue: cue, active: now) } else { KaraokeLine(cue: cue, active: now, tint: tint) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .scaleEffect(now ? 1 : 0.9, anchor: .leading)
+        .opacity(k < i ? 0 : now ? 1 : k == i + 1 ? 0.42 : 0.2)
+        .blur(radius: k > i + 1 ? 0.6 : 0)
+    }
+}
+
+/// When a word is sung, carried on its piece of the line.
+private struct Sung: TextAttribute {
+    var start: Double
+    var end: Double
+}
+
+/// A line drawn word by word: sung words bright, the one being sung filling left to right with a soft glow and a
+/// slight lift, the rest dim. Off, the line is drawn plain.
+private struct Karaoke: TextRenderer {
+    var t: Double
+    var tint: Color
+    var on: Bool
+
+    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        for line in layout {
+            for run in line {
+                guard on, let w = run[Sung.self] else { ctx.draw(run); continue }
+                let p = min(1, max(0, (t - w.start) / max(0.05, w.end - w.start)))
+                var c = ctx
+                c.translateBy(x: 0, y: -1.5 * p)
+                var dim = c
+                dim.opacity = 0.35
+                dim.draw(run)
+                guard p > 0 else { continue }
+                let r = run.typographicBounds.rect
+                let edge = r.minX - 6 + (r.width + 12) * p
+                var lit = c
+                lit.clipToLayer { m in
+                    m.fill(Path(r.insetBy(dx: -6, dy: -10)),
+                           with: .linearGradient(Gradient(colors: [.black, .clear]), startPoint: CGPoint(x: edge - 6, y: 0), endPoint: CGPoint(x: edge + 6, y: 0)))
+                }
+                if p < 1 { lit.addFilter(.shadow(color: tint.opacity(0.95), radius: 6)) }
+                lit.draw(run)
+            }
+        }
+    }
+}
+
+/// One line of the lyrics face; while it's the one being sung (and the song plays) it redraws every frame.
+private struct KaraokeLine: View {
+    let cue: Lyrics.Cue
+    let active: Bool
+    var tint: Color
+
+    var body: some View {
+        let text = cue.words.isEmpty ? Text(cue.text ?? "")
+            : cue.words.reduce(Text("")) { Text("\($0)\(Text($1.text).customAttribute(Sung(start: $1.start, end: $1.end)))") }
+        TimelineView(.animation(paused: !active || !NowPlaying.shared.playing)) { ctx in
+            text.font(.system(size: LyricLines.size, weight: .bold))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+                .textRenderer(Karaoke(t: Lyrics.shared.playhead(ctx.date), tint: tint, on: active))
+        }
+    }
+}
+
+/// A break: three dots that light up one by one as it goes on, breathing, and shrinking away just before the singing
+/// comes back.
+private struct GapDots: View {
+    let cue: Lyrics.Cue
+    let active: Bool
+
+    var body: some View {
+        TimelineView(.animation(paused: !active || !NowPlaying.shared.playing)) { ctx in
+            let t = Lyrics.shared.playhead(ctx.date)
+            let p = active ? min(1, max(0, (t - cue.time) / max(1, cue.end - cue.time))) : 0
+            let breathe = active ? 1 + 0.1 * sin(ctx.date.timeIntervalSinceReferenceDate * 2.6) : 1
+            let away = p > 0.94 ? max(0, (1 - p) / 0.06) : 1
+            HStack(spacing: 7) {
+                ForEach(0..<3, id: \.self) { k in
+                    let lit = min(1, max(0, p * 3 - Double(k)))
+                    Circle().fill(Color.white.opacity(0.28 + 0.72 * lit)).frame(width: 9, height: 9)
+                        .scaleEffect(0.8 + 0.2 * lit)
+                }
+            }
+            .scaleEffect(breathe * away, anchor: .leading)
+            .frame(height: 22, alignment: .leading)
         }
     }
 }
@@ -343,7 +550,7 @@ struct ClosedLyricLine: View {
     }
 
     private static func width(_ cue: Lyrics.Cue) -> CGFloat {
-        guard let text = cue.text else { return 12 }
+        guard let text = cue.text else { return 16 }
         return min(340, ceil((text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .medium)]).width))
     }
 }

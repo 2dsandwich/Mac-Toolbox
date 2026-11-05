@@ -11,45 +11,44 @@ import SwiftUI
 // What the open notch adds beside the hardware notch and behind its camera button: glances (the battery and others from
 // Settings), and a mirror from the front camera. The camera runs only while the mirror shows.
 
-/// The battery as macOS's menu bar draws it: its real level, a bolt while charging, a plug when it's plugged in but not
-/// charging (full, or charging held back), red when low on battery, yellow in Low Power Mode. Nothing on Macs without one.
+/// The battery as iPhone shows it with its percentage: the number inside the battery, cut out of it, over the level;
+/// green while charging (a bolt beside it), a plug beside it when plugged in but not charging, red when low on
+/// battery, yellow in Low Power Mode. Nothing on Macs without one.
 struct BatteryGlance: View {
     /// `--battery-states`: drawn for a made-up state.
     var fixed: Battery.State?
 
     var body: some View {
         if let b = fixed ?? Battery.shared.state {
-            HStack(spacing: 5) {
+            HStack(spacing: 3) {
                 Self.icon(b)
-                Text("\(b.pct)%").font(BandGlance.font).foregroundStyle(b.low && b.pct <= 10 ? Color.red : Color.white.opacity(0.85))
+                if b.charging || b.plugged {
+                    Image(systemName: b.charging ? "bolt.fill" : "powerplug.fill").font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
             }
             .fixedSize()
             .help(b.detail)
         }
     }
 
-    /// The battery outline with its level filled in, the bolt or plug cut out of the fill where they cross it.
+    /// The battery body filled to its level, the percentage knocked out of it so it reads over either part.
     static func icon(_ b: Battery.State) -> some View {
-        let w: CGFloat = 22, h: CGFloat = 11, inner = w - 4
-        let filled = 2 + max(1.5, inner * CGFloat(b.pct) / 100)
-        let color: Color = b.lowPower ? .yellow : b.low ? .red : b.charging ? .green : .white.opacity(0.9)
-        let glyph = Image(systemName: b.charging ? "bolt.fill" : "powerplug.fill").font(.system(size: 9.5, weight: .heavy)).frame(width: w, height: h)
+        let w: CGFloat = 27, h: CGFloat = 13
+        let color: Color = b.lowPower ? .yellow : b.low ? .red : b.charging ? .green : .white
+        let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
         return HStack(spacing: 1) {
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3.5, style: .continuous).strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous).fill(color).frame(width: filled - 2).padding(2)
+                shape.fill(Color.white.opacity(0.35))
+                Rectangle().fill(color).frame(width: w * CGFloat(min(100, max(0, b.pct))) / 100)
+                // Cut out of the battery: on the black notch, that's black.
+                Text("\(b.pct)").font(.system(size: b.pct >= 100 ? 9 : 10, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.black)
+                    .frame(width: w, height: h)
             }
             .frame(width: w, height: h)
-            .overlay {
-                if b.charging || b.plugged {
-                    ZStack {
-                        glyph.foregroundStyle(.white).mask(alignment: .trailing) { Rectangle().frame(width: w - filled) }
-                        glyph.foregroundStyle(.black).mask(alignment: .leading) { Rectangle().frame(width: filled) }
-                    }
-                    .frame(width: w, height: h)
-                }
-            }
-            Capsule().fill(Color.white.opacity(0.45)).frame(width: 1.5, height: 4)
+            .clipShape(shape)
+            Capsule().fill(Color.white.opacity(0.35)).frame(width: 1.5, height: 4.5)
         }
     }
 }

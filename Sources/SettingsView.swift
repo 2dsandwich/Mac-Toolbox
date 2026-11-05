@@ -673,7 +673,6 @@ private struct DictationPane: View {
                 Picker("Style", selection: $store.settings.dictationStyle) {
                     ForEach(DictationStyle.allCases) { Text($0.title).tag($0) }
                 }
-                Toggle("Show words while you speak", isOn: $store.settings.livePreview)
                 Toggle("Whisper mode (raise a quiet voice)", isOn: $store.settings.whisperMode)
                 Toggle("Use the Mac's microphone when AirPods or another Bluetooth mic is the default", isOn: $store.settings.builtInMicForBluetooth)
                 Toggle("Mute the Mac’s sound while dictating (not during meetings)", isOn: $store.settings.muteWhileDictating)
@@ -1792,8 +1791,6 @@ private struct NotchPane: View {
             store.settings.notchHoverExpand = d.notchHoverExpand
             store.settings.notchHoverDelay = d.notchHoverDelay
             store.settings.notchCollapseDelay = d.notchCollapseDelay
-            store.settings.notchOrder = d.notchOrder
-            store.settings.notchArrangements = [:]
         }
     }
 
@@ -1857,25 +1854,6 @@ private struct NotchPane: View {
             }
             .disabled(!store.settings.notchEnabled || !store.settings.notchEvents)
             .onAppear { if events.authorized { events.reload() } }
-            Section {
-                LabeledContent("Order") {
-                    Text(store.settings.notchPriority.map(\.title).joined(separator: " › ")).foregroundStyle(.secondary).lineLimit(2)
-                }
-                HStack {
-                    Spacer()
-                    Button("Reset Order") {
-                        store.settings.notchOrder = Settings().notchOrder
-                        store.settings.notchArrangements = [:]
-                    }
-                    .disabled(store.settings.notchPriority == Settings().notchPriority && store.settings.notchArrangements.isEmpty)
-                }
-            } header: {
-                Text("Closed notch")
-            } footer: {
-                Text("With more than three things going on, the closed notch shows the first three running in this order (alarms and dictation always first). Drag rows in the open notch to change it.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .disabled(!store.settings.notchEnabled)
             Section("Screenshots and sharing") {
                 Toggle("Show the notch in screenshots, recordings and screen sharing", isOn: $store.settings.notchInCaptures)
             }

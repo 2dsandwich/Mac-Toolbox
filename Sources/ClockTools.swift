@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Observation
 import SwiftUI
 
@@ -577,13 +578,19 @@ struct AlarmDraft: Equatable {
     var album = ""
     var appID: String?
     var playing = false
+    /// The cover showing. A new song keeps the last one up until its own is decoded, so there's never a blank between.
     var artwork: NSImage?
+    /// This song has no cover to be had (a local file, a stream, nothing in the catalogue): the note shows instead.
+    var artMissing = false
     var position: Double = 0
     var duration: Double = 0
     var updated = Date()
+    /// Spotify's track URI or Music's persistent ID: what tells one song from the next (two can share a name).
+    @ObservationIgnored private(set) var trackID = ""
+    /// A radio station or stream in Music (the song comes from its stream title, the cover from the catalogue).
+    @ObservationIgnored private var stream = false
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var poller: Timer?
-    @ObservationIgnored private var artKey = ""
     /// Snapshots and tests: keep the demo song (the player's answers are ignored).
     @ObservationIgnored var frozen = false
     /// Dev snapshots: the same as `frozen` (the notch's hooks set this one).
@@ -591,6 +598,10 @@ struct AlarmDraft: Equatable {
         get { frozen }
         set { frozen = newValue }
     }
+    /// Tests: a stand-in player that gets each command instead of Music or Spotify (and no media keys are sent).
+    @ObservationIgnored var fakePlayer: (@Sendable (String) -> Bool)?
+    /// Until then, answers from the player don't undo a seek or a play/pause it hasn't caught up with yet.
+    @ObservationIgnored private var hold = Date.distantPast
 
     var available: Bool { !title.isEmpty }
 
@@ -599,11 +610,7 @@ struct AlarmDraft: Equatable {
     var last: Last?
 
     /// Plays again in the app it came from.
-    func play(_ s: Last) {
-        var err: NSDictionary?
-        NSAppleScript(source: "tell application id \"\(s.appID)\" to play")?.executeAndReturnError(&err)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in MainActor.assumeIsolated { self?.refresh() } }
-    }
+    func play(_ s: Last) { send("tell application id \"\(s.appID)\" to play", key: nil) }
 
     /// The song name without "(feat. …)" (those names go in `collaborators`).
     var songTitle: String {
@@ -663,7 +670,8 @@ struct AlarmDraft: Equatable {
     /// Where the song is now (moves on between polls).
     var livePosition: Double {
         guard playing else { return position }
-        return min(duration, position + Date().timeIntervalSince(updated))
+        let p = position + Date().timeIntervalSince(updated)
+        return duration > 0 ? min(duration, p) : p
     }
 
     /// Spotify and Music announce every play, pause and new song, and the workspace announces them opening and
@@ -690,7 +698,7 @@ struct AlarmDraft: Equatable {
     }
 
     @ObservationIgnored private var started = false
-    private static let spotifyID = "com.spotify.client", musicID = "com.apple.Music"
+    nonisolated private static let spotifyID = "com.spotify.client", musicID = "com.apple.Music"
 
     /// Every 3 s while playing (keeps lyrics right after a seek), every 15 s while paused, none with both apps closed.
     private func schedulePoll(open: Bool) {
@@ -705,7 +713,7 @@ struct AlarmDraft: Equatable {
         poller = t
     }
 
-    private static func running(_ id: String) -> Bool {
+    nonisolated private static func running(_ id: String) -> Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty
     }
 
@@ -713,6 +721,8 @@ struct AlarmDraft: Equatable {
     /// notch; each question gives up after two seconds.
     private static let queue = DispatchQueue(label: "money.nowplaying", qos: .utility)
     @ObservationIgnored private var asking = false
+    /// Asked for while a question was out: asked again once it's back (dropping it left a skip unseen until the next poll).
+    @ObservationIgnored private var again = false
 
     func refresh() {
         guard !demo else { return }
@@ -720,20 +730,28 @@ struct AlarmDraft: Equatable {
         let spotify = Self.running(Self.spotifyID), music = Self.running(Self.musicID)
         defer { schedulePoll(open: spotify || music) }
         guard spotify || music else { return apply(nil, source: nil) }
-        guard !asking else { return }
+        guard !asking else { again = true; return }
         asking = true
         Self.queue.async { [weak self] in
             let (info, source) = Self.read(spotify: spotify, music: music)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self?.asking = false
-                    self?.apply(info, source: source)
-                    self?.schedulePoll(open: true) // playing or paused now decides the next poll
+                    guard let self else { return }
+                    self.asking = false
+                    self.apply(info, source: source)
+                    self.schedulePoll(open: true) // playing or paused now decides the next poll
+                    if self.again { self.again = false; self.refresh() }
                 }
             }
         }
     }
 
+    private func refresh(after delays: [Double]) {
+        for d in delays { DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in MainActor.assumeIsolated { self?.refresh() } } }
+    }
+
+    /// Each field on its own `try` (as 2dle reads them), so one the player can't give (a stream's length, a local
+    /// file's cover) doesn't lose the rest. state || name || artist || album || cover URL || position || length || id || stream title
     nonisolated private static func read(spotify: Bool, music: Bool) -> ([String]?, String?) {
         var info: [String]?
         var source: String?
@@ -743,11 +761,31 @@ struct AlarmDraft: Equatable {
               tell application "Spotify"
                 if player state is stopped then return ""
                 set t to current track
-                return (player state as string) & "||" & (name of t) & "||" & (artist of t) & "||" & (album of t) & "||" & (artwork url of t) & "||" & (player position as string) & "||" & ((duration of t) / 1000 as string)
+                set {n, ar, al, u, i, d} to {"", "", "", "", "", 0}
+                try
+                  set n to name of t
+                end try
+                try
+                  set ar to artist of t
+                end try
+                try
+                  set al to album of t
+                end try
+                try
+                  set u to artwork url of t
+                end try
+                if u is missing value then set u to ""
+                try
+                  set i to id of t
+                end try
+                try
+                  set d to (duration of t) / 1000
+                end try
+                return (player state as string) & "||" & n & "||" & ar & "||" & al & "||" & u & "||" & (player position as string) & "||" & (d as string) & "||" & i & "||"
               end tell
             end timeout
             """)
-            source = "com.spotify.client"
+            source = spotifyID
         }
         if (info == nil || info?.first != "playing"), music {
             if let m = ask("""
@@ -755,12 +793,37 @@ struct AlarmDraft: Equatable {
               tell application "Music"
                 if player state is stopped then return ""
                 set t to current track
-                return (player state as string) & "||" & (name of t) & "||" & (artist of t) & "||" & (album of t) & "||" & "" & "||" & (player position as string) & "||" & (duration of t as string)
+                set {n, ar, al, i, d, p, s} to {"", "", "", "", 0, 0, ""}
+                try
+                  set n to name of t
+                end try
+                try
+                  set ar to artist of t
+                end try
+                try
+                  set al to album of t
+                end try
+                try
+                  set i to persistent ID of t
+                end try
+                try
+                  set d to duration of t
+                end try
+                if d is missing value then set d to 0
+                try
+                  set p to player position
+                end try
+                if p is missing value then set p to 0
+                try
+                  set s to current stream title
+                end try
+                if s is missing value then set s to ""
+                return (player state as string) & "||" & n & "||" & ar & "||" & al & "||" & "" & "||" & (p as string) & "||" & (d as string) & "||" & i & "||" & s
               end tell
             end timeout
             """), m.first == "playing" || info == nil {
                 info = m
-                source = "com.apple.Music"
+                source = musicID
             }
         }
         return (info, source)
@@ -770,26 +833,40 @@ struct AlarmDraft: Equatable {
         guard !frozen else { return }
         let wasPlaying = playing, wasTitle = title
         let started = info.map { $0.first == "playing" } ?? false
+        func number(_ s: String) -> Double { Double(s.replacingOccurrences(of: ",", with: ".")) ?? 0 }
         // Only what changed is written: every write redraws whatever shows the song, and most polls change nothing.
         // The position moves on by itself between polls (`livePosition`), so it's only corrected when it drifted.
         let change = { [self] in
-            if let f = info, f.count >= 7 {
+            if let f = info, f.count >= 9 {
+                var (name, who, from) = (f[1], f[2], f[3])
+                // A radio station or stream: Music names the station; the song is its stream title ("Artist - Song").
+                stream = !f[8].isEmpty
+                if stream {
+                    let parts = f[8].components(separatedBy: " - ")
+                    if parts.count > 1 { who = parts[0]; name = parts.dropFirst().joined(separator: " - ") } else { name = f[8] }
+                    from = ""
+                }
                 let nowPlaying = f[0] == "playing"
-                let pos = Double(f[5].replacingOccurrences(of: ",", with: ".")) ?? 0
-                let dur = Double(f[6].replacingOccurrences(of: ",", with: ".")) ?? 0
-                let newSong = title != f[1] || artist != f[2]
-                if newSong || nowPlaying != playing || abs(pos - livePosition) > 1 {
+                let pos = number(f[5]), dur = number(f[6])
+                let id = f[7].isEmpty || stream ? "\(name)|\(who)|\(from)" : f[7]
+                let newSong = id != trackID
+                // Just seeked or tapped play/pause: an answer from before the player caught up doesn't undo it.
+                let held = !newSong && Date() < hold
+                if newSong || (!held && (nowPlaying != playing || abs(pos - livePosition) > 1)) {
                     position = pos
                     updated = Date()
                 }
-                if playing != nowPlaying { playing = nowPlaying }
-                if title != f[1] { title = f[1] }
-                if artist != f[2] { artist = f[2] }
-                if album != f[3] { album = f[3] }
+                if !held, playing != nowPlaying { playing = nowPlaying }
+                trackID = id
+                if title != name { title = name }
+                if artist != who { artist = who }
+                if album != from { album = from }
                 if duration != dur { duration = dur }
                 if appID != source { appID = source }
                 loadArtwork(url: f[4], source: source)
                 lookUpCredits()
+                // Spotify can announce a song while its cover is still the last one's: asked again shortly (2dle does too).
+                if newSong { refresh(after: [0.7, 2.2]) }
             } else if !title.isEmpty || playing || appID != nil || last != nil {
                 // Stopped with its app still open: kept to offer again; quit, forgotten.
                 if let id = appID, !title.isEmpty, Self.running(id) {
@@ -801,7 +878,9 @@ struct AlarmDraft: Equatable {
                 title = ""
                 artist = ""
                 artwork = nil
-                artKey = "" // the same song coming back loads its artwork again
+                artMissing = false
+                artKey = "" // the same song coming back shows its (kept) cover again
+                trackID = ""
                 appID = nil
             }
         }
@@ -821,20 +900,166 @@ struct AlarmDraft: Equatable {
         return out.components(separatedBy: "||")
     }
 
+    // MARK: Artwork (after 2dle: the player's own cover first, then exactly this album from Apple's catalogue, else none)
+
+    /// The cover wanted (the song playing) and the one showing.
+    @ObservationIgnored private var artKey = ""
+    @ObservationIgnored private var shownKey = ""
+    /// Decoded covers by key (the last 40), and keys known to have none.
+    @ObservationIgnored private var covers: [String: NSImage] = [:]
+    @ObservationIgnored private var coverOrder: [String] = []
+    @ObservationIgnored private var coverless: Set<String> = []
+
+    /// Spotify: its cover URL (one per album, so an album's songs share it), or the track when it gave none. Music: the
+    /// album, or the song when it has no album name.
+    private func coverKey(_ url: String, _ source: String?) -> String {
+        if !url.isEmpty { return url }
+        if source == Self.spotifyID { return "spotify|" + trackID }
+        return "music|\(artist)|\(album.isEmpty ? "song:" + title : album)".lowercased()
+    }
+
     private func loadArtwork(url: String, source: String?) {
-        let key = "\(source ?? "")|\(title)|\(album)"
+        let key = coverKey(url, source)
         guard key != artKey else { return }
         artKey = key
-        artwork = nil
-        if let u = URL(string: url), !url.isEmpty {
-            Task {
-                if let (data, _) = try? await URLSession.shared.data(from: u), let img = NSImage(data: data), self.artKey == key { self.artwork = img }
-            }
-        } else if source == "com.apple.Music" {
-            var err: NSDictionary?
-            let d = NSAppleScript(source: "tell application \"Music\" to get raw data of artwork 1 of current track")?.executeAndReturnError(&err)
-            if err == nil, let data = d?.data, let img = NSImage(data: data) { artwork = img }
+        if let img = covers[key] { return show(img, key) }
+        if coverless.contains(key) { return showNone(key) }
+        // The last cover stays up while this one comes; with nothing by then, the note.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            MainActor.assumeIsolated { if let self, self.artKey == key, self.shownKey != key { self.showNone(key, remember: false) } }
         }
+        if let u = URL(string: url), !url.isEmpty { return fetch(u, key) }
+        if source == Self.musicID, !stream { return musicArtwork(key, song: title, tries: 2) }
+        if trackID.hasPrefix("spotify:track:") || trackID.hasPrefix("spotify:episode:") { return oEmbed(key) }
+        if source == Self.musicID { return catalogue(key) }
+        showNone(key) // a local file in Spotify
+    }
+
+    private func show(_ img: NSImage, _ key: String) {
+        covers[key] = img
+        coverOrder.removeAll { $0 == key }
+        coverOrder.append(key)
+        if coverOrder.count > 40 { covers[coverOrder.removeFirst()] = nil }
+        guard key == artKey else { return }
+        shownKey = key
+        if artMissing { artMissing = false }
+        if artwork !== img { artwork = img }
+    }
+
+    private func showNone(_ key: String, remember: Bool = true) {
+        if remember { coverless.insert(key) }
+        guard key == artKey else { return }
+        shownKey = key
+        artwork = nil
+        artMissing = true
+    }
+
+    /// Downloaded and decoded off the main thread (the first draw of an undecoded picture hitched the cross-fade).
+    private func fetch(_ url: URL, _ key: String) {
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let img = data.flatMap(Self.decode)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { if let img { self?.show(img, key) } else { self?.showNone(key, remember: false) } }
+            }
+        }.resume()
+    }
+
+    nonisolated static func decode(_ data: Data) -> NSImage? {
+        let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 400,
+                    kCGImageSourceShouldCacheImmediately: true, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary
+        guard data.count > 64, let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    /// Music's own copy of the cover (`raw data`, else `data`), checked to be of this very song: a song just begun can
+    /// be ahead of its artwork, or Music still on the last one, so it's asked again shortly; none, the catalogue.
+    private func musicArtwork(_ key: String, song: String, tries: Int) {
+        Self.queue.async { [weak self] in
+            let (name, data) = Self.musicCover()
+            let img = data.flatMap(Self.decode)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.artKey == key else { return }
+                    if let img, name == song { return self.show(img, key) }
+                    guard tries > 0 else { return self.catalogue(key) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        MainActor.assumeIsolated { if self.artKey == key { self.musicArtwork(key, song: song, tries: tries - 1) } }
+                    }
+                }
+            }
+        }
+    }
+
+    nonisolated private static func musicCover() -> (String, Data?) {
+        let script = """
+        with timeout of 3 seconds
+          tell application "Music"
+            set t to current track
+            set img to missing value
+            try
+              set img to raw data of artwork 1 of t
+            end try
+            if img is missing value then
+              try
+                set img to data of artwork 1 of t
+              end try
+            end if
+            return {name of t, img}
+          end tell
+        end timeout
+        """
+        var err: NSDictionary?
+        let s = compiled[script] ?? NSAppleScript(source: script)
+        compiled[script] = s
+        guard running(musicID), let r = s?.executeAndReturnError(&err), err == nil, r.numberOfItems >= 2 else { return ("", nil) }
+        let pic = r.atIndex(2).flatMap { $0.descriptorType == typeNull || $0.descriptorType == typeType ? nil : $0.data }
+        return (r.atIndex(1)?.stringValue ?? "", pic)
+    }
+
+    /// Exactly this album (or, with no album, this song) by this artist from Apple's public catalogue, or none: a cover
+    /// that's only close (another edition, a namesake) is worse than the note.
+    private func catalogue(_ key: String) {
+        let song = songTitle, who = artist.lowercased(), record = album
+        var c = URLComponents(string: "https://itunes.apple.com/search")
+        c?.queryItems = [URLQueryItem(name: "term", value: "\(artist) \(record.isEmpty ? song : record)"),
+                         URLQueryItem(name: "entity", value: record.isEmpty ? "song" : "album"), URLQueryItem(name: "limit", value: "10")]
+        guard !who.isEmpty, !song.isEmpty, let url = c?.url else { return showNone(key) }
+        let wanted = Self.norm(record.isEmpty ? song : record), field = record.isEmpty ? "trackName" : "collectionName"
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let rows = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["results"] as? [[String: Any]] ?? []
+            let hit = rows.first { r in
+                let name = (r["artistName"] as? String ?? "").lowercased()
+                return Self.norm(r[field] as? String ?? "") == wanted && (name.contains(who) || who.contains(name))
+            }
+            let art = (hit?["artworkUrl100"] as? String)?.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let art, let u = URL(string: art) { self?.fetch(u, key) } else { self?.showNone(key, remember: data != nil) }
+                }
+            }
+        }.resume()
+    }
+
+    /// A name without "(Deluxe)" or " - Single", lowercased, to compare with the catalogue's.
+    nonisolated private static func norm(_ s: String) -> String {
+        s.lowercased().replacingOccurrences(of: #"\s*[\(\[][^\)\]]*[\)\]]|\s+-\s+(single|ep)$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Spotify gave no cover URL: its public oEmbed page has the track's (or episode's) thumbnail.
+    private func oEmbed(_ key: String) {
+        var c = URLComponents(string: "https://open.spotify.com/oembed")
+        c?.queryItems = [URLQueryItem(name: "url", value: trackID)]
+        guard let url = c?.url else { return showNone(key) }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let thumb = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["thumbnail_url"] as? String
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let thumb, let u = URL(string: thumb) { self?.fetch(u, key) } else { self?.showNone(key, remember: data != nil) }
+                }
+            }
+        }.resume()
     }
 
     // MARK: Controls
@@ -852,22 +1077,59 @@ struct AlarmDraft: Equatable {
         }
     }
 
-    func playPause() { control("playpause", key: 16) }
+    func playPause() {
+        // Shown at once; the player's own answer a moment later confirms it.
+        if available {
+            position = livePosition
+            updated = Date()
+            playing.toggle()
+            hold = Date().addingTimeInterval(1.5)
+        }
+        control("playpause", key: 16)
+    }
     func next() { control("next track", key: 17) }
     func previous() { control("previous track", key: 18) }
 
+    /// Moves the song to a time: the bar goes there at once and the player follows (`set player position`, which
+    /// Spotify and Music both take).
+    func seek(to t: Double) {
+        guard let id = appID, duration > 0 else { return }
+        let to = min(max(0, t), max(0, duration - 0.5))
+        position = to
+        updated = Date()
+        hold = Date().addingTimeInterval(1.5)
+        send("tell application id \"\(id)\" to set player position to " + String(format: "%.2f", to), key: nil)
+    }
+
     private func control(_ command: String, key: Int32) {
-        if let id = appID, Self.running(id) {
-            var err: NSDictionary?
-            NSAppleScript(source: "tell application id \"\(id)\" to \(command)")?.executeAndReturnError(&err)
-            if err == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in MainActor.assumeIsolated { self?.refresh() } }
-                return
+        guard let id = appID, fakePlayer != nil || Self.running(id) else {
+            Self.mediaKey(key)
+            return refresh(after: [0.4])
+        }
+        send("tell application id \"\(id)\" to \(command)", key: key)
+    }
+
+    /// Off the main thread (a busy player can take a while to answer), then the player is asked what it's doing now.
+    /// A command it refused goes out as the media key instead.
+    private func send(_ script: String, key: Int32?) {
+        let fake = fakePlayer
+        Self.controls.async {
+            let ok: Bool
+            if let fake { ok = fake(script) } else {
+                var err: NSDictionary?
+                NSAppleScript(source: script)?.executeAndReturnError(&err)
+                ok = err == nil
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if !ok, fake == nil, let key { Self.mediaKey(key) }
+                    NowPlaying.shared.refresh(after: [0.3, 1.6])
+                }
             }
         }
-        Self.mediaKey(key)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in MainActor.assumeIsolated { self?.refresh() } }
     }
+
+    private static let controls = DispatchQueue(label: "money.nowplaying.controls", qos: .userInitiated)
 
     /// The keyboard's play/pause, next and previous keys (work with whatever is playing, browsers included).
     static func mediaKey(_ key: Int32) {

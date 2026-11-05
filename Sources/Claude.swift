@@ -4,7 +4,6 @@ import Security
 /// The Anthropic API key lives in the login Keychain, never in settings files.
 enum Keychain {
     private static let service = "dev.masashik.flick"
-
     /// Only the installed app touches the Keychain. A copy run from anywhere else (a test build) counts as another app
     /// to macOS: reading asks for the login password every time, and writing re-creates the item so that only that copy
     /// is trusted and the real app has to ask again, whatever "Always Allow" said.
