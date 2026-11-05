@@ -1613,7 +1613,8 @@ enum Metrics {
 
     // MARK: Snapshot (off-screen render for checking layout; glass can't render off screen)
 
-    func snapshot(scope: Scope, query: String, dark: Bool, to path: String) {
+    /// `frames`: also captures `path-0.png`, `path-1.png` … that many seconds after `start` runs (motion caught part way).
+    func snapshot(scope: Scope, query: String, dark: Bool, to path: String, frames: [Double] = [], start: () -> Void = {}) {
         index.refresh(folders: store.settings.searchFolders)
         let deadline = Date().addingTimeInterval(5)
         while index.apps.isEmpty, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
@@ -1644,10 +1645,20 @@ enum Metrics {
         window.contentView = hv
         window.orderFrontRegardless()
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
-        hv.layoutSubtreeIfNeeded()
-        guard let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) else { return }
-        hv.cacheDisplay(in: hv.bounds, to: rep)
-        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        func capture(_ to: String) {
+            hv.layoutSubtreeIfNeeded()
+            guard let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) else { return }
+            hv.cacheDisplay(in: hv.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: to))
+        }
+        capture(path)
+        guard !frames.isEmpty else { return }
+        start()
+        let begun = Date()
+        for (n, t) in frames.enumerated() {
+            RunLoop.main.run(until: begun.addingTimeInterval(t))
+            capture(path.replacingOccurrences(of: ".png", with: "") + "-\(n).png")
+        }
     }
 }
 

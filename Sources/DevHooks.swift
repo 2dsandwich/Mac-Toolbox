@@ -607,7 +607,10 @@ extension AppDelegate {
                 NoteBoard.shared.add("買い物: 牛乳、卵、コーヒー")
                 NoteBoard.shared.editing = nil
             }
-            if scope == .assistant, args.contains("--demo") { Assistant.shared.demo(busy: args.contains("--busy")) }
+            if scope == .assistant, args.contains("--demo") {
+                Assistant.shared.demo(busy: args.contains("--busy") || args.contains("--stream"))
+                if args.contains("--first") { Assistant.shared.turns.removeFirst(Assistant.shared.turns.count - 1) } // only the open question
+            }
             // Made-up events, never the real calendar ("calendar", "予定"); the real notch stays hidden.
             island.onStage = nil
             CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
@@ -626,7 +629,10 @@ extension AppDelegate {
                 launcher.model.sites = loaded.sites
                 launcher.model.favicons = loaded.favicons
             }
-            launcher.snapshot(scope: scope, query: value("--query") ?? "", dark: args.contains("--dark"), to: args[i + 1])
+            // --stream: a made-up answer streams into the open question; frames catch its fade-in part way.
+            let stream = scope == .assistant && args.contains("--stream")
+            launcher.snapshot(scope: scope, query: value("--query") ?? "", dark: args.contains("--dark"), to: args[i + 1],
+                              frames: stream ? [0.15, 0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.7, 3.5] : []) { Assistant.shared.demoStream() }
             exit(0)
         }
 
