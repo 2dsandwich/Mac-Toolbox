@@ -401,6 +401,39 @@ extension AppDelegate {
             }
             return true
         }
+        if let i = args.firstIndex(of: "--battery-states"), i + 1 < args.count {
+            // The battery glance in each state it can be in (made up), on black, plus the real one last.
+            islandController.freeze()
+            typealias S = Battery.State
+            let states: [(String, S?)] = [
+                ("on battery 80%", S(pct: 80)), ("on battery 45%", S(pct: 45)), ("low 18%", S(pct: 18)), ("critical 7%", S(pct: 7)),
+                ("charging 35%", S(pct: 35, charging: true, plugged: true)), ("charging 92%", S(pct: 92, charging: true, plugged: true)),
+                ("plugged, held at 80%", S(pct: 80, plugged: true)), ("full, plugged", S(pct: 100, plugged: true, charged: true)),
+                ("Low Power Mode 55%", S(pct: 55, lowPower: true)), ("Low Power Mode 15%", S(pct: 15, lowPower: true)),
+                ("real: " + (Battery.shared.state?.detail ?? "no battery"), Battery.shared.state),
+            ]
+            let view = VStack(alignment: .leading, spacing: 10) {
+                ForEach(states.indices, id: \.self) { k in
+                    HStack(spacing: 16) {
+                        BatteryGlance(fixed: states[k].1).frame(width: 70, alignment: .leading)
+                        Text(states[k].0).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+                    }
+                }
+            }
+            .padding(16).frame(width: 360, alignment: .leading).background(Color.black).environment(\.colorScheme, .dark)
+            let hv = NSHostingView(rootView: view)
+            hv.frame = NSRect(origin: .zero, size: hv.fittingSize)
+            let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: hv.fittingSize), styleMask: .borderless, backing: .buffered, defer: false)
+            w.contentView = hv
+            w.orderFrontRegardless()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) {
+                hv.cacheDisplay(in: hv.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+            }
+            print("real:", Battery.shared.state.map { "\($0)" } ?? "none")
+            exit(0)
+        }
         if args.contains("--idle-track-test") {
             // Hover the bare notch with a pretend pointer, then move away: it should open, then close all the way.
             // The real panel never comes on screen (no onStage).
@@ -432,6 +465,7 @@ extension AppDelegate {
             // panel stays hidden (nothing shows on screen), and the demo song stands in for whatever is really playing.
             island.onStage = nil
             island.haptic = {}
+            islandController.freeze()
             CameraMirror.placeholder = true // the real camera never comes on here
             NowPlaying.shared.demo = true
             if !args.contains("--media-only") {
@@ -477,6 +511,19 @@ extension AppDelegate {
                 // Alone, so its open view comes first (whatever is really playing stays out).
                 if args.contains("--no-media") { NowPlaying.shared.onChange = nil; NowPlaying.shared.title = "" }
             }
+            // The idle notch's extras, made up: `--home` a stopped song to play again, weather and an event later today.
+            if args.contains("--home") {
+                NowPlaying.shared.last = .init(title: "Blinding Lights", artist: "The Weeknd", artwork: Self.demoArt(), appID: "com.apple.Music")
+                BandData.shared.weather = ("cloud.sun.fill", 18, 21, 12)
+                let at = Calendar.current.date(bySettingHour: 21, minute: 30, second: 0, of: Date()) ?? Date()
+                CalendarEvents.shared.useDemo([CalendarEvent(id: "demo-later", title: "Design review", start: at, end: at.addingTimeInterval(1800), color: .systemPurple)])
+            }
+            // `--no-notch`: as on a Mac without a notch.
+            if args.contains("--no-notch") { island.geometry = .plain(island.geometry.screenFrame) }
+            // `--band battery,weather`: the glances left of the notch (the saved settings stay as they are).
+            if let j = args.firstIndex(of: "--band"), j + 1 < args.count {
+                island.bandOverride = args[j + 1].split(separator: ",").compactMap { BandItem(rawValue: String($0)) }
+            }
             island.refresh()
             if args.contains("--idle") {
                 // Nothing running: hovering opens it (clock, battery, camera); leaving closes it all the way.
@@ -509,6 +556,46 @@ extension AppDelegate {
                 print("front app full screen:", IslandController.frontIsFullScreen(on: island.geometry.screenFrame))
                 exit(0)
             }
+            if let k = args.firstIndex(of: "--dictation-frames"), k + 1 < args.count {
+                // Dictation starting (`start`) or finishing (`end`), caught every 40 ms on one contact sheet: from the
+                // closed notch, or with `--idle` from the open one with nothing else running.
+                let d = island.dictation, island = island!
+                let (w, hv) = islandWindow(args)
+                island.lastInteraction = .distantFuture
+                if args.contains("--idle") {
+                    island.idleOpen = false
+                    island.stage = .hidden
+                    island.openIdle()
+                }
+                d.handsFree = args.contains("--hands-free")
+                d.levels = (0..<20).map { i in Float(0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
+                let words = "So the plan for tomorrow is"
+                var steps: [(ms: Double, run: () -> Void)]
+                if args[k + 1] == "end" {
+                    d.phase = .listening
+                    d.preview = words
+                    island.refresh()
+                    steps = [(80, { d.phase = .processing; island.refresh() }), (780, { d.phase = .idle; d.preview = ""; island.refresh() })]
+                } else {
+                    steps = [(80, { d.phase = .starting; island.refresh() }), (320, { d.phase = .listening; island.refresh() }),
+                             (600, { d.preview = words; island.refresh() })]
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(1))
+                var frames: [(String, NSBitmapImageRep)] = []
+                let start = Date()
+                for ms in stride(from: 0.0, through: 1400, by: 40) {
+                    while let s = steps.first, s.ms <= ms { s.run(); steps.removeFirst() }
+                    RunLoop.main.run(until: start.addingTimeInterval((ms + 39) / 1000))
+                    let size = island.geometry.panelSize
+                    let crop = NSRect(x: size.width / 2 - 340, y: hv.isFlipped ? 0 : size.height - 190, width: 680, height: 190)
+                    if let rep = hv.bitmapImageRepForCachingDisplay(in: crop) { hv.cacheDisplay(in: crop, to: rep); frames.append(("\(Int(ms)) ms", rep)) }
+                }
+                w.orderOut(nil)
+                try? Self.contactSheet(frames, columns: 3).flatMap { $0.representation(using: .png, properties: [:]) }?
+                    .write(to: URL(fileURLWithPath: args[i + 1] + "-dictation-\(args[k + 1]).png"))
+                print("stage", island.stage, "activities", island.activities)
+                exit(0)
+            }
             var images: [NSBitmapImageRep] = []
             for stage in [IslandStage.compact, .expanded] {
                 island.lastInteraction = .distantFuture // keep it open for the picture
@@ -520,11 +607,8 @@ extension AppDelegate {
                     if args.contains("--promote-tile") { island.focus = island.tiles.first }
                 }
                 let size = island.geometry.panelSize
-                let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
                 setbuf(stdout, nil)
-            let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
-                w.contentView = hv
-                w.orderFrontRegardless()
+                let (w, hv) = islandWindow(args)
                 RunLoop.main.run(until: Date().addingTimeInterval(0.6))
                 if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) { hv.cacheDisplay(in: hv.bounds, to: rep); images.append(rep) }
                 if stage == .expanded, let k = args.firstIndex(of: "--click"), k + 1 < args.count {
@@ -599,7 +683,7 @@ extension AppDelegate {
                 try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1] + "-\(n).png"))
             }
             print("song:", NowPlaying.shared.songTitle, "| with:", NowPlaying.shared.artistLine)
-            print("seed", island.geometry.seedSize.width, "compact", island.compactLayout.side, "open", island.shapeSize, "tiles", island.tiles.count)
+            print("seed", island.geometry.seedSize.width, "compact", island.compactLayout.side, "open", island.shapeSize, "tiles", island.tiles.count, "lane", island.bandLane, "clear each side", (island.openWidth - island.geometry.seedSize.width) / 2 - island.sideInset - island.bandLane)
             print("panel level", islandController.panelLevel, "(menu bar \(NSWindow.Level.mainMenu.rawValue))")
             exit(0)
         }
@@ -964,6 +1048,48 @@ extension AppDelegate {
             meeting.volatileMe = ""
         default: break
         }
+    }
+
+    /// The notch drawn off screen in its own window, on a light backdrop; `--show-notch` marks the camera housing
+    /// (2 pt past the gap the menu bar leaves on each side) in red, to check nothing sits over it.
+    func islandWindow(_ args: [String]) -> (NSWindow, NSView) {
+        let g = island.geometry, size = g.panelSize
+        let root = IslandView(model: island, openMeeting: {})
+            .frame(width: size.width, height: size.height)
+            .overlay(alignment: .top) {
+                if args.contains("--show-notch"), g.hasNotch {
+                    Rectangle().fill(Color.red.opacity(0.45)).frame(width: g.seedSize.width + 4, height: g.notchHeight)
+                }
+            }
+            .background(Color(white: 0.85))
+        let hv = NSHostingView(rootView: root)
+        let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+        w.contentView = hv
+        w.orderFrontRegardless()
+        return (w, hv)
+    }
+
+    /// Frames side by side, each with its label, at half size.
+    static func contactSheet(_ frames: [(String, NSBitmapImageRep)], columns: Int) -> NSBitmapImageRep? {
+        guard let first = frames.first?.1 else { return nil }
+        let fw = first.size.width, fh = first.size.height + 16
+        let rows = (frames.count + columns - 1) / columns
+        let size = NSSize(width: fw * CGFloat(columns), height: fh * CGFloat(rows))
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        for (n, (label, f)) in frames.enumerated() {
+            let x = CGFloat(n % columns) * fw, y = size.height - CGFloat(n / columns + 1) * fh
+            f.draw(in: NSRect(x: x, y: y, width: fw, height: fh - 16))
+            (label as NSString).draw(at: NSPoint(x: x + 4, y: y + fh - 15), withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold)])
+            NSColor(white: 0.6, alpha: 1).setFill()
+            NSRect(x: x + fw - 1, y: y, width: 1, height: fh).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
     }
 
     /// A stand-in album cover for snapshots: a red sky over a dark street.

@@ -594,6 +594,17 @@ struct AlarmDraft: Equatable {
 
     var available: Bool { !title.isEmpty }
 
+    /// The song from before the player stopped, while Music or Spotify is still open (the idle notch offers it again).
+    struct Last { var title: String, artist: String, artwork: NSImage?, appID: String }
+    var last: Last?
+
+    /// Plays again in the app it came from.
+    func play(_ s: Last) {
+        var err: NSDictionary?
+        NSAppleScript(source: "tell application id \"\(s.appID)\" to play")?.executeAndReturnError(&err)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in MainActor.assumeIsolated { self?.refresh() } }
+    }
+
     /// The song name without "(feat. …)" (those names go in `collaborators`).
     var songTitle: String {
         title.replacingOccurrences(of: #"\s*[\(\[](?:feat\.?|ft\.?|featuring|with)\s+[^\)\]]+[\)\]]"#, with: "", options: [.regularExpression, .caseInsensitive])
@@ -779,7 +790,13 @@ struct AlarmDraft: Equatable {
                 if appID != source { appID = source }
                 loadArtwork(url: f[4], source: source)
                 lookUpCredits()
-            } else if !title.isEmpty || playing || appID != nil {
+            } else if !title.isEmpty || playing || appID != nil || last != nil {
+                // Stopped with its app still open: kept to offer again; quit, forgotten.
+                if let id = appID, !title.isEmpty, Self.running(id) {
+                    last = Last(title: songTitle, artist: artistLine, artwork: artwork, appID: id)
+                } else if let l = last, !Self.running(l.appID) {
+                    last = nil
+                }
                 playing = false
                 title = ""
                 artist = ""
