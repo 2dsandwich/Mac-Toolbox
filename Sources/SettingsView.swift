@@ -3,7 +3,7 @@ import SwiftUI
 import Carbon.HIToolbox
 
 enum Pane: String, CaseIterable, Identifiable {
-    case general, stats, appearance, hotkeys, shortcuts, tools, clock, notch, clipboard, dictation, meetings, claude, apps
+    case general, stats, appearance, hotkeys, shortcuts, tools, clock, notch, clipboard, dictation, meetings, google, claude, apps
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -18,6 +18,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .clipboard: "Clipboard"
         case .dictation: "Dictation"
         case .meetings: "Meetings"
+        case .google: "Google"
         case .claude: "AI"
         case .apps: "Apps"
         }
@@ -35,6 +36,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .clipboard: "doc.on.clipboard"
         case .dictation: "mic"
         case .meetings: "waveform"
+        case .google: "person.crop.circle"
         case .claude: "sparkles"
         case .apps: "square.grid.2x2"
         }
@@ -52,6 +54,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .clipboard: .teal
         case .dictation: .pink
         case .meetings: .red
+        case .google: .blue
         case .claude: Color(red: 0.85, green: 0.45, blue: 0.3)
         case .apps: .green
         }
@@ -95,6 +98,7 @@ struct SettingsView: View {
                     case .clipboard: ClipboardPane(store: store, clipboard: clipboard)
                     case .dictation: DictationPane(store: store)
                     case .meetings: MeetingsPane(store: store)
+                    case .google: GooglePane()
                     case .claude: AIPane(store: store)
                     case .apps: AppsPane(store: store, launcher: launcher)
                     }
@@ -103,6 +107,7 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showSettingsPane)) { n in if let p = n.object as? Pane { pane = p } }
     }
 }
 
