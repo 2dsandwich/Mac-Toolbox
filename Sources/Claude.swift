@@ -4,8 +4,11 @@ import Security
 /// The Anthropic API key lives in the login Keychain, never in settings files.
 enum Keychain {
     private static let service = "dev.masashik.flick"
+    /// Only the installed app touches the Keychain (test builds elsewhere would make macOS ask for the password).
+    static var allowed: Bool { Bundle.main.bundlePath.hasPrefix("/Applications/") }
 
     static func get(_ account: String) -> String? {
+        guard allowed else { return nil }
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                 kSecAttrAccount as String: account, kSecReturnData as String: true]
         var out: AnyObject?
@@ -14,6 +17,7 @@ enum Keychain {
     }
 
     static func set(_ value: String?, account: String) {
+        guard allowed else { return }
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                    kSecAttrAccount as String: account]
         SecItemDelete(base as CFDictionary)

@@ -18,7 +18,6 @@ import SwiftUI
     var mode = Mode.dictate
     var handsFree = false
     var levels = [Float](repeating: 0, count: 20)
-    var preview = ""
     /// Listening, but nothing louder than silence has come from the microphone yet.
     var noSound = false
 
@@ -115,7 +114,6 @@ import SwiftUI
         mode = m
         handsFree = false
         stopWhenReady = false
-        preview = ""
         noSound = false
         heardSound = false
         levels = levels.map { _ in 0 }
@@ -151,10 +149,6 @@ import SwiftUI
             }
             guard phase == .starting else { return } // cancelled meanwhile
             transcribers = ts
-            for t in ts {
-                t.onVolatile = { [weak self] _ in Task { @MainActor in self?.refreshPreview() } }
-                t.onFinal = { [weak self] _ in Task { @MainActor in self?.refreshPreview() } }
-            }
             let mic = MicCapture(preferBuiltIn: store.settings.builtInMicForBluetooth)
             mic.boost = store.settings.whisperMode
             mic.onBuffer = { buf in ts.forEach { $0.append(buf) } }
@@ -237,17 +231,6 @@ import SwiftUI
         if silent != noSound {
             noSound = silent
             changed()
-        }
-    }
-
-    private func refreshPreview() {
-        guard store.settings.livePreview else { return }
-        let ts = transcribers
-        if let merged = SpeechMerge.merge(ts.map { ($0.locale.identifier, $0.words) }) {
-            // What's settled, phrase by phrase, then the words still coming in.
-            preview = joinSegments([merged, best(ts.map { ($0.locale.identifier, $0.volatileText, $0.averageConfidence) })])
-        } else {
-            preview = best(ts.map { ($0.locale.identifier, $0.text, $0.averageConfidence) })
         }
     }
 

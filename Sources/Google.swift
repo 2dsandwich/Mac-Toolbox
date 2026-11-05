@@ -76,6 +76,7 @@ import Security
 
     /// The client Moneybag signs in with, read from its Keychain item on this Mac (macOS may ask once).
     static func moneybagClient() -> Client? {
+        guard Keychain.allowed else { return nil }
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Ardia Connected Accounts",
                                 kSecAttrAccount as String: "google-workspace", kSecReturnData as String: true,
                                 kSecMatchLimit as String: kSecMatchLimitOne]
@@ -88,6 +89,7 @@ import Security
 
     /// Whether Moneybag has a client to borrow (attributes only, so macOS doesn't ask).
     static var moneybagHasClient: Bool {
+        guard Keychain.allowed else { return false }
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Ardia Connected Accounts",
                                 kSecAttrAccount as String: "google-workspace", kSecReturnAttributes as String: true]
         return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess

@@ -79,7 +79,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// A tile tapped in the open notch: it takes the main spot until the notch closes.
     var focus: Slot?
     /// The player shows the song's lyrics in place of its timeline (Settings keeps the choice).
-    var lyricsFace: Bool { !Lyrics.shared.cues.isEmpty && (lyricsOverride ?? Store.shared.settings.notchLyricsOpen) }
+    var lyricsFace: Bool { Lyrics.shared.hasLines && (lyricsOverride ?? Store.shared.settings.notchLyricsOpen) }
     /// `--island-snapshot --lyrics-face`: the lyrics face without touching the saved settings.
     var lyricsOverride: Bool?
     var contentVisible = false
@@ -94,12 +94,11 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var fullScreen = false
     /// Rubber band while swiping on the trackpad: down (or, negative, up) and sideways, in points.
     var pull = CGSize.zero
-    /// The pointer is over the notch (give or take a moment), or a row is being carried: it doesn't close on its own then.
+    /// The pointer is over the notch (give or take a moment): it doesn't close on its own then.
     @ObservationIgnored var pointerInside = false
-    @ObservationIgnored var dragging = false
     /// Sideways over the player: true for the next song.
     @ObservationIgnored var skip: (Bool) -> Void = { $0 ? NowPlaying.shared.next() : NowPlaying.shared.previous() }
-    /// The one tap of the trackpad: on opening by hover or swipe, and where a swipe acts.
+    /// The one tap of the trackpad: on opening by hover, and where a swipe acts (never for a button: those are silent).
     @ObservationIgnored var haptic: () -> Void = { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
 
     @ObservationIgnored let pomodoro: Pomodoro
@@ -118,18 +117,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         self.meeting = meeting
     }
 
-    static func kind(_ a: Activity) -> NotchKind? {
-        switch a {
-        case .media: .media
-        case .timer: .timer
-        case .meeting: .meeting
-        case .pomodoro: .focus
-        case .stopwatch: .stopwatch
-        case .toast: .message
-        case .event: .event
-        case .alarm, .dictation: nil
-        }
-    }
+    /// The one order there is: alarms and dictation first, then what's playing, timers, meetings, focus, stopwatches,
+    /// messages and events.
+    private static let order: [Activity] = [.alarm, .dictation, .media, .timer, .meeting, .pomodoro, .stopwatch, .toast, .event]
+    private func rank(_ a: Activity) -> Int { Self.order.firstIndex(of: a) ?? 99 }
 
     func activity(for slot: Slot) -> Activity {
         switch slot {
@@ -145,50 +136,11 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         }
     }
 
-    /// Moves something to the front of the closed notch (and remembers it for this mix of activities).
-    func promote(_ slot: Slot) {
-        var order = compactOrder
-        order.removeAll { $0 == slot }
-        order.insert(slot, at: 0)
-        saveArrangement(order)
-    }
-
-    /// Remembers the order of what's in the notch for this mix of activities (say music and two timers), so the
-    /// same mix comes back the same way.
-    func saveArrangement(_ order: [Slot]) {
-        Store.shared.settings.notchArrangements[comboKey] = order.map(token)
-        refresh()
-    }
-
-    /// Whether this mix has an order you dragged into place.
-    var hasArrangement: Bool { Store.shared.settings.notchArrangements[comboKey] != nil }
-
-    /// Back to the default order for this mix.
-    func resetArrangement() {
-        Store.shared.settings.notchArrangements[comboKey] = nil
-        refresh()
-    }
-
-    /// A name for a slot that holds while it runs: timers and stopwatches by their place (soonest timer first).
-    func token(_ slot: Slot) -> String {
-        switch slot {
-        case .timer(let id):
-            let t = Timers.shared
-            return "timer#\(t.running.sorted { $0.remaining(t.now) < $1.remaining(t.now) }.firstIndex { $0.id == id } ?? 0)"
-        case .stopwatch(let id): return "stopwatch#\(Stopwatches.shared.running.firstIndex { $0.id == id } ?? 0)"
-        default: return slot.key
-        }
-    }
-
-    /// Which mix of activities is going on.
-    private var comboKey: String { compactCandidates.map(token).sorted().joined(separator: ",") }
-
-    /// Everything that could sit in the closed notch: alarms and dictation first, then the order from Settings ›
-    /// Notch (what's playing first by default), each running timer (soonest first) and stopwatch on its own.
-    private var compactCandidates: [Slot] {
-        let order = Store.shared.settings.notchPriority
+    /// Everything in the notch, in the order the closed notch reads left to right: each running timer (soonest first)
+    /// and stopwatch on its own.
+    var compactOrder: [Slot] {
         var out: [Slot] = []
-        for a in activities.sorted(by: { rank($0, order) < rank($1, order) }) {
+        for a in activities.sorted(by: { rank($0) < rank($1) }) {
             switch a {
             case .timer:
                 let t = Timers.shared
@@ -198,26 +150,6 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             }
         }
         return out
-    }
-
-    private func rank(_ a: Activity, _ order: [NotchKind]) -> Int {
-        switch a {
-        case .alarm: return 0
-        case .dictation: return 1
-        default: return 2 + (Self.kind(a).flatMap { order.firstIndex(of: $0) } ?? 99)
-        }
-    }
-
-    /// Everything in the notch, in the order the closed notch reads left to right: the order you dragged it into for
-    /// this mix, else the default. Alarms and dictation always lead.
-    var compactOrder: [Slot] {
-        let all = compactCandidates
-        guard let saved = Store.shared.settings.notchArrangements[comboKey] else { return all }
-        let pinned = all.filter { $0 == .alarm || $0 == .dictation }
-        let rest = all.filter { $0 != .alarm && $0 != .dictation }.enumerated()
-            .sorted { (saved.firstIndex(of: token($0.element)) ?? 99, $0.offset) < (saved.firstIndex(of: token($1.element)) ?? 99, $1.offset) }
-            .map(\.element)
-        return pinned + rest
     }
 
     /// Closed, at most three.
@@ -250,18 +182,24 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
 
     /// Expanded: playback on top, then everything else in the closed notch's order, every running timer and
-    /// stopwatch on its own row.
+    /// stopwatch on its own. A tapped tile goes first. (While dictating, dictation is all there is.)
     var slots: [Slot] {
         var out: [Slot] = activities.contains(.media) ? [.media] : []
-        out += compactOrder.filter { $0 != .media && $0 != .dictation }
-        // Dictation's waveform sits in the strip beside the notch; while it listens (and polishes), its words (and
-        // hands-free, its buttons) come first, above the music and the rest. Polishing kept them first: the notch
-        // closes as it starts, and the player used to swap in under the closing shape.
-        let listening = [.starting, .listening, .processing].contains(dictation.phase)
-        if activities.contains(.dictation), out.isEmpty || listening { out.insert(.dictation, at: 0) }
-        // A tapped tile goes first (dictation that's listening keeps the lead).
-        if let focus, out.first != .dictation || !listening, let k = out.firstIndex(of: focus) { out.insert(out.remove(at: k), at: 0) }
+        out += compactOrder.filter { $0 != .media }
+        if let focus, let k = out.firstIndex(of: focus) { out.insert(out.remove(at: k), at: 0) }
         return Array(out.prefix(IslandGeometry.maxRows + 1))
+    }
+
+    /// The icons drawn on their own over the notch, flying between their spots as it opens and closes: the closed
+    /// notch's, or the first thing's and each tile's.
+    var iconSlots: [Slot] {
+        switch stage {
+        case .compact: return compactLayout.order
+        case .expanded:
+            guard !camera, let first = slots.first else { return [] }
+            return (first == .dictation ? [] : [first]) + tiles
+        default: return []
+        }
     }
 
     /// Open: the tiles beside the first thing.
@@ -308,19 +246,9 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// widened by tiles shows a wider crop, not a taller notch).
     var cameraHeight: CGFloat { (mainWidth * 3 / 4).rounded() } // a camera's own 4:3, at the notch's base width
 
-    /// The live words in the open notch: as tall as they need, up to five lines (then they scroll).
-    var dictationTextHeight: CGFloat {
-        let w = mainWidth - (dictationControls ? Self.dictationControlsWidth : 0)
-        let h = (dictation.preview as NSString).boundingRect(with: NSSize(width: w, height: .greatestFiniteMagnitude),
-                                                            options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                                            attributes: [.font: NSFont.systemFont(ofSize: 14)]).height
-        return min(ceil(h) + 2, 92)
-    }
-
-    /// Hands-free: cancel and finish buttons beside the words (under the band at menu-bar height, where clicks
-    /// don't always land).
+    /// Hands-free: cancel and finish buttons in the open notch (under the band at menu-bar height, where clicks
+    /// don't always land). The words themselves never show.
     var dictationControls: Bool { dictation.handsFree && [.starting, .listening].contains(dictation.phase) }
-    static let dictationControlsWidth: CGFloat = 32 * 2 + 8 + 12
 
     /// Dictation shown in the top strip (beside the notch) of the expanded notch.
     var dictationInStrip: Bool {
@@ -331,7 +259,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Height of the first item's detail in the expanded notch.
     var detailHeight: CGFloat {
         switch slots.first {
-        case .media: IslandView.artBig
+        case .media: lyricsFace ? IslandView.lyricsHeight : IslandView.artBig
         case .timer: 56
         case .stopwatch: 56
         case .pomodoro: 80
@@ -340,9 +268,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .toast: 42
         case .event: 46
         case .dictation:
-            if case .failed = dictation.phase { 48 } else {
-                max(dictation.preview.isEmpty ? (dictation.noSound ? 20 : 0) : dictationTextHeight, dictationControls ? 32 : 0)
-            }
+            if case .failed = dictation.phase { 48 } else { dictationControls ? IslandView.rowButton : 0 }
         case nil: IslandView.artBig // the idle home, opened with nothing running (as tall as the player)
         }
     }
@@ -476,13 +402,13 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         if !Stopwatches.shared.running.isEmpty, s.notchStopwatch { list.append(.stopwatch) }
         if s.notchEvents, CalendarEvents.shared.upcoming != nil { list.append(.event) }
         if !s.notchEnabled { list.removeAll() }
-        // Alarms and dictation first, then the order from Settings › Notch.
-        let order = s.notchPriority
-        list.sort { rank($0, order) < rank($1, order) }
+        list.sort { rank($0) < rank($1) }
         // Paused stays: the song goes away only when Music or Spotify is quit or stopped.
         if NowPlaying.shared.available, Store.shared.settings.mediaInNotch { list.append(.media) }
         // Over a full-screen app, only what can't wait: a ringing alarm, and dictation you started.
         if fullScreen, s.notchHideInFullScreen { list.removeAll { $0 != .alarm && $0 != .dictation } }
+        // While dictating, the notch is only dictation (open or closed): the player and the rest come back after.
+        if list.contains(.dictation) { list = [.dictation] }
         if list != activities {
             withAnimation(list.count < activities.count ? islandSettle : islandSpring) { activities = list }
         }
@@ -494,7 +420,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             return
         }
         show()
-        // Dictation expands on its own once there are words to show; a failure expands to explain itself.
+        // Hands-free dictation opens for its buttons, and a failure to explain itself; push-to-talk stays closed.
         // Polishing happens in the closed notch: an open one closes when it starts.
         let polishing = dictation.phase == .processing
         if polishing, !wasPolishing { collapse() }
@@ -504,11 +430,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         }
     }
 
-    /// Dictation holds the notch open while it has words (or hands-free, its buttons) to show, or a failure to explain.
+    /// Dictation holds the notch open for hands-free's buttons, or a failure to explain.
     var dictationWantsRoom: Bool {
         if case .failed = dictation.phase { return true }
-        let listening = [.starting, .listening].contains(dictation.phase)
-        return listening && (dictation.handsFree || !dictation.preview.isEmpty || dictation.noSound)
+        return dictationControls
     }
 
 
@@ -1020,60 +945,18 @@ final class IslandPanel: NSPanel {
             hoverSince = nil
         }
         if model.stage == .expanded {
-            if inside || model.dragging || model.swiping {
+            if inside || model.swiping {
                 model.lastInteraction = Date()
             } else if Date().timeIntervalSince(model.lastInteraction) > s.notchCollapseDelay,
                       !(model.activity == .dictation && (model.dictationWantsRoom || model.dictation.phase == .processing)) {
                 model.collapse()
             }
         }
-        setTracking(fast: model.stage == .expanded || model.hovering || model.swiping || model.dragging || near(mouse))
+        setTracking(fast: model.stage == .expanded || model.hovering || model.swiping || near(mouse))
     }
 }
 
 // MARK: - Views
-
-/// One side of the closed notch, beside the physical notch: the ear curving out along the top of the screen, down the
-/// outer edge, round the bottom corner, and straight up where the notch begins. Drawn in a rect the width of the
-/// whole closed notch.
-struct NotchHalf: Shape {
-    enum Side: Hashable { case left, right }
-    var side: Side
-    var sideWidth: CGFloat
-    var ear: CGFloat
-    var bottom: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        let r = rect.insetBy(dx: 0.5, dy: 0.5)
-        let e = max(0, min(ear, sideWidth / 3, r.height / 2)), b = max(0, min(bottom, sideWidth / 3, r.height / 2))
-        let k: CGFloat = 0.58
-        var p = Path()
-        func corner(_ from: CGPoint, _ apex: CGPoint, _ to: CGPoint) {
-            p.addCurve(to: to, control1: CGPoint(x: from.x + (apex.x - from.x) * k, y: from.y + (apex.y - from.y) * k),
-                       control2: CGPoint(x: to.x + (apex.x - to.x) * k, y: to.y + (apex.y - to.y) * k))
-        }
-        switch side {
-        case .left:
-            let outer = r.minX, edge = rect.minX + sideWidth
-            p.move(to: CGPoint(x: outer, y: r.minY))
-            corner(CGPoint(x: outer, y: r.minY), CGPoint(x: outer + e, y: r.minY), CGPoint(x: outer + e, y: r.minY + e))
-            p.addLine(to: CGPoint(x: outer + e, y: r.maxY - b))
-            corner(CGPoint(x: outer + e, y: r.maxY - b), CGPoint(x: outer + e, y: r.maxY), CGPoint(x: outer + e + b, y: r.maxY))
-            p.addLine(to: CGPoint(x: edge, y: r.maxY))
-            p.addLine(to: CGPoint(x: edge, y: r.minY))
-        case .right:
-            let outer = r.maxX, edge = rect.maxX - sideWidth
-            p.move(to: CGPoint(x: edge, y: r.minY))
-            p.addLine(to: CGPoint(x: edge, y: r.maxY))
-            p.addLine(to: CGPoint(x: outer - e - b, y: r.maxY))
-            corner(CGPoint(x: outer - e - b, y: r.maxY), CGPoint(x: outer - e, y: r.maxY), CGPoint(x: outer - e, y: r.maxY - b))
-            p.addLine(to: CGPoint(x: outer - e, y: r.minY + e))
-            corner(CGPoint(x: outer - e, y: r.minY + e), CGPoint(x: outer - e, y: r.minY), CGPoint(x: outer, y: r.minY))
-        }
-        p.closeSubpath()
-        return p
-    }
-}
 
 struct IslandShape: Shape {
     var ear: CGFloat
@@ -1158,17 +1041,17 @@ private struct RoundButton: View {
     var symbol: String
     var tint: Color?
     var size: CGFloat = 32 // IslandView.rowButton: one button size all through the open notch
+    /// Breathes while on (the lyrics button while the song plays).
+    var breathing = false
     var action: () -> Void
 
     var body: some View {
-        Button {
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-            action()
-        } label: {
+        Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size * 0.375, weight: .bold))
                 .foregroundStyle(tint ?? .white)
                 .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.breathe.pulse, options: .repeat(.continuous), isActive: breathing)
                 .frame(width: size, height: size)
                 .background(Circle().fill(tint.map { $0.opacity(0.24) } ?? Color.white.opacity(0.14)))
                 .contentShape(Circle())
@@ -1181,8 +1064,6 @@ struct IslandView: View {
     let model: IslandModel
     let openMeeting: () -> Void
     @Namespace private var ns
-    @Namespace private var closedNS
-    @Namespace private var previewNS
 
     private var shape: IslandShape {
         let g = model.geometry
@@ -1218,6 +1099,7 @@ struct IslandView: View {
                                 .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.8, anchor: .top)).animation(islandSpring.delay(0.04)),
                                                         removal: .opacity.combined(with: .scale(scale: 0.95, anchor: .top)).animation(.easeOut(duration: 0.16))))
                         }
+                        flyingIcons
                     }
                     .frame(width: size.width, height: size.height, alignment: .top)
                     .opacity(model.contentVisible ? 1 : 0)
@@ -1235,29 +1117,46 @@ struct IslandView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .top) { ClosedLyricLine(model: model) }
         .environment(\.colorScheme, .dark)
-        // The first words open the notch for them (dictation doesn't report each word itself).
-        .onChange(of: model.dictation.preview.isEmpty) { _, _ in model.refresh() }
+    }
+
+    /// Every icon in the notch drawn once, above both faces, on the spot its face leaves for it. Opening, closing or
+    /// bringing a tile to the front, each flies to its new spot with the shape's own spring: the closed notch's album
+    /// art grows into the player's and back as one picture, rather than two copies cross-fading.
+    private var flyingIcons: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(model.iconSlots, id: \.self) { s in
+                slotIcon(s)
+                    .matchedGeometryEffect(id: s.key, in: ns, isSource: false)
+                    .offset(x: s == .media && model.stage == .expanded && model.slots.first == .media ? model.pull.width : 0)
+                    // The shape's own springs: the faces' quick fades would otherwise carry them there ahead of it.
+                    .animation(model.stage == .expanded ? islandSpring : islandSettle, value: model.stage)
+                    .animation(islandSpring, value: model.lyricsFace)
+                    .animation(islandSpring, value: model.focus)
+                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(false)
     }
 
     // MARK: Compact: something on each side of the notch
 
     private var compact: some View {
         let g = model.geometry
-        return closedContent(model.compactLayout, glide: true)
+        return closedContent(model.compactLayout)
             .frame(height: g.compactSize.height)
         .frame(maxHeight: .infinity, alignment: .top)
         .animation(islandSettle, value: model.compactLayout.keys)
     }
 
     /// The closed notch's contents: each side's things read left to right, a time just after its icon. Both
-    /// sides are the same width so the notch stays centred. `glide` lets the icons fly to their places in the
-    /// open notch; `hole` leaves an empty spot (where a dragged thing would land), `faded` dims one.
-    private func closedContent(_ L: IslandModel.CompactLayout, glide: Bool, hole: IslandModel.Slot? = nil, faded: IslandModel.Slot? = nil) -> some View {
+    /// sides are the same width so the notch stays centred.
+    private func closedContent(_ L: IslandModel.CompactLayout) -> some View {
         let g = model.geometry
         let pad = g.hasNotch ? IslandModel.compactPad : 10
         return HStack(spacing: 0) {
             HStack(spacing: IslandModel.compactGap) {
-                ForEach(L.left, id: \.self) { s in closedItem(s, L, glide: glide, hole: hole, faded: faded) }
+                ForEach(L.left, id: \.self) { s in closedItem(s, L) }
             }
             .padding(.leading, pad + (L.left.first == .media ? IslandModel.artInset : 0))
             .frame(width: L.side, alignment: .leading)
@@ -1267,27 +1166,20 @@ struct IslandView: View {
                     slotText(t).lineLimit(1).truncationMode(.tail).frame(width: L.textWidth, alignment: .trailing)
                         .transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
-                ForEach(L.right, id: \.self) { s in closedItem(s, L, glide: glide, hole: hole, faded: faded) }
+                ForEach(L.right, id: \.self) { s in closedItem(s, L) }
             }
             .padding(.trailing, pad + (L.right.last == .media || (L.textApart && L.text == .media) ? IslandModel.artInset : 0))
             .frame(width: L.side, alignment: .trailing)
         }
     }
 
-    @ViewBuilder private func closedItem(_ s: IslandModel.Slot, _ L: IslandModel.CompactLayout, glide: Bool, hole: IslandModel.Slot?, faded: IslandModel.Slot?) -> some View {
-        let w = IslandModel.iconWidth(s)
+    @ViewBuilder private func closedItem(_ s: IslandModel.Slot, _ L: IslandModel.CompactLayout) -> some View {
         HStack(spacing: IslandModel.compactGap) {
-            Group {
-                if glide { icon(s, size: w) } else { slotIcon(s).frame(width: w, height: w) }
-            }
-            // The carried icon is about to land in the hole; its time already shows, as it will.
-            .opacity(s == hole ? 0 : 1)
+            spot(s, size: IslandModel.iconWidth(s))
             if s == L.text, !L.textApart {
                 slotText(s).lineLimit(1).truncationMode(.tail).frame(width: L.textWidth, alignment: .leading)
             }
         }
-        .opacity(s == faded ? 0.3 : 1)
-        .matchedGeometryEffect(id: s.key, in: glide ? closedNS : previewNS, properties: .position, isSource: true)
         .transition(.scale(scale: 0.5).combined(with: .opacity))
     }
 
@@ -1306,11 +1198,11 @@ struct IslandView: View {
         }
     }
 
-    /// A slot's icon. The expanded notch uses the same one, so it glides into place when the notch opens.
-    private func icon(_ slot: IslandModel.Slot, size: CGFloat = IslandModel.iconSize) -> some View {
-        slotIcon(slot)
+    /// Where a slot's icon goes: an empty spot its flying icon (`flyingIcons`) takes the place and size of.
+    private func spot(_ slot: IslandModel.Slot, size: CGFloat = 18) -> some View {
+        Color.clear
             .frame(width: size, height: size)
-            .matchedGeometryEffect(id: slot.key, in: ns)
+            .matchedGeometryEffect(id: slot.key, in: ns, isSource: true)
     }
 
     @ViewBuilder private func slotIcon(_ slot: IslandModel.Slot) -> some View {
@@ -1355,7 +1247,7 @@ struct IslandView: View {
             let t = Timers.shared
             ProgressRing(progress: t.next?.progress(t.now) ?? 0, color: .orange, size: 16, lineWidth: 3)
         case .media:
-            AlbumArt(image: NowPlaying.shared.artwork, corner: 3, note: 11)
+            AlbumArt(image: NowPlaying.shared.artwork, missing: NowPlaying.shared.artMissing)
         case .event:
             Image(systemName: "calendar").font(.system(size: 13, weight: .semibold)).foregroundStyle(.red)
         case nil:
@@ -1370,8 +1262,10 @@ struct IslandView: View {
             switch model.dictation.phase {
             case .processing: PolishSpinner(size: 14, line: 2).frame(width: 16, height: 16)
             case .starting, .listening:
-                Image(systemName: model.dictation.handsFree ? "lock.fill" : model.dictation.mode == .command ? "wand.and.stars" : "mic.fill")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
+                // Yellow and crossed out while nothing comes in from the microphone.
+                let d = model.dictation
+                Image(systemName: d.noSound ? "mic.slash.fill" : d.handsFree ? "lock.fill" : d.mode == .command ? "wand.and.stars" : "mic.fill")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(d.noSound ? Color.yellow : .white.opacity(0.85))
                     .contentTransition(.symbolEffect(.replace))
             default: EmptyView()
             }
@@ -1436,7 +1330,6 @@ struct IslandView: View {
                         detail(first)
                             .frame(width: model.mainWidth)
                             .offset(x: first == .media ? model.pull.width : 0)
-                            .contextMenu { promoteMenu(first) }
                             .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.08)), removal: .opacity.animation(.easeOut(duration: 0.1))))
                     } else {
                         // Something starting from here (dictation from its button) takes over without the two overlapping.
@@ -1453,27 +1346,7 @@ struct IslandView: View {
         .padding(.top, model.contentTop)
         .padding(.bottom, IslandModel.expandedInset)
         .frame(maxHeight: .infinity, alignment: .top)
-        .overlay(alignment: .top) {
-            Group {
-                if let d = drag, let plan = arrangement() {
-                    closedPreview(model.layout(for: Array(plan.order.prefix(IslandModel.compactMax))), hole: plan.near ? d.slot : nil, faded: plan.near ? nil : d.slot)
-                        .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
-                } else {
-                    band
-                }
-            }
-            .padding(.top, model.bandTop)
-        }
-        .animation(.spring(duration: 0.25), value: drag == nil)
-        .onChange(of: drag == nil) { _, idle in model.dragging = !idle }
-        .onAppear {
-            // `--island-snapshot … --drag`: a row held up by the preview, for the picture.
-            guard CommandLine.arguments.contains("--drag") else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                guard let s = model.slots.dropFirst().first, let f = rowFrames[s.key] else { return }
-                drag = RowDrag(slot: s, start: CGPoint(x: f.midX, y: f.midY), point: CGPoint(x: f.minX + 30, y: 22))
-            }
-        }
+        .overlay(alignment: .top) { band.padding(.top, model.bandTop) }
     }
 
     /// Nothing running: the time and date with what's next today, the weather, and on the button lane four quick starts
@@ -1544,7 +1417,7 @@ struct IslandView: View {
     private func lastSong(_ s: NowPlaying.Last) -> some View {
         Button { NowPlaying.shared.play(s) } label: {
             HStack(spacing: 10) {
-                AlbumArt(image: s.artwork, corner: 8, note: 11)
+                AlbumArt(image: s.artwork)
                     .frame(width: Self.rowButton, height: Self.rowButton)
                     .overlay {
                         RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.4))
@@ -1562,176 +1435,21 @@ struct IslandView: View {
         .help("Play in \(s.appID == "com.spotify.client" ? "Spotify" : "Music")")
     }
 
-    /// The tiles beside the first thing, two to a column. Tap one to bring it to the front (with all its controls);
-    /// carry one up toward the preview of the closed notch and it shrinks, step by step, into its closed-notch icon;
-    /// near the preview the icons there make room and it glides into the gap, and letting go settles it there (that
-    /// order is kept for this mix). Let go anywhere else and it slides back.
+    /// The tiles beside the first thing, two to a column. Tap one to bring it to the front (with all its controls).
     private var tileGrid: some View {
         let tiles = model.tiles, rows = model.tileRows
         let w = IslandGeometry.tileWidth, h = IslandGeometry.tileHeight, gap = IslandGeometry.gap
         return ZStack(alignment: .topLeading) {
             ForEach(Array(tiles.prefix(rows * IslandGeometry.maxColumns).enumerated()), id: \.element) { k, slot in
-                let dragged = drag?.slot == slot
-                ZStack(alignment: .leading) {
-                    tile(slot).opacity(dragged ? 0 : 1)
-                    // Type-erased: inferred, the carried tile (which draws the tile itself) loops the opaque type check.
-                    if dragged, let d = drag, let f = rowFrames[slot.key] { AnyView(carried(slot, d, f)) }
-                }
-                .frame(width: w, height: h)
-                .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rowFrames[slot.key] = $0 }
-                .onTapGesture { withAnimation(islandSpring) { model.focus = slot } }
-                .contextMenu { promoteMenu(slot) }
-                .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                    .onChanged { v in
-                        model.lastInteraction = Date()
-                        if drag == nil {
-                            drag = RowDrag(slot: slot, start: v.startLocation, point: v.location)
-                        } else if drag?.settling == false {
-                            drag?.point = v.location
-                        }
-                    }
-                    .onEnded { _ in finishDrag() })
-                .padding(.leading, CGFloat(k / rows) * (w + gap))
-                .padding(.top, CGFloat(k % rows) * (h + gap))
-                .zIndex(dragged ? 1 : 0)
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                tile(slot)
+                    .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+                    .onTapGesture { withAnimation(islandSpring) { model.focus = slot } }
+                    .padding(.leading, CGFloat(k / rows) * (w + gap))
+                    .padding(.top, CGFloat(k % rows) * (h + gap))
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
         }
         .frame(width: CGFloat(model.tileColumns) * (w + gap) - gap, height: model.tilesHeight, alignment: .topLeading)
-    }
-
-    /// The closed notch as it would be, drawn where it sits (beside the notch, at menu-bar height), with an
-    /// outline on each side of the notch.
-    private func closedPreview(_ L: IslandModel.CompactLayout, hole: IslandModel.Slot?, faded: IslandModel.Slot?) -> some View {
-        let g = model.geometry
-        let height = g.compactSize.height
-        return closedContent(L, glide: false, hole: hole, faded: faded)
-            .frame(width: g.seedSize.width + L.side * 2, height: height)
-            .background {
-                // Each side traced exactly as the closed notch will be there: its curved ear at the top of the screen,
-                // its rounded bottom corner, straight up the edge of the notch.
-                ZStack {
-                    ForEach([NotchHalf.Side.left, .right], id: \.self) { side in
-                        let half = NotchHalf(side: side, sideWidth: L.side, ear: 12, bottom: 12)
-                        half.fill(Color.white.opacity(0.07))
-                        half.stroke(Color.white.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                    }
-                }
-            }
-            .animation(islandSpring, value: L.keys)
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { previewFrame = $0 }
-    }
-
-    private struct RowDrag {
-        var slot: IslandModel.Slot
-        /// Where it was picked up, and where the pointer is now.
-        var start: CGPoint
-        var point: CGPoint
-        /// Let go: on its way into its spot (or back to its row).
-        var settling = false
-        var landed = false
-    }
-
-    /// 0 while it's at its row, 1 at the preview of the closed notch (by height).
-    private func progress(_ d: RowDrag, _ f: CGRect) -> CGFloat {
-        if d.landed { return 1 }
-        guard previewFrame != .zero else { return 0 }
-        let t = min(1, max(0, (f.midY - d.point.y) / max(1, f.midY - previewFrame.midY)))
-        return t * t * (3 - 2 * t)
-    }
-
-    /// The centre of the gap it would fill in the preview.
-    private func landing(_ d: RowDrag) -> CGPoint? {
-        guard let plan = arrangement(), plan.near else { return nil }
-        let L = model.layout(for: Array(plan.order.prefix(IslandModel.compactMax)))
-        guard let c = model.centers(L)[d.slot] else { return nil }
-        return CGPoint(x: previewFrame.midX - (model.geometry.seedSize.width + L.side * 2) / 2 + c, y: previewFrame.midY)
-    }
-
-    /// The row being carried: the row itself, shrinking into its closed-notch icon as it nears the preview.
-    private func carried(_ slot: IslandModel.Slot, _ d: RowDrag, _ f: CGRect) -> some View {
-        let p = progress(d, f)
-        func mix(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
-        let iconW = IslandModel.iconWidth(slot)
-        let w = mix(f.width, iconW, p), h = mix(f.height, iconW, p)
-        // From where it was grabbed onto the pointer, then pulled into its gap as it gets close.
-        let grabbed = CGPoint(x: f.midX + d.point.x - d.start.x, y: f.midY + d.point.y - d.start.y)
-        var c = CGPoint(x: mix(grabbed.x, d.point.x, p), y: mix(grabbed.y, d.point.y, p))
-        if let t = landing(d) {
-            let pull = d.landed ? 1 : min(1, max(0, (p - 0.55) / 0.45))
-            c = CGPoint(x: mix(c.x, t.x, pull), y: mix(c.y, t.y, pull))
-        }
-        return ZStack(alignment: .leading) {
-            tile(slot).frame(width: f.width, height: f.height).opacity(Double(max(0, 1 - p * 1.8)))
-            slotIcon(slot).frame(width: iconW, height: iconW)
-                .frame(width: w, height: h)
-                .opacity(Double(min(1, max(0, p * 2.2 - 0.5))))
-        }
-        .frame(width: w, height: h, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: mix(12, h / 2, p), style: .continuous))
-        .shadow(color: .black.opacity(Double(0.5 * (1 - p))), radius: 10, y: 4)
-        .offset(x: c.x - f.minX - w / 2, y: c.y - f.midY)
-        .allowsHitTesting(false)
-    }
-
-    /// The row being carried, and where the pointer is (screen-window coordinates).
-    @State private var drag: RowDrag?
-    @State private var rowFrames: [String: CGRect] = [:]
-    @State private var previewFrame: CGRect = .zero
-
-    /// While carrying a row: the order there'd be if it were let go now. Near the preview, it goes in the spot
-    /// closest to the pointer; elsewhere nothing changes.
-    private func arrangement() -> (order: [IslandModel.Slot], near: Bool)? {
-        guard let d = drag else { return nil }
-        let current = model.compactOrder
-        guard previewFrame != .zero, d.point.y < previewFrame.maxY + 36 else { return (current, false) }
-        let pinned = current.prefix { $0 == .alarm || $0 == .dictation }.count
-        var base = current
-        base.removeAll { $0 == d.slot }
-        let last = min(base.count, IslandModel.compactMax - 1)
-        guard pinned <= last else { return (current, false) }
-        var best: (order: [IslandModel.Slot], distance: CGFloat)?
-        for t in pinned...last {
-            var order = base
-            order.insert(d.slot, at: t)
-            let L = model.layout(for: Array(order.prefix(IslandModel.compactMax)))
-            guard let c = model.centers(L)[d.slot] else { continue }
-            let x = previewFrame.midX - (model.geometry.seedSize.width + L.side * 2) / 2 + c
-            if best == nil || abs(x - d.point.x) < best!.distance { best = (order, abs(x - d.point.x)) }
-        }
-        return (best?.order ?? current, true)
-    }
-
-    private func finishDrag() {
-        guard let d = drag, !d.settling else { return }
-        let plan = arrangement()
-        let near = plan?.near ?? false
-        // Into its gap in the preview, or back into its row; then the order is kept.
-        withAnimation(islandSpring) {
-            drag?.settling = true
-            if near, let t = landing(d) {
-                drag?.point = t
-                drag?.landed = true
-            } else {
-                drag?.point = d.start
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (near ? 0.32 : 0.28)) {
-            withAnimation(islandSpring) {
-                drag = nil
-                if let plan, near, plan.order != model.compactOrder { model.saveArrangement(plan.order) }
-            }
-        }
-    }
-
-    @ViewBuilder private func promoteMenu(_ slot: IslandModel.Slot) -> some View {
-        if slot != .alarm, slot != .dictation {
-            Button { withAnimation(islandSpring) { model.promote(slot) } } label: { Label("Show First When Closed", systemImage: "arrow.up.to.line") }
-        }
-        if model.hasArrangement {
-            Button { withAnimation(islandSpring) { model.resetArrangement() } } label: { Label("Reset Order", systemImage: "arrow.counterclockwise") }
-        }
     }
 
     /// The band beside the notch, at menu-bar height: the glances from Settings left of the notch and the settings and
@@ -1798,8 +1516,8 @@ struct IslandView: View {
         case .alarm: alarmDetail
         case .toast: toastDetail
         case .dictation: dictationDetail
-        case .pomodoro: HStack(alignment: .top, spacing: 12) { icon(slot, size: 24).padding(.top, 2); pomodoroDetail }
-        case .meeting: HStack(alignment: .top, spacing: 12) { icon(slot, size: 24).padding(.top, 2); meetingDetail }
+        case .pomodoro: HStack(alignment: .top, spacing: 12) { spot(slot, size: 24).padding(.top, 2); pomodoroDetail }
+        case .meeting: HStack(alignment: .top, spacing: 12) { spot(slot, size: 24).padding(.top, 2); meetingDetail }
         case .event: AnyView(eventDetail) // spelled out: inferred, it trips the compiler's opaque-type check with the swipe offset
         }
     }
@@ -1852,12 +1570,16 @@ struct IslandView: View {
         }
     }
 
+    /// The words never show: hands-free, the cancel and finish buttons; a failure, what went wrong. (The waveform is
+    /// in the band beside the notch.)
     private var dictationDetail: some View {
         let d = model.dictation
-        let polishing = d.phase == .processing
-        // The waveform is in the band beside the notch; here, the words (and, hands-free, cancel and finish).
-        return HStack(alignment: model.dictationTextHeight > 40 ? .bottom : .center, spacing: 12) {
-            words(d, polishing)
+        return HStack(spacing: 12) {
+            if case .failed(let msg) = d.phase {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+                Text(msg).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineLimit(2)
+            }
+            Spacer(minLength: 0)
             if model.dictationControls {
                 HStack(spacing: 8) {
                     RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { d.cancel() }.help("Cancel")
@@ -1869,46 +1591,10 @@ struct IslandView: View {
         .animation(.spring(duration: 0.3), value: model.dictationControls)
     }
 
-    @ViewBuilder private func words(_ d: DictationController, _ polishing: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if case .failed(let msg) = d.phase {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
-                    Text(msg).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineLimit(2)
-                }
-            }
-            if d.noSound, d.preview.isEmpty {
-                Text("No sound from the microphone").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
-                    .transition(.opacity)
-            }
-            if !d.preview.isEmpty {
-                let words = Text(d.preview).font(.system(size: 14))
-                // Every word, scrolling; it stays on the newest ones as they come in.
-                ScrollView(.vertical) {
-                    words
-                        .foregroundStyle(.white.opacity(polishing ? 0.6 : 0.92))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .overlay { if polishing { Shine().mask(words.frame(maxWidth: .infinity, alignment: .leading)) } }
-                        .animation(.easeOut(duration: 0.25), value: polishing)
-                }
-                .defaultScrollAnchor(.bottom, for: .sizeChanges)
-                .defaultScrollAnchor(.bottom)
-                .scrollIndicators(.never)
-                .frame(height: model.dictationTextHeight)
-                .mask {
-                    // The top edge fades once there's more than fits.
-                    LinearGradient(stops: [.init(color: model.dictationTextHeight >= 92 ? .clear : .black, location: 0), .init(color: .black, location: 0.18)],
-                                   startPoint: .top, endPoint: .bottom)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     private var alarmDetail: some View {
         let a = Alarms.shared
         return HStack(spacing: 12) {
-            icon(.alarm, size: 24)
+            spot(.alarm, size: 24)
             VStack(alignment: .leading, spacing: 1) {
                 Text(a.ringing?.label.isEmpty == false ? a.ringing!.label : "Alarm").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
                 Text(a.ringing?.time ?? "").font(.system(size: 26, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
@@ -1923,7 +1609,7 @@ struct IslandView: View {
         let s = Stopwatches.shared
         if let w = s.list.first(where: { $0.id == id }) {
             HStack(spacing: 12) {
-                icon(.stopwatch(id), size: 24)
+                spot(.stopwatch(id), size: 24)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(w.laps.isEmpty ? "Stopwatch" : "Stopwatch · lap \(w.laps.count + 1)").font(.system(size: 12, weight: .semibold)).foregroundStyle(.orange)
                     Text(Stopwatch.format(w.elapsed(s.now))).font(.system(size: 34, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6)
@@ -1940,7 +1626,7 @@ struct IslandView: View {
         if let n = t.list.first(where: { $0.id == id }) {
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
-                    icon(.timer(id), size: 24)
+                    spot(.timer(id), size: 24)
                     VStack(alignment: .leading, spacing: 0) {
                         Text(n.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(.orange).lineLimit(1)
                         let clock = Pomodoro.clock(n.remaining(t.now))
@@ -1956,9 +1642,9 @@ struct IslandView: View {
         }
     }
 
-    /// The open player, in the same footprint either way. Its usual face: big art on the left; beside it the song,
-    /// the time, and the controls centred under them (the lyrics button at the end of the lane). Its lyrics face: the
-    /// art shrinks into a header with the song and the controls, and the lines being sung fill the space below.
+    /// The open player. Its usual face: big art on the left; beside it the song, the time, and the controls centred under
+    /// them (the lyrics button at the end of the lane). Its lyrics face, a little taller: the art shrinks into a header
+    /// with the song and the controls, and the lines being sung fill the space below.
     private var mediaDetail: some View {
         // One set of views in both faces: switching only moves and resizes them (the art shrinks into the header, the
         // song slides beside it, the buttons rise to the header's end), while the time and visualizer fade out and the
@@ -1972,40 +1658,38 @@ struct IslandView: View {
         let trioX = on ? w - b - gap - trioWidth : textX + (w - textX - trioWidth) / 2
         let rowY = on ? 0 : big - b
         let titleWidth = max(0, on ? trioX - gap - textX : w - textX - 24)
+        let tint = ArtTint.color(m.artwork)
         return ZStack(alignment: .topLeading) {
             // Under everything, so lines still fading out never draw over the art growing back.
             if on {
-                LyricLines(lyrics: Lyrics.shared, size: 15)
-                    .frame(width: w, height: big - b - 8, alignment: .bottomLeading)
-                    .offset(y: b + 8)
+                LyricLines(lyrics: Lyrics.shared, tint: tint)
+                    .id(Lyrics.shared.version) // each song's lines start at their own top
+                    .frame(width: w, height: Self.lyricsHeight - b - 10, alignment: .topLeading)
+                    .offset(y: b + 10)
                     .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 10)),
                                             removal: .opacity.animation(.easeOut(duration: 0.12))))
             }
-            art(m, size: artSize)
+            // The art itself flies over everything (`flyingIcons`); this is its spot, and opens the player.
+            spot(.media, size: artSize)
+                .contentShape(Rectangle())
+                .onTapGesture { m.openPlayer() }
+                .help("Open \(m.appName)")
             VStack(alignment: .leading, spacing: 1) {
                 Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
                 Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
             }
             .frame(width: titleWidth, alignment: .leading)
             .offset(x: textX)
-            EqualizerBars(playing: m.playing, color: ArtTint.color(m.artwork))
+            EqualizerBars(playing: m.playing, color: tint)
                 .frame(width: w - textX, alignment: .trailing)
                 .offset(x: textX, y: 2)
                 .opacity(on ? 0 : 1)
             if m.duration > 0 {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    let at = min(m.livePosition, m.duration)
-                    HStack(spacing: 8) {
-                        Text(Self.songClock(at)).frame(width: 34, alignment: .leading)
-                        bar(at / max(1, m.duration), .white.opacity(0.85))
-                        Text("-" + Self.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
-                    }
-                    .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.5))
-                }
-                .frame(width: w - textX, height: 14)
-                .offset(x: textX, y: (35 + big - b) / 2 - 7) // centred between the song and the buttons
-                .opacity(on ? 0 : 1)
+                PlayerTimeline(m: m)
+                    .frame(width: w - textX, height: 14)
+                    .offset(x: textX, y: (35 + big - b) / 2 - 7) // centred between the song and the buttons
+                    .opacity(on ? 0 : 1)
+                    .allowsHitTesting(!on)
             }
             HStack(spacing: gap) {
                 RoundButton(symbol: "backward.fill", tint: nil, size: b) { m.previous() }
@@ -2013,23 +1697,16 @@ struct IslandView: View {
                 RoundButton(symbol: "forward.fill", tint: nil, size: b) { m.next() }
             }
             .offset(x: trioX, y: rowY)
-            if !Lyrics.shared.cues.isEmpty { lyricsButton.offset(x: w - b, y: rowY) }
+            if Lyrics.shared.hasLines { lyricsButton.offset(x: w - b, y: rowY) }
         }
-        .frame(width: w, height: big, alignment: .topLeading)
+        .frame(width: w, height: on ? Self.lyricsHeight : big, alignment: .topLeading)
         .animation(islandSpring, value: on)
-    }
-
-    private func art(_ m: NowPlaying, size: CGFloat) -> some View {
-        AlbumArt(image: m.artwork, corner: size > 40 ? 12 : 8, note: size * 0.33)
-            .frame(width: size, height: size)
-            .matchedGeometryEffect(id: IslandModel.Slot.media.key, in: ns)
-            .onTapGesture { m.openPlayer() }
-            .help("Open \(m.appName)")
     }
 
     private var lyricsButton: some View {
         let on = model.lyricsFace
-        return RoundButton(symbol: on ? "quote.bubble.fill" : "quote.bubble", tint: on ? .white : nil, size: Self.rowButton) {
+        return RoundButton(symbol: on ? "quote.bubble.fill" : "quote.bubble", tint: on ? .white : nil, size: Self.rowButton,
+                           breathing: NowPlaying.shared.playing) {
             withAnimation(islandSpring) {
                 if model.lyricsOverride != nil { model.lyricsOverride?.toggle() } else { Store.shared.settings.notchLyricsOpen.toggle() }
             }
@@ -2039,6 +1716,8 @@ struct IslandView: View {
 
     /// The open player's art, as tall as the song, time and controls beside it.
     static let artBig: CGFloat = 92
+    /// The lyrics face, taller than the player so the line being sung (wrapped if it's long) and the next ones fit.
+    static let lyricsHeight: CGFloat = 148
 
     static func songClock(_ t: Double) -> String {
         let s = max(0, Int(t.rounded(.down)))
@@ -2050,7 +1729,7 @@ struct IslandView: View {
         let c = CalendarEvents.shared
         if let e = c.upcoming {
             HStack(spacing: 12) {
-                icon(.event, size: 24)
+                spot(.event, size: 24)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(e.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                     HStack(spacing: 6) {
@@ -2076,7 +1755,7 @@ struct IslandView: View {
     private var toastDetail: some View {
         HStack(spacing: 12) {
             if let t = model.toast {
-                icon(.toast, size: 24)
+                spot(.toast, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(t.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
                     if !t.detail.isEmpty { Text(t.detail).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.65)).lineLimit(2) }
@@ -2097,7 +1776,7 @@ struct IslandView: View {
     private func tile(_ slot: IslandModel.Slot) -> some View {
         HStack(spacing: 8) {
             // In a button-sized slot, so the icon sits as far in as the button on the other side.
-            icon(slot, size: 20).frame(width: Self.rowButton, height: Self.rowButton)
+            spot(slot, size: 20).frame(width: Self.rowButton, height: Self.rowButton)
             tileText(slot).frame(maxWidth: .infinity, alignment: .leading)
             tileButton(slot)
         }
@@ -2134,8 +1813,7 @@ struct IslandView: View {
                 Marquee(text: m.songTitle, font: .system(size: 12.5, weight: .semibold), color: .white)
                 caption(m.artistLine)
             case .dictation:
-                Text(model.dictation.preview.isEmpty ? "Listening" : model.dictation.preview)
-                    .font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.75)).lineLimit(1).truncationMode(.head)
+                Text("Listening").font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
             case .toast:
                 trailing(.toast)
                 caption(model.toast?.detail ?? "")
@@ -2241,45 +1919,114 @@ struct Marquee: View {
     }
 }
 
-/// Album art as a square, whatever shape the picture is (it's cropped to fill).
+/// Album art as a square, whatever shape the picture is (it's cropped to fill), its corners in step with its size so it
+/// can grow from the closed notch into the player. A new cover fades in over the last one with a slight settle; the
+/// note shows only for a song known to have none.
 private struct AlbumArt: View {
     let image: NSImage?
-    let corner: CGFloat
-    let note: CGFloat
+    var missing = true
+    /// The cover being replaced, held under the new one until it has faded in.
+    @State private var under: NSImage?
 
     var body: some View {
-        Color.white.opacity(image == nil ? 0.12 : 0)
-            .aspectRatio(1, contentMode: .fit)
-            .overlay {
+        GeometryReader { g in
+            let side = min(g.size.width, g.size.height)
+            let shape = RoundedRectangle(cornerRadius: min(12, side / 4), style: .continuous)
+            ZStack {
+                shape.fill(Color.white.opacity(image == nil ? 0.12 : 0))
+                if let under { picture(under, side) }
                 if let image {
-                    Image(nsImage: image).resizable().scaledToFill()
-                } else {
-                    Image(systemName: "music.note").font(.system(size: note, weight: .bold)).foregroundStyle(.pink)
+                    picture(image, side)
+                        .id(ObjectIdentifier(image))
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.08)), removal: .opacity))
+                } else if missing {
+                    Image(systemName: "music.note").font(.system(size: side * 0.36, weight: .bold)).foregroundStyle(.pink)
+                        .transition(.opacity)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+            .frame(width: side, height: side)
+            .clipShape(shape)
+            .frame(width: g.size.width, height: g.size.height)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .animation(.easeInOut(duration: 0.45), value: image)
+        .onChange(of: image) { old, new in
+            guard let old, new != nil else { return }
+            under = old
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { if under === old { under = nil } }
+        }
+    }
+
+    private func picture(_ i: NSImage, _ side: CGFloat) -> some View {
+        Image(nsImage: i).resizable().scaledToFill().frame(width: side, height: side)
     }
 }
 
-/// A little equalizer beside the notch while music plays, in the album art's colour; flat while paused.
+/// The open player's time: elapsed, the bar, and what's left. Click or drag the bar to go anywhere in the song; it
+/// moves at once and the player follows.
+private struct PlayerTimeline: View {
+    let m: NowPlaying
+    /// Where the bar is being held (0…1) while dragging.
+    @State private var held: Double?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let at = held.map { $0 * m.duration } ?? min(m.livePosition, m.duration)
+            HStack(spacing: 8) {
+                Text(IslandView.songClock(at)).frame(width: 34, alignment: .leading)
+                GeometryReader { g in
+                    let p = m.duration > 0 ? at / m.duration : 0
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.14))
+                        Capsule().fill(Color.white.opacity(held == nil ? 0.85 : 1)).frame(width: max(4, g.size.width * p))
+                    }
+                    .frame(height: held == nil ? 4 : 7)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { v in held = min(1, max(0, v.location.x / max(1, g.size.width))) }
+                        .onEnded { v in
+                            m.seek(to: min(1, max(0, v.location.x / max(1, g.size.width))) * m.duration)
+                            held = nil
+                        })
+                    .animation(.spring(response: 0.25, dampingFraction: 0.8), value: held == nil)
+                }
+                Text("-" + IslandView.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
+            }
+            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+            .foregroundStyle(.white.opacity(0.5))
+        }
+    }
+}
+
+/// A little equalizer beside the notch while music plays, in the album art's colour; resting while paused. Each bar
+/// springs to a new height five times a second, so it moves smoothly (the old one stepped eight times a second).
 private struct EqualizerBars: View {
     let playing: Bool
     var color: Color = .pink
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.12, paused: !playing)) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate
+        TimelineView(.animation(minimumInterval: 0.2, paused: !playing)) { ctx in
+            let tick = Int(ctx.date.timeIntervalSinceReferenceDate * 5)
             HStack(spacing: 2.5) {
                 ForEach(0..<4, id: \.self) { i in
-                    // Two slow waves per bar, so it wanders instead of pulsing in step.
-                    let a = abs(sin(t * (2.1 + Double(i) * 0.7) + Double(i))), b = 0.6 + 0.4 * sin(t * (0.9 + Double(i) * 0.37) + Double(i) * 2)
-                    Capsule().fill(color).frame(width: 3, height: playing ? 4 + 12 * a * b : 3)
+                    Capsule().fill(color).frame(width: 3, height: playing ? 4 + 12 * Self.level(i, tick) : 3)
                 }
             }
-            .opacity(playing ? 1 : 0.5)
             .frame(width: IslandModel.artSize, height: 18)
-            .animation(.spring(response: 0.35, dampingFraction: 0.9), value: playing)
+            .opacity(playing ? 1 : 0.5)
+            .animation(.spring(response: 0.28, dampingFraction: 0.62), value: tick)
+            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: playing)
+            .animation(.easeInOut(duration: 0.45), value: color) // in step with the cover fading to the next song's
         }
+    }
+
+    /// A made-up level for a bar at a tick, never the same twice in a row by much: the middle bars run higher.
+    private static func level(_ bar: Int, _ tick: Int) -> CGFloat {
+        var h = UInt64(truncatingIfNeeded: tick &* 4 &+ bar) &* 0x9E37_79B9_7F4A_7C15
+        h ^= h >> 29
+        let r = CGFloat(h % 1000) / 1000
+        return (bar == 1 || bar == 2 ? 0.35 : 0.15) + r * (bar == 1 || bar == 2 ? 0.65 : 0.6)
     }
 }
 
@@ -2340,22 +2087,6 @@ private struct PolishSpinner: View {
                 .rotationEffect(.degrees(turn * 360))
         }
         .frame(width: size, height: size)
-    }
-}
-
-/// A soft highlight sweeping left to right, over and over (the words while they're polished).
-private struct Shine: View {
-    var body: some View {
-        TimelineView(.animation) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.3) / 1.3
-            GeometryReader { g in
-                let band = max(80, g.size.width * 0.35)
-                LinearGradient(colors: [.white.opacity(0), .white, .white.opacity(0)], startPoint: .leading, endPoint: .trailing)
-                    .frame(width: band)
-                    .offset(x: -band + (g.size.width + band) * t)
-            }
-        }
-        .allowsHitTesting(false)
     }
 }
 

@@ -434,6 +434,46 @@ extension AppDelegate {
             print("real:", Battery.shared.state.map { "\($0)" } ?? "none")
             exit(0)
         }
+        if args.contains("--seek-test") {
+            // Seek, skip and play/pause against a stand-in player (never the real Music or Spotify): what the bar shows
+            // at once, and the commands the player would get.
+            island.onStage = nil
+            final class Got: @unchecked Sendable { let lock = NSLock(); var list: [String] = [] }
+            let got = Got()
+            let m = NowPlaying.shared
+            m.demo = true
+            m.fakePlayer = { script in got.lock.withLock { got.list.append(script) }; return true }
+            m.title = "Blinding Lights"
+            m.appID = "com.spotify.client"
+            m.duration = 200
+            m.position = 50
+            m.updated = Date()
+            m.playing = true
+            m.seek(to: 120)
+            print(String(format: "seek 120 → bar at %.1f (playing %@)", m.livePosition, m.playing ? "yes" : "no"))
+            m.seek(to: 999)
+            print(String(format: "seek past the end → %.1f", m.position))
+            m.playPause()
+            print("play/pause → playing", m.playing, String(format: "held at %.1f", m.livePosition))
+            m.next()
+            m.previous()
+            m.appID = "com.apple.Music"
+            m.seek(to: 10.5)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+            for s in got.lock.withLock({ got.list }) { print("player got:", s) }
+            exit(0)
+        }
+        if args.contains("--lyrics-parse-test") {
+            // Word timing on made-up lines: stamped words, a long English line, Japanese (counts and times only).
+            let lrc = "[00:05.00]<00:05.00>One <00:05.50>two <00:06.20>three\n[00:09.00]A much longer line that goes on for a while before it ends\n[00:14.00]これは日本語の歌詞の行です\n[00:30.00]Late line\n[00:33.00]\n[00:45.00]After the break"
+            for c in Lyrics.parse(lrc, duration: 60) {
+                let w = c.words
+                print(String(format: "%6.2f–%6.2f", c.time, c.end), c.text == nil ? "dots" : "line, \(w.count) words",
+                      w.map { String(format: "%.2f", $0.start) }.joined(separator: " "),
+                      w.isEmpty ? "" : "| words rejoined match: \(w.map(\.text).joined().trimmingCharacters(in: .whitespaces) == c.text)")
+            }
+            exit(0)
+        }
         if args.contains("--idle-track-test") {
             // Hover the bare notch with a pretend pointer, then move away: it should open, then close all the way.
             // The real panel never comes on screen (no onStage).
@@ -497,11 +537,7 @@ extension AppDelegate {
                 d.phase = args[j + 1] == "polishing" ? .processing : .listening
                 d.handsFree = args.contains("--hands-free")
                 d.noSound = args.contains("--no-sound")
-                d.preview = args.contains("--long")
-                    ? "So the plan for tomorrow is number one finish the notch drag and drop, number two fix the dictation paste, number three ship the build before lunch, and then we can look at the settings preview again and maybe the meeting chat too"
-                    : "So the plan for tomorrow is"
-                d.levels = (0..<20).map { i in Float(0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
-                if d.noSound { d.preview = ""; d.levels = d.levels.map { _ in 0 } }
+                d.levels = (0..<20).map { i in Float(d.noSound ? 0 : 0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
             }
             if args.contains("--event") || args.contains("--event-now") {
                 // A made-up event with a Meet link, 12 minutes off (or just started), instead of the real calendar.
@@ -569,16 +605,13 @@ extension AppDelegate {
                 }
                 d.handsFree = args.contains("--hands-free")
                 d.levels = (0..<20).map { i in Float(0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
-                let words = "So the plan for tomorrow is"
                 var steps: [(ms: Double, run: () -> Void)]
                 if args[k + 1] == "end" {
                     d.phase = .listening
-                    d.preview = words
                     island.refresh()
-                    steps = [(80, { d.phase = .processing; island.refresh() }), (780, { d.phase = .idle; d.preview = ""; island.refresh() })]
+                    steps = [(80, { d.phase = .processing; island.refresh() }), (780, { d.phase = .idle; island.refresh() })]
                 } else {
-                    steps = [(80, { d.phase = .starting; island.refresh() }), (320, { d.phase = .listening; island.refresh() }),
-                             (600, { d.preview = words; island.refresh() })]
+                    steps = [(80, { d.phase = .starting; island.refresh() }), (320, { d.phase = .listening; island.refresh() })]
                 }
                 RunLoop.main.run(until: Date().addingTimeInterval(1))
                 var frames: [(String, NSBitmapImageRep)] = []
@@ -594,6 +627,58 @@ extension AppDelegate {
                 try? Self.contactSheet(frames, columns: 3).flatMap { $0.representation(using: .png, properties: [:]) }?
                     .write(to: URL(fileURLWithPath: args[i + 1] + "-dictation-\(args[k + 1]).png"))
                 print("stage", island.stage, "activities", island.activities)
+                exit(0)
+            }
+            // Motion caught every few ms on one contact sheet, off screen (`islandFrames`):
+            // `--open-frames` opening and closing; `--song-frames` the next song (`--closed` in the closed notch,
+            // `--lyrics-face` with lyrics, `--no-lyrics` when the next song has none); `--eq-frames` the visualizer;
+            // `--karaoke-frames` the lyrics face across a line change.
+            let m = NowPlaying.shared
+            // The notch's own first steps (seed, then closed) land before a hook picks the stage it starts from.
+            if ["--open-frames", "--song-frames", "--eq-frames", "--karaoke-frames"].contains(where: args.contains) {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            }
+            if args.contains("--open-frames") {
+                island.lastInteraction = .distantFuture
+                island.stage = .compact
+                island.contentVisible = true
+                islandFrames(args, args[i + 1] + "-open.png", total: 1400, every: 50, height: 200,
+                             [(50, { self.island.expand(haptic: false) }), (750, { self.island.collapse() })])
+                exit(0)
+            }
+            if args.contains("--song-frames") {
+                let closed = args.contains("--closed")
+                island.lastInteraction = .distantFuture
+                island.stage = closed ? .compact : .expanded
+                island.contentVisible = true
+                let lyrics = args.contains("--lyrics-face")
+                // The title comes first; the cover a moment later, once it's decoded (as from Spotify or Music).
+                islandFrames(args, args[i + 1] + "-song\(closed ? "-closed" : lyrics ? "-lyrics" : "").png", total: 1300, every: 50, height: closed ? 60 : 200, [
+                    (100, {
+                        m.title = "Save Your Tears"
+                        m.position = 61
+                        m.updated = Date()
+                        if lyrics { Lyrics.shared.demoLoading() }
+                    }),
+                    (250, { m.artwork = Self.demoArt(1) }),
+                    (500, { if lyrics { Lyrics.shared.showDemo(second: true, none: args.contains("--no-lyrics")) } }),
+                ])
+                exit(0)
+            }
+            if args.contains("--eq-frames") {
+                island.stage = .compact
+                island.contentVisible = true
+                islandFrames(args, args[i + 1] + "-eq.png", total: 720, every: 40, height: 40, columns: 2, [])
+                exit(0)
+            }
+            if args.contains("--karaoke-frames") {
+                island.lastInteraction = .distantFuture
+                island.stage = .expanded
+                island.contentVisible = true
+                island.lyricsOverride = true
+                m.position = 68.9
+                m.updated = Date()
+                islandFrames(args, args[i + 1] + "-karaoke.png", total: 2800, every: 200, height: 220, columns: 3, [])
                 exit(0)
             }
             var images: [NSBitmapImageRep] = []
@@ -1044,6 +1129,29 @@ extension AppDelegate {
         return (w, hv)
     }
 
+    /// The notch caught every `every` ms for `total` ms off screen, `steps` run on the way, cropped to its top middle,
+    /// on one contact sheet.
+    func islandFrames(_ args: [String], _ path: String, total: Double, every: Double, height: CGFloat, columns: Int = 4,
+                      _ steps: [(ms: Double, run: () -> Void)]) {
+        let (w, hv) = islandWindow(args)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        var steps = steps
+        var frames: [(String, NSBitmapImageRep)] = []
+        let start = Date()
+        for ms in stride(from: 0.0, through: total, by: every) {
+            while let s = steps.first, s.ms <= ms { s.run(); steps.removeFirst() }
+            // Always a moment idle: back to back, the captures starve the run loop and SwiftUI's animation clock stops.
+            RunLoop.main.run(until: max(start.addingTimeInterval((ms + every - 1) / 1000), Date().addingTimeInterval(0.03)))
+            let size = island.geometry.panelSize
+            let crop = NSRect(x: size.width / 2 - 300, y: hv.isFlipped ? 0 : size.height - height, width: 600, height: height)
+            if let rep = hv.bitmapImageRepForCachingDisplay(in: crop) { hv.cacheDisplay(in: crop, to: rep); frames.append(("\(Int(ms)) ms (at \(Int(Date().timeIntervalSince(start) * 1000)))", rep)) }
+        }
+        w.orderOut(nil)
+        try? Self.contactSheet(frames, columns: columns).flatMap { $0.representation(using: .png, properties: [:]) }?
+            .write(to: URL(fileURLWithPath: path))
+        print("wrote", path)
+    }
+
     /// Frames side by side, each with its label, at half size.
     static func contactSheet(_ frames: [(String, NSBitmapImageRep)], columns: Int) -> NSBitmapImageRep? {
         guard let first = frames.first?.1 else { return nil }
@@ -1067,10 +1175,12 @@ extension AppDelegate {
         return rep
     }
 
-    /// A stand-in album cover for snapshots: a red sky over a dark street.
-    static func demoArt() -> NSImage {
+    /// A stand-in album cover for snapshots: a red sky over a dark street (`1`: a blue one, for the next song).
+    static func demoArt(_ variant: Int = 0) -> NSImage {
         NSImage(size: NSSize(width: 300, height: 300), flipped: false) { r in
-            NSGradient(colors: [NSColor(red: 0.95, green: 0.18, blue: 0.2, alpha: 1), NSColor(red: 0.35, green: 0.02, blue: 0.08, alpha: 1)])?.draw(in: r, angle: 90)
+            let sky = variant == 0 ? [NSColor(red: 0.95, green: 0.18, blue: 0.2, alpha: 1), NSColor(red: 0.35, green: 0.02, blue: 0.08, alpha: 1)]
+                : [NSColor(red: 0.2, green: 0.55, blue: 0.98, alpha: 1), NSColor(red: 0.04, green: 0.08, blue: 0.3, alpha: 1)]
+            NSGradient(colors: sky)?.draw(in: r, angle: 90)
             NSColor(white: 0.05, alpha: 1).setFill()
             NSRect(x: 0, y: 0, width: r.width, height: r.height * 0.28).fill()
             return true
