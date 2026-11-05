@@ -69,6 +69,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
     /// The open notch shows the front camera as a mirror (the camera runs only while it shows).
     var camera = false { didSet { if !camera { CameraMirror.shared.stop() } } }
+    /// Opened by hovering the bare notch with nothing running: the clock, the battery and the camera button.
+    var idleOpen = false
     /// A tile tapped in the open notch: it takes the main spot until the notch closes.
     var focus: Slot?
     /// The player shows the song's lyrics in place of its timeline (Settings keeps the choice).
@@ -315,7 +317,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             if case .failed = dictation.phase { 48 } else {
                 max(dictation.preview.isEmpty ? 0 : dictationTextHeight, dictationControls ? 32 : 0)
             }
-        case nil: 42
+        case nil: 56 // the clock, opened with nothing running
         }
     }
 
@@ -461,7 +463,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         // Dictation takes the band the camera button sits in: the mirror closes.
         if camera, dictationInStrip { withAnimation(islandSettle) { camera = false } }
         let next = list.first
-        guard next != nil else { return hide() }
+        guard next != nil else {
+            if !idleOpen { hide() } // opened by hover with nothing running: it stays until the pointer leaves
+            return
+        }
         show()
         // Dictation expands on its own once there are words to show; a failure expands to explain itself.
         // Polishing happens in the closed notch: an open one closes when it starts.
@@ -674,7 +679,36 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 
     func collapse() {
         guard stage == .expanded else { return }
+        // Opened with nothing running: there's no closed notch to go back to.
+        if activities.isEmpty {
+            idleOpen = false
+            withAnimation(islandSettle) { camera = false }
+            return hide()
+        }
+        idleOpen = false
         withAnimation(islandSettle) { stage = .compact }
+    }
+
+    /// The bare notch was hovered with nothing running: it opens straight from the notch's own shape.
+    func openIdle() {
+        guard stage == .hidden, activities.isEmpty, Store.shared.settings.notchEnabled else { return }
+        generation += 1
+        idleOpen = true
+        haptic()
+        lastInteraction = Date()
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            contentVisible = false
+            stage = .seed
+        }
+        after(0.03) {
+            guard self.idleOpen, self.stage == .seed else { return }
+            withAnimation(islandSpring) {
+                self.stage = .expanded
+                self.contentVisible = true
+            }
+        }
     }
 
     private func after(_ s: Double, _ work: @escaping @MainActor () -> Void) {
@@ -828,12 +862,12 @@ final class IslandPanel: NSPanel {
 
     private func stageChanged(_ stage: IslandStage) {
         if stage == .hidden {
-            tracker?.invalidate()
-            tracker = nil
             panel.ignoresMouseEvents = true
             panel.orderOut(nil)
-            moveMonitors.forEach(NSEvent.removeMonitor)
-            moveMonitors = []
+            // Still watched (slowly, faster near the notch) so hovering the bare notch can open it.
+            tracker?.invalidate()
+            tracker = nil
+            setTracking(fast: false)
         } else if !panel.isVisible || !panel.isOnActiveSpace {
             layout()
             panel.orderFrontRegardless()
@@ -887,6 +921,21 @@ final class IslandPanel: NSPanel {
     /// Clicks only land on the island itself; hovering it for a moment expands it.
     private func track() {
         let mouse = NSEvent.mouseLocation
+        if model.stage == .hidden {
+            // Nothing running: hovering the notch itself for a moment opens it.
+            let s = Store.shared.settings
+            let over = s.notchHoverExpand && !(model.fullScreen && s.notchHideInFullScreen) && shapeRect().contains(mouse)
+            if over {
+                if hoverSince == nil { hoverSince = Date() }
+                if let since = hoverSince, Date().timeIntervalSince(since) > s.notchHoverDelay {
+                    hoverSince = nil
+                    model.openIdle()
+                }
+            } else {
+                hoverSince = nil
+            }
+            return setTracking(fast: near(mouse))
+        }
         let rect = shapeRect(scale: model.hovering ? 1.05 : 1)
         let interactive = model.stage == .compact || model.stage == .expanded
         let over = interactive && model.contentVisible && rect.contains(mouse)
@@ -1325,6 +1374,8 @@ struct IslandView: View {
                             .frame(width: model.mainWidth)
                             .offset(x: first == .media ? model.pull.width : 0)
                             .contextMenu { promoteMenu(first) }
+                    } else {
+                        idleClock.padding(.horizontal, Self.rowPad).frame(width: model.mainWidth)
                     }
                     if !model.tiles.isEmpty { tileGrid }
                 }
@@ -1358,6 +1409,22 @@ struct IslandView: View {
                 guard let s = model.slots.dropFirst().first, let f = rowFrames[s.key] else { return }
                 drag = RowDrag(slot: s, start: CGPoint(x: f.midX, y: f.midY), point: CGPoint(x: f.minX + 30, y: 22))
             }
+        }
+    }
+
+    /// Nothing running: the time and the date.
+    private var idleClock: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(ctx.date, format: .dateTime.hour().minute())
+                    .font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(maxHeight: .infinity)
         }
     }
 

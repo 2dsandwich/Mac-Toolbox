@@ -397,6 +397,16 @@ extension AppDelegate {
                 if args.contains("--no-media") { NowPlaying.shared.onChange = nil; NowPlaying.shared.title = "" }
             }
             island.refresh()
+            if args.contains("--idle") {
+                // Nothing running: hovering opens it (clock, battery, camera); leaving closes it all the way.
+                island.openIdle()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+                print("idle open:", island.stage, island.idleOpen)
+                island.collapse()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.9))
+                print("idle after leaving:", island.stage, island.idleOpen)
+                island.idleOpen = true
+            }
             if args.contains("--swipe-test") {
                 // Feeds trackpad swipes (finger travel in points) to the notch and says what it did.
                 var skipped: [Bool] = []

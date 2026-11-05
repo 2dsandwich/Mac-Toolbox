@@ -14,7 +14,8 @@ struct BatteryGlance: View {
             if let b = Self.read() {
                 let level = b.pct > 87 ? "100" : b.pct > 62 ? "75" : b.pct > 37 ? "50" : b.pct > 12 ? "25" : "0"
                 HStack(spacing: 5) {
-                    Image(systemName: "battery.\(level)percent" + (b.charging ? ".bolt" : ""))
+                    // Only the full battery has a charging version of the symbol.
+                    Image(systemName: b.charging ? "battery.100percent.bolt" : "battery.\(level)percent")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(b.pct <= 20 && !b.plugged ? Color.red : b.charging ? Color.green : Color.white.opacity(0.85))
                     Text("\(b.pct)%").font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(0.85))
