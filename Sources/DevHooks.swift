@@ -127,6 +127,34 @@ extension AppDelegate {
                         print("[\(AI.label(.dictation, s))]", String(format: "%.1fs", Date().timeIntervalSince(start)), "→", out.replacingOccurrences(of: "\n", with: " ⏎ "))
                     } catch { print("FAILED:", error.localizedDescription) }
                 }
+                // Mixed English + Japanese where the phrase merge leaned on one language (what goes wrong in real use).
+                let mixed: [(merged: String, en: String, ja: String, before: String?)] = [
+                    ("a share no meeting what son G Cara day yo nay then I'll send the slides",
+                     "a share no meeting what son G Cara day yo nay then I'll send the slides",
+                     "明日のミーティングは3時からでいいよね。ゼン アイル センド ザ スライズ", nil),
+                    ("このバグ直して。ザ ボタン ダズント ショーアップ ウェン アイ オープン セッティングス",
+                     "Kono bug now she take the button doesn't show up when I open settings",
+                     "このバグ直して。ザ ボタン ダズント ショーアップ ウェン アイ オープン セッティングス", nil),
+                    ("Rio Kai jaa kin you be need oh Kuri mass",
+                     "Rio Kai jaa kin you be need oh Kuri mass",
+                     "了解、じゃあ金曜日に送ります", "Sounds good, can you send it by Friday?"),
+                    ("明日のミーティングは3時からでいいよね",
+                     "a share no meeting what son G Cara day yo nay then I'll send the slides after lunch",
+                     "明日のミーティングは3時からでいいよね。ゼン", nil),
+                    ("Can you check the",
+                     "Can you check the yeah me sure Oh MIT tell us way",
+                     "キャンユーチェックザ請求書を見て確認して", nil),
+                    ("I think the 予算 is too high だから let's cut the ads",
+                     "I think the yo son is too high the color let's cut the ads",
+                     "アイシンクザ予算イズトゥーハイだからレッツカットジアズ", nil),
+                ]
+                for m in mixed {
+                    let out = try? await AI.complete(.dictation, system: Prompts.cleanup(s, context: .chat),
+                                                     user: Prompts.cleanupRequest(heard: [("en_US", m.en, 0.6), ("ja_JP", m.ja, 0.6)], merged: m.merged,
+                                                                                  target: Prompts.Target(name: "LINE"), context: .chat, before: m.before))
+                    print("mixed →", (out ?? "FAILED").replacingOccurrences(of: "\n", with: " ⏎ "))
+                }
+                if args.contains("--mixed-only") { exit(0) }
                 // One thing said, written for different places.
                 let said = "um hey sarah so the files are uh ready i put them in the shared folder let me know if you need anything thanks tom"
                 for (ctx, name, field) in [(Prompts.WritingContext.chat, "LINE", ""), (.email, "Mail", ""), (.prompt, "ChatGPT", "Ask anything"),

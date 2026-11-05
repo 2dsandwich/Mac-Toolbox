@@ -847,7 +847,7 @@ enum Prompts {
         var u = "Typing into: \(into) (\(context.rawValue))\n\n"
         if let before {
             u += """
-            Already typed just before the cursor (the dictation carries on from it: match its style, language and formatting, and if it \
+            Already typed just before the cursor (the dictation carries on from it: match its style and formatting but keep the language that was spoken, and if it \
             ends in a list, write the new items as more of that list, numbered on from it; output only the new part, never repeat this):
             <<<
             \(before)
@@ -860,13 +860,18 @@ enum Prompts {
             u += "Transcript:\n\(heard[0].text)"
         } else {
             u += """
-            Transcript (mixed languages, already merged phrase by phrase from one recognizer per language; mostly right):
+            The speaker may switch between English and Japanese, even mid-sentence. Two recognizers heard the same audio, one per \
+            language, and each is only reliable in its own language: the English one turns Japanese into English-sounding nonsense \
+            ("a share no" for 明日の), the Japanese one turns English into katakana (ゼン アイル センド for "then I'll send").
+
+            Draft (merged phrase by phrase by a simple rule; it sometimes picks the wrong recognizer or drops a whole stretch):
             \(merged)
 
-            Each recognizer below heard the same audio but is only reliable in its own language. Use them only to fix words the \
-            merged transcript got wrong, never to add or repeat anything. If a stretch appears twice (once per language, because \
-            both recognizers heard it), keep only the version in the language it was really said in. Drop stray scraps of one \
-            language inside another that don't belong to the sentence.
+            Rebuild what was said from start to end: for each stretch, take it from the recognizer of the language it was really \
+            spoken in. Keep every part in its own language and never translate one into the other. If the English recognizer has \
+            real English that the draft is missing (or the Japanese recognizer has real Japanese the draft is missing), it was \
+            said: put it back where it belongs. Each stretch appears once, never twice. Drop scraps that are only one \
+            recognizer mishearing the other language.
 
             """
             for h in heard { u += "\n\(SpeechModels.name(h.locale)) recognizer:\n\(h.text)\n" }
