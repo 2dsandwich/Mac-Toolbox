@@ -19,9 +19,11 @@ struct MeetingPage: View {
     let outerRadius: CGFloat
     var chatOpen = false
     @State private var tab: PageTab
+    /// Editing the AI notes (after the meeting) instead of reading them.
+    @State private var editing = false
 
     init(doc: MeetingDoc, recorder: MeetingRecorder? = nil, chat: MeetingCopilot?, query: String = "", outerRadius: CGFloat,
-         tab: PageTab = .notes, chatOpen: Bool = false) {
+         tab: PageTab = .notes, chatOpen: Bool = false, editing: Bool = false) {
         self.doc = doc
         self.recorder = recorder
         self.chat = chat
@@ -29,6 +31,7 @@ struct MeetingPage: View {
         self.outerRadius = outerRadius
         self.chatOpen = chatOpen
         _tab = State(initialValue: tab)
+        _editing = State(initialValue: editing)
     }
 
     private let inset = PanelLayout.inset
@@ -52,7 +55,16 @@ struct MeetingPage: View {
             HStack(spacing: PanelLayout.gap) {
                 ForEach(tabs, id: \.self) { t in TabPill(title: t.rawValue, on: tab == t) { tab = t } }
                 Spacer(minLength: 0)
-                TemplateMenu(doc: doc, live: live)
+                if tab == .notes, !live, !writing, !doc.notes.isEmpty {
+                    Button { editing.toggle() } label: { MeetingIcon(symbol: editing ? "checkmark" : "pencil") }
+                        .buttonStyle(.plain)
+                        .help(editing ? "Done" : "Edit notes")
+                }
+                // Just the icon when the row is too narrow for the template's name.
+                ViewThatFits(in: .horizontal) {
+                    TemplateMenu(doc: doc, live: live)
+                    TemplateMenu(doc: doc, live: live, compact: true)
+                }
             }
             .padding(.horizontal, inset)
             .padding(.vertical, inset)
@@ -81,14 +93,17 @@ struct MeetingPage: View {
         @Bindable var doc = doc
         switch tab {
         case .notes where live:
-            Notepad(text: $doc.myNotes, bottom: chatRoom)
+            NoteEditor(text: $doc.myNotes, people: doc.people, bottom: chatRoom)
+        case .notes where editing && !writing:
+            NoteEditor(text: $doc.notes, people: doc.people, bottom: chatRoom)
+                .onChange(of: doc.notes) { _, _ in doc.save() }
         case .notes:
             notes
         case .mine:
-            Notepad(text: $doc.myNotes, bottom: chatRoom)
+            NoteEditor(text: $doc.myNotes, people: doc.people, bottom: chatRoom)
                 .onChange(of: doc.myNotes) { _, _ in doc.save() }
         case .transcript:
-            TranscriptView(lines: doc.lines, volatileMe: live ? recorder?.volatileMe ?? "" : "", volatileOthers: live ? recorder?.volatileOthers ?? "" : "",
+            TranscriptView(doc: doc, volatileMe: live ? recorder?.volatileMe ?? "" : "", volatileOthers: live ? recorder?.volatileOthers ?? "" : "",
                            query: query, follow: live, bottom: chatRoom)
         }
     }
@@ -140,9 +155,11 @@ private struct TabPill: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12.5, weight: .semibold))
+                .lineLimit(1)
+                .fixedSize()
                 .foregroundStyle(on ? Color.primary : Color.secondary)
                 .padding(.horizontal, 12)
-                .frame(height: 28)
+                .frame(height: 32)
                 .background(Capsule().fill(Color.primary.opacity(on ? 0.12 : hover ? 0.06 : 0)))
                 .contentShape(Capsule())
         }
@@ -155,6 +172,7 @@ private struct TabPill: View {
 struct TemplateMenu: View {
     let doc: MeetingDoc
     let live: Bool
+    var compact = false
 
     var body: some View {
         Menu {
@@ -168,12 +186,12 @@ struct TemplateMenu: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "list.bullet.rectangle")
-                Text(doc.resolvedTemplate.name).lineLimit(1)
+                if !compact { Text(doc.resolvedTemplate.name).lineLimit(1) }
             }
             .font(.system(size: 12.5, weight: .medium))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .frame(height: 28)
+            .padding(.horizontal, compact ? 0 : 12)
+            .frame(width: compact ? 32 : nil, height: 32)
             .background(Capsule().fill(Color.primary.opacity(0.08)))
             .contentShape(Capsule())
         }
@@ -181,7 +199,7 @@ struct TemplateMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Template")
+        .help(compact ? "Template: \(doc.resolvedTemplate.name)" : "Template")
     }
 
     private func item(_ title: String, _ name: String) -> some View {
@@ -190,29 +208,6 @@ struct TemplateMenu: View {
         } label: {
             if doc.template == name { Label(title, systemImage: "checkmark") } else { Text(title) }
         }
-    }
-}
-
-/// Where you type during the meeting.
-struct Notepad: View {
-    private static let textInset: CGFloat = 5
-    @Binding var text: String
-    let bottom: CGFloat
-
-    var body: some View {
-        TextEditor(text: $text)
-            .font(.system(size: 14))
-            .lineSpacing(4)
-            .textEditorStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .contentMargins(.bottom, bottom, for: .scrollContent)
-            .overlay(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text("Write notes").font(.system(size: 14)).foregroundStyle(.tertiary).padding(.leading, Self.textInset).allowsHitTesting(false)
-                }
-            }
-            // The editor keeps its text this far in; take it off so the text lines up with the title.
-            .padding(.horizontal, PanelLayout.inset - Self.textInset)
     }
 }
 
@@ -243,9 +238,9 @@ private struct LiveCaption: View {
     }
 }
 
-/// Who said what, when: Me in green, Others in grey, still-being-said text dimmer.
+/// Who said what, when: each line under its speaker's tag (click it to fix the name), still-being-said text dimmer.
 struct TranscriptView: View {
-    let lines: [MeetingRecorder.Line]
+    let doc: MeetingDoc
     var volatileMe = ""
     var volatileOthers = ""
     var query = ""
@@ -257,12 +252,12 @@ struct TranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(lines.filter { q.isEmpty || $0.text.localizedCaseInsensitiveContains(q) }) { l in
-                        block(l.me, l.text, at: l.at, live: false)
+                    ForEach(doc.lines.filter { q.isEmpty || $0.text.localizedCaseInsensitiveContains(q) }) { l in
+                        block(doc.label(l), me: l.me, l.text, at: l.at, live: false)
                     }
-                    if !volatileOthers.isEmpty { block(false, volatileOthers, at: nil, live: true) }
-                    if !volatileMe.isEmpty { block(true, volatileMe, at: nil, live: true) }
-                    if lines.isEmpty, volatileMe.isEmpty, volatileOthers.isEmpty {
+                    if !volatileOthers.isEmpty { block(doc.othersName ?? "Others", me: false, volatileOthers, at: nil, live: true) }
+                    if !volatileMe.isEmpty { block(doc.meName, me: true, volatileMe, at: nil, live: true) }
+                    if doc.lines.isEmpty, volatileMe.isEmpty, volatileOthers.isEmpty {
                         Text(follow ? "Listening" : "Nothing was transcribed").font(.system(size: 13)).foregroundStyle(.secondary)
                     }
                     Color.clear.frame(height: 1).id("end")
@@ -271,15 +266,15 @@ struct TranscriptView: View {
                 .padding(.bottom, bottom)
             }
             .onAppear { if follow { proxy.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: lines.count) { _, _ in if follow { withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo("end", anchor: .bottom) } } }
+            .onChange(of: doc.lines.count) { _, _ in if follow { withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo("end", anchor: .bottom) } } }
             .onChange(of: volatileMe + volatileOthers) { _, _ in if follow { proxy.scrollTo("end", anchor: .bottom) } }
         }
     }
 
-    private func block(_ me: Bool, _ text: String, at: TimeInterval?, live: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+    private func block(_ name: String, me: Bool, _ text: String, at: TimeInterval?, live: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                Text(me ? "Me" : "Others").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(me ? ChatLayout.tint : .secondary)
+                SpeakerTag(doc: doc, name: name, me: me)
                 if let at { Text(MeetingDoc.clock(at)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.tertiary) }
             }
             Text(text)
@@ -289,6 +284,63 @@ struct TranscriptView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// A speaker's name as a tag. Click it to fix the name: every line they said, the notes and the file change with it.
+struct SpeakerTag: View {
+    let doc: MeetingDoc
+    let name: String
+    let me: Bool
+    @State private var editing = false
+    @State private var draft = ""
+    @State private var hover = false
+    @FocusState private var focused: Bool
+
+    /// Me in green, Others grey, each named person a colour of their own.
+    static func color(_ name: String, me: Bool) -> Color {
+        if me { return ChatLayout.tint }
+        if name == "Others" { return .secondary }
+        let palette: [Color] = [Color(red: 0.45, green: 0.62, blue: 1), Color(red: 1, green: 0.62, blue: 0.35), Color(red: 0.74, green: 0.56, blue: 1),
+                                Color(red: 1, green: 0.5, blue: 0.68), Color(red: 0.36, green: 0.8, blue: 0.86), Color(red: 0.92, green: 0.78, blue: 0.36)]
+        let hash = name.unicodeScalars.reduce(5381) { ($0 &* 33 &+ Int($1.value)) & 0xFFFFFF }
+        return palette[hash % palette.count]
+    }
+
+    var body: some View {
+        let tint = Self.color(name, me: me)
+        Group {
+            if editing {
+                TextField("Name", text: $draft)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .onSubmit(commit)
+                    .onExitCommand { editing = false }
+                    .onChange(of: focused) { _, on in if !on { commit() } }
+                    .frame(width: max(64, CGFloat(draft.count) * 7 + 16))
+                    .onAppear {
+                        draft = name
+                        focused = true
+                    }
+            } else {
+                Button { editing = true } label: { Text(name).lineLimit(1) }
+                    .buttonStyle(.plain)
+                    .help("Rename")
+            }
+        }
+        .font(.system(size: 11.5, weight: .semibold))
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .frame(height: 20)
+        .background(Capsule().fill(tint.opacity(hover || editing ? 0.24 : 0.14)))
+        .contentShape(Capsule())
+        .onHover { hover = $0 }
+    }
+
+    private func commit() {
+        guard editing else { return }
+        editing = false
+        doc.rename(name, to: draft)
     }
 }
 

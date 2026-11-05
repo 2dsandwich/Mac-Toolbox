@@ -18,6 +18,12 @@ import Observation
     /// What you typed during the meeting.
     var myNotes = ""
     var lines: [Line] = []
+    /// What the microphone's lines are labelled ("Me" unless you renamed it).
+    var meName = "Me"
+    /// The name of the one person on the computer's sound, once known (nil: "Others").
+    var othersName: String?
+    /// You named a speaker yourself, so guesses no longer change the names.
+    var namedByYou = false
     /// Writing the notes: the text so far (streamed), or nil when not writing.
     var writing: String?
     var problem: String?
@@ -73,8 +79,10 @@ import Observation
             body = body[end.upperBound...]
         }
         var rest = String(body)
+        meName = meta["me"] ?? "Me"
+        othersName = meta["others"]
         if let r = rest.range(of: "## Transcript\n", options: .backwards) {
-            lines = Self.parseTranscript(String(rest[r.upperBound...]))
+            lines = Self.parseTranscript(String(rest[r.upperBound...]), me: meName, others: othersName)
             rest = String(rest[..<r.lowerBound])
         }
         if let r = rest.range(of: "## My notes\n", options: .backwards) {
@@ -96,15 +104,17 @@ import Observation
         date = Self.stampDate(url) ?? (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
     }
 
-    /// "**Me** (01:02): text" back into lines.
-    static func parseTranscript(_ text: String) -> [Line] {
+    /// "**Me** (01:02): text" and "**Aiko Tanaka** (01:10): text" back into lines.
+    static func parseTranscript(_ text: String, me: String = "Me", others: String? = nil) -> [Line] {
         text.components(separatedBy: "\n").compactMap { row in
-            let me = row.hasPrefix("**Me**")
-            guard me || row.hasPrefix("**Others**"), let open = row.firstIndex(of: "("), let close = row.firstIndex(of: ")"), open < close else { return nil }
-            let clock = row[row.index(after: open)..<close].split(separator: ":").compactMap { Double($0) }
-            let at = clock.reduce(0) { $0 * 60 + $1 }
+            guard row.hasPrefix("**"), let mark = row.range(of: "** ("), let close = row[mark.upperBound...].firstIndex(of: ")") else { return nil }
+            let label = String(row[row.index(row.startIndex, offsetBy: 2)..<mark.lowerBound])
+            let clock = row[mark.upperBound..<close].split(separator: ":").compactMap { Double($0) }
+            guard !label.isEmpty, !clock.isEmpty else { return nil }
             let text = row[row.index(after: close)...].drop { $0 == ":" || $0 == " " }
-            return Line(me: me, text: String(text), at: at, updated: .distantPast)
+            let isMe = label == me
+            return Line(me: isMe, text: String(text), at: clock.reduce(0) { $0 * 60 + $1 }, updated: .distantPast,
+                        speaker: isMe || label == "Others" || label == others ? nil : label)
         }
     }
 
@@ -117,7 +127,39 @@ import Observation
     }
 
     var transcript: String {
-        lines.map { l in "**\(l.me ? "Me" : "Others")** (\(Self.clock(l.at))): \(l.text)" }.joined(separator: "\n\n")
+        lines.map { l in "**\(label(l))** (\(Self.clock(l.at))): \(l.text)" }.joined(separator: "\n\n")
+    }
+
+    // MARK: Speakers
+
+    /// Who said a line: Me (or your name), the person told apart, the channel's name, else Others.
+    func label(_ l: Line) -> String { l.me ? meName : l.speaker ?? othersName ?? "Others" }
+
+    /// Everyone who can be mentioned: the attendees and the people named in the transcript.
+    var people: [String] {
+        var seen = Set<String>()
+        return (attendees + lines.map(label)).filter { $0 != meName && $0 != "Others" && seen.insert($0).inserted }
+    }
+
+    /// Fixes a speaker's name everywhere: each line they said, the notes, your notes and the attendees. Then saves.
+    func rename(_ old: String, to new: String) {
+        let name = new.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != old else { return }
+        namedByYou = true
+        if old == meName {
+            meName = name
+        } else {
+            if old == othersName || (othersName == nil && old == "Others") { othersName = name }
+            for i in lines.indices where lines[i].speaker == old { lines[i].speaker = name }
+        }
+        // "Me" and "Others" are ordinary words too: only where they name an owner ("Me: send the deck").
+        let word = NSRegularExpression.escapedPattern(for: old)
+        let pattern = old == "Me" || old == "Others" ? "(?<![\\p{L}\\p{N}])\(word)(?=:)" : "(?<![\\p{L}\\p{N}])\(word)(?![\\p{L}\\p{N}])"
+        let swap = { (s: String) in s.replacingOccurrences(of: pattern, with: NSRegularExpression.escapedTemplate(for: name), options: .regularExpression) }
+        notes = swap(notes)
+        myNotes = swap(myNotes)
+        attendees = attendees.map { $0 == old ? name : $0 }
+        save()
     }
 
     static func clock(_ t: TimeInterval) -> String {
@@ -137,6 +179,8 @@ import Observation
         if duration > 0 { front.append("duration: \(Int((duration / 60).rounded())) min") }
         if !attendees.isEmpty { front.append("attendees: " + attendees.joined(separator: ", ")) }
         if !template.isEmpty { front.append("template: " + template) }
+        if meName != "Me" { front.append("me: " + meName) }
+        if let othersName { front.append("others: " + othersName) }
         var doc = "---\n" + front.joined(separator: "\n") + "\n---\n\n# \(title.isEmpty ? "Meeting" : title)\n\n"
         if !notes.isEmpty { doc += notes + "\n\n---\n\n" }
         if !myNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { doc += "## My notes\n\n" + myNotes + "\n\n" }
@@ -174,13 +218,15 @@ import Observation
         let t = resolvedTemplate
         let system = """
         You write meeting notes. You get the notes the user typed during the meeting (short cues, maybe typos) and a speech-to-text \
-        transcript. "Me" is the user; "Others" is everyone else on the call, mixed into one voice. The transcript has recognition errors: \
+        transcript. "\(meName)" is the user. Other speakers are labelled by name when known; "Others" is everyone else on the call, \
+        mixed into one voice. The transcript has recognition errors: \
         infer the intended words from context, but never invent facts, names or numbers.
         The user's notes are the backbone. Every point they wrote must appear, in the section where it fits, as a bullet that starts with \
         their exact words (fix only obvious typos, capitalise the first letter) and runs on as one natural sentence with the detail from \
         the transcript. Then add the other points that matter.
         Shape: \(t.guidance)
         Markdown only: "## " section headings, "- " bullets, "- [ ] Owner: task (when)" for action items where the owner is known. \
+        If my notes have a Markdown table, keep it as a table (fill it in from the transcript where it helps). \
         No title line, no preamble, no closing remarks. Leave out empty sections. Short, plain sentences; no em dashes. \
         Write in the meeting's main language (a Japanese meeting gets Japanese notes).
         """

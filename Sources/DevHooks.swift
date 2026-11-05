@@ -928,33 +928,7 @@ extension AppDelegate {
             exit(0)
         }
 
-        if let i = args.firstIndex(of: "--meeting-window"), i + 1 < args.count {
-            // The floating meeting window, off screen, with a made-up meeting: --state live|writing|done|idle,
-            // --tab transcript|mine, --chat (the chat open with an answer).
-            island.onStage = nil
-            CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
-            demoMeeting(args)
-            let copilot = MeetingCopilot(store: store, source: .live(meeting))
-            if args.contains("--chat") {
-                copilot.exchanges = meeting.isRunning
-                    ? [.init(question: "What did I miss?", answer: "- The venue is confirmed for the 12th\n- They need the sponsor deck by Friday\n- Ben asked who owns the artist contracts")]
-                    : [.init(question: "Follow-up email", answer: "Subject: Sponsor sync, next steps\n\nHi Aiko and Ben,\n\nThanks for today. The venue is confirmed for the 12th, so we can stop looking.\n\n- I'll draft the sponsor deck tomorrow\n- Ben finds the latest artist contracts by Monday\n\nTalk soon")]
-            }
-            let tab = PageTab.allCases.first { args.contains("--tab") && args.contains($0 == .mine ? "mine" : $0.rawValue.lowercased()) } ?? .notes
-            let view = CopilotView(meeting: meeting, copilot: copilot, store: store, hide: {}, window: { nil }, opaque: true, tab: tab, chatOpen: args.contains("--chat"))
-            let hv = NSHostingView(rootView: view.frame(width: 440, height: 620))
-            let w = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 440, height: 620), styleMask: .borderless, backing: .buffered, defer: false)
-            w.backgroundColor = .clear
-            w.isOpaque = false
-            w.contentView = hv
-            w.orderFrontRegardless()
-            RunLoop.main.run(until: Date().addingTimeInterval(1.2))
-            if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) {
-                hv.cacheDisplay(in: hv.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
-            }
-            exit(0)
-        }
+        if runMeetingHook(args) { return true }
         if args.contains("--meeting-ai-test") {
             // Two real requests on Haiku with the made-up meeting: its notes, then the follow-up email prompt. Prints both.
             island.onStage = nil
@@ -1017,7 +991,7 @@ extension AppDelegate {
     }
 
     /// A made-up meeting for the snapshots (never the real folder): recording, or with --state / --done, writing or done.
-    private func demoMeeting(_ args: [String]) {
+    func demoMeeting(_ args: [String]) {
         MeetingDoc.folderOverride = MeetingDoc.demoFolder()
         meeting.demo()
         let state = args.firstIndex(of: "--state").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? (args.contains("--list") || args.contains("--past") ? "idle" : args.contains("--done") ? "done" : "live")

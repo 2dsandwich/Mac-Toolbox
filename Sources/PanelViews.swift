@@ -332,8 +332,28 @@ struct NotesView: View, Animatable {
     }
 
     var body: some View {
+        let blocks = NoteBlock.split(markdown)
+        if blocks.count == 1, case .text(let t) = blocks[0].block {
+            text(t, shown: shown)
+        } else {
+            VStack(alignment: .leading, spacing: spaced ? 12 : 8) {
+                ForEach(blocks.indices, id: \.self) { i in
+                    let reveal = shown - Double(blocks[i].at)
+                    switch blocks[i].block {
+                    case .text(let t): text(t, shown: reveal)
+                    case .table(let rows): NoteTable(rows: rows).opacity(reveal > 0 ? 1 : 0)
+                    case .divider: Rectangle().fill(Color.primary.opacity(0.16)).frame(height: 1).opacity(reveal > 0 ? 1 : 0)
+                    case .toggle(let title, let inside, let open):
+                        NoteToggle(title: title, inside: inside, open: open, spaced: spaced).opacity(reveal > 0 ? 1 : 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private func text(_ md: String, shown: Double) -> some View {
         // One text for the whole thing, so a selection can run across every line.
-        Text(Self.attributed(markdown, mine: mine, spaced: spaced))
+        Text(Self.attributed(md, mine: mine, spaced: spaced))
             .font(.system(size: 13.5))
             .lineSpacing(5)
             .textRenderer(FadeIn(shown: shown))
@@ -344,28 +364,47 @@ struct NotesView: View, Animatable {
 
     static func attributed(_ markdown: String, mine: [String] = [], spaced: Bool = false) -> AttributedString {
         var out = AttributedString()
-        let all = markdown.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        let lines = all.filter { !$0.isEmpty }
+        // The lines to show: code keeps its spaces, the rest is trimmed and keeps how deep it was nested.
+        var lines: [(text: String, level: Int, code: Bool, blankBefore: Bool)] = []
+        var code = false, blank = false
+        for raw in markdown.components(separatedBy: "\n") {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("```") { code.toggle(); continue }
+            if t.isEmpty { blank = true; continue }
+            let lead = raw.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) }
+            lines.append((code ? raw : t, code ? 0 : lead / 2, code, blank))
+            blank = false
+        }
         // Each of your lines brightens once, where it first shows up.
         var cues = mine.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "-*•・#[]xX ").union(.whitespaces)) }.filter { $0.count >= 3 }
         let dim = !cues.isEmpty
         let inline = { (raw: String) in dim ? Self.marked(Self.inline(raw), &cues) : Self.inline(raw) }
-        var blankBefore = Set<Int>()
-        var k = 0
-        for (i, t) in all.enumerated() where !t.isEmpty {
-            if i > 0, all[i - 1].isEmpty { blankBefore.insert(k) }
-            k += 1
+        let faint = { (s: String) in
+            var a = AttributedString(s)
+            a.foregroundColor = .secondary
+            return a
         }
-        for (n, t) in lines.enumerated() {
+        for (n, line) in lines.enumerated() {
+            let t = line.text
             if n > 0 {
                 out += AttributedString("\n")
-                if spaced, t.hasPrefix("#") || blankBefore.contains(n) {
+                if spaced, !line.code, t.hasPrefix("#") || line.blankBefore {
                     var gap = AttributedString("\n")
                     gap.font = .system(size: t.hasPrefix("#") ? 9 : 5)
                     out += gap
                 }
             }
-            if t.hasPrefix("# ") {
+            if line.level > 0 { out += AttributedString(String(repeating: "\u{2003}", count: line.level)) }
+            if line.code {
+                var c = AttributedString(t)
+                c.font = .system(size: 12.5, design: .monospaced)
+                c.foregroundColor = .secondary
+                out += c
+            } else if let num = t.range(of: #"^\d{1,3}\. "#, options: .regularExpression) {
+                out += faint(t[num].trimmingCharacters(in: .whitespaces) + "\u{2002}") + inline(String(t[num.upperBound...]))
+            } else if t.hasPrefix("> ") {
+                out += faint("│\u{2002}") + inline(String(t.dropFirst(2)))
+            } else if t.hasPrefix("# ") {
                 var h = Self.inline(String(t.dropFirst(2)))
                 h.font = .system(size: 18, weight: .semibold)
                 out += h
@@ -374,8 +413,8 @@ struct NotesView: View, Animatable {
                 h.font = .system(size: 12, weight: .semibold)
                 h.foregroundColor = .secondary
                 out += h
-            } else if t.hasPrefix("- [ ] ") || t.hasPrefix("- [x] ") {
-                var box = AttributedString(t.hasPrefix("- [x]") ? "☑\u{2002}" : "☐\u{2002}")
+            } else if t.hasPrefix("- [ ] ") || t.hasPrefix("- [x] ") || t.hasPrefix("- [X] ") {
+                var box = AttributedString(t.hasPrefix("- [ ]") ? "☐\u{2002}" : "☑\u{2002}")
                 box.foregroundColor = .secondary
                 out += box + inline(String(t.dropFirst(6)))
             } else if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("・") {
@@ -413,6 +452,75 @@ struct NotesView: View, Animatable {
         var s = raw
         for mark in ["**", "`"] where s.components(separatedBy: mark).count % 2 == 0 { s += mark }
         return (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+/// A Markdown table in the notes: the first row bold, a light grid, scrolling sideways when it's wide.
+struct NoteTable: View {
+    let rows: [[String]]
+
+    var body: some View {
+        let cols = rows.map(\.count).max() ?? 0
+        let line = Color.primary.opacity(0.16)
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        ScrollView(.horizontal) {
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                ForEach(rows.indices, id: \.self) { r in
+                    GridRow {
+                        ForEach(0..<cols, id: \.self) { c in
+                            Text(NotesView.attributed(rows[r].indices.contains(c) ? rows[r][c] : ""))
+                                .font(.system(size: 13.5, weight: r == 0 ? .semibold : .regular))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .frame(minWidth: 56, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                .overlay(alignment: .trailing) { if c < cols - 1 { line.frame(width: 1) } }
+                                .overlay(alignment: .bottom) { if r < rows.count - 1 { line.frame(height: 1) } }
+                        }
+                    }
+                }
+            }
+            .fixedSize()
+            .overlay(shape.strokeBorder(line, lineWidth: 1))
+            .clipShape(shape)
+            .padding(1)
+        }
+        .scrollIndicators(.never)
+        .textSelection(.enabled)
+    }
+}
+
+/// A toggle in the notes: its title with an arrow, what's inside shown when open.
+struct NoteToggle: View {
+    let title: String
+    let inside: String
+    let spaced: Bool
+    @State private var open: Bool
+
+    init(title: String, inside: String, open: Bool, spaced: Bool) {
+        self.title = title
+        self.inside = inside
+        self.spaced = spaced
+        _open = State(initialValue: open)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { withAnimation(.smooth(duration: 0.2)) { open.toggle() } } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .frame(width: 14)
+                    Text(NotesView.attributed(title)).font(.system(size: 13.5))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open, !inside.isEmpty {
+                NotesView(markdown: inside, spaced: spaced).padding(.leading, 22)
+            }
+        }
     }
 }
 

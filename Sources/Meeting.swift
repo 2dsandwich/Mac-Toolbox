@@ -14,6 +14,8 @@ import ScreenCaptureKit
         var text: String
         let at: TimeInterval
         var updated: Date
+        /// Who said it, when told apart from the others on the same channel (nil: the channel's name).
+        var speaker: String?
     }
 
     var phase = Phase.idle
@@ -48,6 +50,9 @@ import ScreenCaptureKit
     @ObservationIgnored private var lastTick = Date()
     @ObservationIgnored private var startedAt = Date()
     @ObservationIgnored private var paused = false
+    /// How many lines there were when the speakers were last named (nil: not yet), and whether that's under way.
+    @ObservationIgnored private var namedAt: Int?
+    @ObservationIgnored private var naming = false
     @ObservationIgnored var onChange: (() -> Void)?
 
     init(store: Store) {
@@ -78,7 +83,9 @@ import ScreenCaptureKit
         if let e = event ?? CalendarEvents.shared.current() {
             doc.title = e.title
             doc.attendees = e.attendees
+            doc.othersName = SpeakerNames.oneOnOne(e.attendees)
         }
+        namedAt = nil
         phase = .recording
         changed()
         session = UUID()
@@ -131,6 +138,8 @@ import ScreenCaptureKit
             await sys?.stop()
             await stopTranscribers()
             self.save()
+            while self.naming { try? await Task.sleep(for: .milliseconds(200)) }
+            if let from = self.speakersToName(final: true) { await self.nameSpeakers(from: from) }
             await self.summarize()
         }
     }
@@ -276,6 +285,28 @@ import ScreenCaptureKit
         } else {
             lines.append(Line(me: me, text: t, at: elapsed, updated: Date()))
         }
+        if let from = speakersToName(final: false) { Task { await nameSpeakers(from: from) } }
+    }
+
+    /// When to name the speakers: once the others have said enough (or at the end, if they never did), and at the end
+    /// again for lines said since, if several people were told apart. Returns the first line to look at.
+    private func speakersToName(final: Bool) -> Int? {
+        guard !naming, !doc.namedByYou else { return nil }
+        let others = lines.filter { !$0.me }
+        guard let at = namedAt else {
+            let heard = others.reduce(0) { $0 + $1.text.count }
+            return heard >= (final ? 80 : 500) || (!final && others.count >= 8) ? 0 : nil
+        }
+        guard final, doc.othersName == nil, lines.contains(where: { $0.speaker != nil }), lines[min(at, lines.count)...].filter({ !$0.me }).count >= 3 else { return nil }
+        return at
+    }
+
+    private func nameSpeakers(from: Int) async {
+        naming = true
+        let d = doc
+        if let g = await SpeakerNames.detect(d, from: from) { SpeakerNames.apply(g, to: d, from: from) }
+        if d === doc { namedAt = d.lines.count }
+        naming = false
     }
 
     private func tick() {
