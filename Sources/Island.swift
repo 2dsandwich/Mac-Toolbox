@@ -1732,7 +1732,7 @@ struct IslandView: View {
     /// The open player's art, as tall as the song, time and controls beside it.
     static let artBig: CGFloat = 92
     /// The lyrics face, taller than the player so the line being sung (wrapped if it's long) and the next ones fit.
-    static let lyricsHeight: CGFloat = 148
+    static let lyricsHeight: CGFloat = 200
 
     static func songClock(_ t: Double) -> String {
         let s = max(0, Int(t.rounded(.down)))

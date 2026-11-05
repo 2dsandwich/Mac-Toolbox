@@ -494,8 +494,9 @@ struct LyricLines: View {
         }
         // Lines fade out at the top (under the header, never over it) and at the bottom.
         .mask {
-            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.16),
-                                   .init(color: .black, location: 0.84), .init(color: .clear, location: 1)],
+            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black.opacity(0.35), location: 0.14),
+                                   .init(color: .black, location: 0.34), .init(color: .black, location: 0.66),
+                                   .init(color: .black.opacity(0.35), location: 0.86), .init(color: .clear, location: 1)],
                            startPoint: .top, endPoint: .bottom)
         }
         .clipped()
@@ -537,8 +538,8 @@ struct LyricLines: View {
     }
 }
 
-/// A new line: the reel clicks over and settles with a small bounce, like a slot reel stopping.
-private let reelStop = Animation.spring(response: 0.42, dampingFraction: 0.62)
+/// A new line: the reel turns over in one smooth move, no overshoot (a bounce wobbled every line on the drum).
+private let reelStop = Animation.spring(response: 0.45, dampingFraction: 1)
 /// Opening the face: a long spin that slows onto the line being sung, overshooting a touch.
 private let reelSpin = Animation.spring(response: 1.1, dampingFraction: 0.7)
 
