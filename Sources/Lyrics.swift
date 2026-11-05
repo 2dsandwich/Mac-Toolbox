@@ -425,7 +425,12 @@ import SwiftUI
     /// The lyrics face scrolled by some lines (down the song is positive); it eases back to the line being sung 5 s later.
     func scroll(by lines: Double) {
         guard !cues.isEmpty else { return }
-        browse = min(Double(cues.count - 1), max(0, (browse ?? Double(max(0, index(at: playhead(Date()))))) + lines))
+        let from = browse ?? Double(max(0, index(at: playhead(Date()))))
+        browse = min(Double(cues.count - 1), max(0, from + lines))
+        // A click on the trackpad for each line that rolls past the middle, like a reel's ratchet.
+        if let to = browse, to.rounded() != from.rounded() {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }
         browseEnd?.cancel()
         browseEnd = Task {
             try? await Task.sleep(for: .seconds(5))
@@ -472,6 +477,9 @@ struct LyricLines: View {
     /// On screen (the notch open and showing): only then does the line being sung redraw as it goes.
     var live = true
     @State private var index: Int?
+    /// Extra lines of turn, wound up as the face opens and let go so the reel spins down onto the line being sung.
+    @State private var spin: Double = 0
+    @State private var height: CGFloat = 200
 
     /// The line being sung, and the rest.
     static let size: CGFloat = 21
@@ -480,7 +488,7 @@ struct LyricLines: View {
     var body: some View {
         let cues = lyrics.cues
         let i = min(index ?? lyrics.index(at: lyrics.playhead(Date())), cues.count - 1)
-        let focus = lyrics.browse ?? Double(max(0, i))
+        let focus = (lyrics.browse ?? Double(max(0, i))) + spin
         LyricStack(focus: focus) {
             ForEach(cues.indices, id: \.self) { k in line(cues[k], k: k, i: i, focus: focus) }
         }
@@ -491,13 +499,20 @@ struct LyricLines: View {
                            startPoint: .top, endPoint: .bottom)
         }
         .clipped()
+        // Blurred while the reel spins in, sharpening as it slows.
+        .blur(radius: min(2.5, spin * 0.2))
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .task(id: lyricClock(lyrics)) {
             await lyrics.track { i in
-                if index == nil { index = i } else if i != index { withAnimation(lyricMove) { index = i } }
+                if index == nil { index = i } else if i != index { withAnimation(reelStop) { index = i } }
             }
         }
-        // A fresh position from the player as the face opens, so the first line starts on time.
-        .onAppear { NowPlaying.shared.refresh() }
+        // A fresh position from the player as the face opens, so the first line starts on time; the reel spins in.
+        .onAppear {
+            NowPlaying.shared.refresh()
+            spin = 14
+            DispatchQueue.main.async { withAnimation(reelSpin) { spin = 0 } }
+        }
         .onDisappear { lyrics.stopBrowsing() }
     }
 
@@ -510,18 +525,32 @@ struct LyricLines: View {
         .modifier(LyricFont(size: now ? Self.size : Self.small))
         .frame(maxWidth: .infinity, alignment: .leading)
         .opacity(now ? 1 : max(0.2, 0.6 - 0.18 * far))
+        // Turned with the drum: lines flatten as they go over the top and under the bottom.
+        .scaleEffect(x: 1, y: cos(LyricStack.turn(Double(k) - focus, height: height)))
         .contentShape(Rectangle())
         .onTapGesture {
             // Plays from this line; the column follows at once.
             NowPlaying.shared.seek(to: cue.time)
             lyrics.stopBrowsing()
-            withAnimation(lyricMove) { index = k }
+            withAnimation(reelStop) { index = k }
         }
     }
 }
 
-/// The lines top to bottom, moved so the line at `focus` (fractional while scrolling) sits in the middle.
+/// A new line: the reel clicks over and settles with a small bounce, like a slot reel stopping.
+private let reelStop = Animation.spring(response: 0.42, dampingFraction: 0.62)
+/// Opening the face: a long spin that slows onto the line being sung, overshooting a touch.
+private let reelSpin = Animation.spring(response: 1.1, dampingFraction: 0.7)
+
+/// The lines on a drum, like a slot machine reel: the line at `focus` (fractional while scrolling) faces you in the
+/// middle; the others wrap round it, bunching up as they go over the top and under the bottom.
 private struct LyricStack: Layout {
+    /// About one line's travel, for the lean of each line (the drum's own positions use the real heights).
+    static let pitch = 27.0
+    static func radius(_ height: CGFloat) -> Double { max(80, Double(height)) }
+    /// How far round the drum a line is, `lines` from the front: a quarter turn at most (edge on, out of sight).
+    static func turn(_ lines: Double, height: CGFloat) -> Double { min(.pi / 2, max(-.pi / 2, lines * pitch / radius(height))) }
+
     var focus: Double
     var spacing: CGFloat = 8
     var animatableData: Double {
@@ -540,8 +569,10 @@ private struct LyricStack: Layout {
         func middle(_ k: Int) -> CGFloat { tops[k] + heights[k] / 2 }
         let k = min(heights.count - 1, max(0, Int(focus.rounded(.down)))), f = CGFloat(focus) - CGFloat(k)
         let at = k + 1 < heights.count ? middle(k) + (middle(k + 1) - middle(k)) * f : middle(k)
+        let r = Self.radius(bounds.height)
         for (n, v) in subviews.enumerated() {
-            v.place(at: CGPoint(x: bounds.minX, y: bounds.midY - at + tops[n]), proposal: width)
+            let angle = min(.pi / 2, max(-.pi / 2, Double(middle(n) - at) / r))
+            v.place(at: CGPoint(x: bounds.minX, y: bounds.midY + CGFloat(r * sin(angle))), anchor: .leading, proposal: width)
         }
     }
 }
