@@ -718,8 +718,9 @@ final class IslandPanel: NSPanel {
         // Above the menu bar (24), so clicks in the band at menu-bar height land here. No `isFloatingPanel`: setting
         // it puts the level back to floating (3), under the menu bar, which then takes those clicks.
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
-        // On every Space but not stationary, so it slides along with the desktop when you swipe between Spaces.
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        // On one Space at a time, so it slides away with the desktop when you swipe; on arrival it's brought over to the
+        // new Space and fades in (on every Space at once, it stood still while the desktop moved under it).
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.isReleasedWhenClosed = false
@@ -744,6 +745,7 @@ final class IslandPanel: NSPanel {
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    if name == NSWorkspace.activeSpaceDidChangeNotification { self?.followSpace() }
                     self?.checkFullScreen()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { MainActor.assumeIsolated { self?.checkFullScreen() } }
                 }
@@ -816,6 +818,14 @@ final class IslandPanel: NSPanel {
         panel.setFrame(g.panelFrame, display: true)
     }
 
+    /// A new Space came in: the notch, left behind on the old one, comes over and fades in.
+    private func followSpace() {
+        guard model.stage != .hidden, !panel.isOnActiveSpace else { return }
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
+    }
+
     private func stageChanged(_ stage: IslandStage) {
         if stage == .hidden {
             tracker?.invalidate()
@@ -824,7 +834,7 @@ final class IslandPanel: NSPanel {
             panel.orderOut(nil)
             moveMonitors.forEach(NSEvent.removeMonitor)
             moveMonitors = []
-        } else if !panel.isVisible {
+        } else if !panel.isVisible || !panel.isOnActiveSpace {
             layout()
             panel.orderFrontRegardless()
             setTracking(fast: true)

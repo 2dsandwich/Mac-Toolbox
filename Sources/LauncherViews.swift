@@ -268,13 +268,6 @@ private struct SearchBar: View {
                     }
                 }
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["panel"] = $0 }
-            } else if model.scope == .assistant, let answer = Assistant.shared.lastAnswer {
-                BarControls {
-                    PillButton(title: nil, symbol: "doc.on.doc", help: "Copy the answer (⌘C)") {
-                        (NSApp.delegate as? AppDelegate)?.launcher.copyAnswer(answer)
-                    }
-                }
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["panel"] = $0 }
             } else if let timer = timerAnswer {
                 BarControls {
                     PillButton(title: "Start", symbol: "play.fill", tint: .orange, help: "Start the timer (↩)") { onAnswerAction(timer.action) }

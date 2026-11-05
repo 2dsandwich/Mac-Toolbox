@@ -137,7 +137,8 @@ enum ToolCard {
     }
 }
 
-let cardFill = Color.primary.opacity(0.045)
+/// Cards sit straight on the dark panel (no lighter layer); spacing and the selection fill tell them apart.
+let cardFill = Color.clear
 /// The same inset on every side of a card; inner corners are the card's radius minus it (concentric).
 /// The same inset as everything else (PanelLayout.inset).
 let cardPadding: CGFloat = 16
@@ -175,7 +176,9 @@ struct AnswerCardView: View {
         .padding(cardPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .environment(\.cardInner, max(6, radius - cardPadding))
-        .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(selected ? selectedFill : hovered ? hoverFill : cardFill))
+        // No fill behind a card: selection is a hairline round it, so a lone answer doesn't sit on a grey slab.
+        .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .strokeBorder(Color.white.opacity(selected ? 0.22 : hovered ? 0.1 : 0), lineWidth: 1))
         .contentShape(Rectangle())
     }
 
@@ -371,7 +374,6 @@ private struct WeatherCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: inner, style: .continuous).fill(Color.primary.opacity(0.06)))
     }
 
     private func panel<Content: View>(_ symbol: String, _ title: String, @ViewBuilder _ content: () -> Content) -> some View {
@@ -381,7 +383,6 @@ private struct WeatherCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: inner, style: .continuous).fill(Color.primary.opacity(0.06)))
     }
 
     /// One day: name, sky (and chance of rain), low, its range on the week's scale, high. Today marks where it is now.
@@ -913,6 +914,5 @@ private struct EventsCard: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 40)
-        .background(RoundedRectangle(cornerRadius: inner, style: .continuous).fill(Color.primary.opacity(0.06)))
     }
 }
