@@ -243,7 +243,7 @@ struct MenuView: View {
             Toggle("", isOn: value).toggleStyle(.switch).controlSize(.mini).labelsHidden()
         }
         .padding(.horizontal, 6)
-        .frame(height: 26)
+        .frame(height: 28)
     }
 }
 
@@ -307,7 +307,7 @@ private struct RecentRow: View {
             copied = true
         } label: {
             HStack(spacing: 8) {
-                icon.frame(width: 16, height: 16)
+                icon.frame(width: 18, height: 18)
                 Text(clip.title).font(.system(size: 12.5)).lineLimit(1)
                 Spacer(minLength: 6)
                 Text(copied ? "Copied" : hovering ? "Copy" : shortAge(clip.date))
@@ -342,7 +342,7 @@ private struct IconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol).font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .frame(width: 32, height: 32)
                 .background(Circle().fill(Color.white.opacity(hovering ? 0.18 : 0.09)))
                 .contentShape(Circle())
         }
@@ -364,7 +364,7 @@ private struct FooterButton: View {
                 Text(title).font(.system(size: 12.5))
                 Text(key).font(.system(size: 11)).foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .frame(height: 26)
             .background(RoundedRectangle(cornerRadius: MenuLayout.inner, style: .continuous).fill(Color.white.opacity(hovering ? 0.1 : 0)))
             .contentShape(Rectangle())

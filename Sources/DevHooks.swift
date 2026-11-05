@@ -348,6 +348,27 @@ extension AppDelegate {
             }
             return true
         }
+        if args.contains("--idle-track-test") {
+            // Hover the bare notch with a pretend pointer, then move away: it should open, then close all the way.
+            // The real panel never comes on screen (no onStage).
+            island.onStage = nil
+            island.haptic = {}
+            let c = islandController!
+            func run(_ secs: Double, _ p: NSPoint) {
+                c.mouseOverride = p
+                let end = Date().addingTimeInterval(secs)
+                while Date() < end { c.trackOnce(); RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            }
+            let r = c.notchRect
+            print("activities:", island.activities, "stage:", island.stage)
+            run(1.0, NSPoint(x: r.midX, y: r.maxY - 10))
+            print("after hovering:", island.stage, "idleOpen:", island.idleOpen)
+            run(0.5, NSPoint(x: r.midX, y: r.minY - 60)) // just under the open notch
+            print("0.5 s after leaving:", island.stage)
+            run(Store.shared.settings.notchCollapseDelay + 1.5, NSPoint(x: r.midX, y: r.minY - 400))
+            print("well after leaving:", island.stage, "idleOpen:", island.idleOpen)
+            exit(0)
+        }
         if let i = args.firstIndex(of: "--island-snapshot"), i + 1 < args.count {
             // Renders the notch off screen with demo activities: collapsed and expanded side by side. The real notch
             // panel stays hidden (nothing shows on screen), and the demo song stands in for whatever is really playing.
@@ -468,6 +489,28 @@ extension AppDelegate {
                         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
                     }
                     print("clicked", args[k + 1], "at", p, "→ phase", island.dictation.phase, "handsFree", island.dictation.handsFree, "camera", island.camera)
+                }
+                w.orderOut(nil)
+            }
+            if args.contains("--face-frames") {
+                // The player switching to its lyrics face and back, caught part way.
+                island.stage = .expanded
+                island.lyricsOverride = false
+                let size = island.geometry.panelSize
+                let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
+                let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+                w.contentView = hv
+                w.orderFrontRegardless()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+                for on in [true, false] {
+                    withAnimation(islandSpring) { island.lyricsOverride = on }
+                    var last = 0.0
+                    for ms in [50.0, 110, 180, 300] {
+                        RunLoop.main.run(until: Date().addingTimeInterval((ms - last) / 1000))
+                        last = ms
+                        if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) { hv.cacheDisplay(in: hv.bounds, to: rep); images.append(rep) }
+                    }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
                 }
                 w.orderOut(nil)
             }

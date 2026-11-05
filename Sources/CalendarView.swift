@@ -270,7 +270,7 @@ struct CalendarPanel: View {
     @State private var events = CalendarEvents.shared
 
     static let header: CGFloat = 32
-    static let headerGap: CGFloat = 6
+    static let headerGap: CGFloat = PanelLayout.gap
     static let weekdayRow: CGFloat = 17
     static let cell: CGFloat = 80
     static var grid: CGFloat { weekdayRow + cell * 6 }
@@ -803,9 +803,9 @@ private struct DayDetail: View {
     let board: CalendarBoard
 
     var body: some View {
-        let pad: CGFloat = 12
+        let pad = PanelLayout.inset
         VStack(alignment: .leading, spacing: 2) {
-            Text(longDate(date)).font(.system(size: 15, weight: .semibold)).padding(.horizontal, 4).padding(.bottom, 6)
+            Text(longDate(date)).font(.system(size: 15, weight: .semibold)).padding(.horizontal, 8).padding(.bottom, 6) // the rows' colour bars start here
             ForEach(items, id: \.key) { e in
                 Button { board.open(.event(e), from: board.from) } label: {
                     HStack(spacing: 10) {

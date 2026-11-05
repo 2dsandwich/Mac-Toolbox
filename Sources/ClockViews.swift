@@ -118,7 +118,7 @@ private struct Choice: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(on ? Color.white : Color.primary)
                 .padding(.horizontal, round ? 0 : 12)
-                .frame(width: round ? 32 : nil, height: 30)
+                .frame(width: round ? 32 : nil, height: 32)
                 .background(Capsule().fill(on ? orange : Color.primary.opacity(hover ? 0.16 : 0.08)))
                 .contentShape(Capsule())
         }

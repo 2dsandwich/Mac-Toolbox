@@ -136,7 +136,7 @@ struct TranslateView: View {
                     }
                 } label: {
                     Image(systemName: "arrow.left.arrow.right").font(.system(size: 13, weight: .semibold))
-                        .frame(width: Self.barHeight, height: Self.barHeight)
+                        .frame(width: 32, height: 32) // the same size as every other icon button
                         .background(Circle().fill(Color.primary.opacity(0.1)))
                         .contentShape(Circle())
                 }

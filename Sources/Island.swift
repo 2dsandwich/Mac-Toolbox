@@ -620,7 +620,12 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
+    /// Closing all the way is under way: asking again doesn't restart it (the pointer check asks 20 times a second,
+    /// and each restart pushed the close back, so an idle notch never went away).
+    private var hiding = false
+
     func show() {
+        hiding = false
         generation += 1
         let current = generation
         switch stage {
@@ -649,9 +654,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
 
     func hide() {
+        guard stage != .hidden, !hiding else { return }
+        hiding = true
         generation += 1
         let current = generation
-        guard stage != .hidden else { return }
         withAnimation(.easeIn(duration: 0.14)) {
             contentVisible = false
             hovering = false
@@ -662,12 +668,14 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         }
         after(0.7) {
             guard current == self.generation else { return }
+            self.hiding = false
             self.stage = .hidden
         }
     }
 
     func expand(haptic: Bool = true) {
         guard stage == .compact || stage == .seed else { return }
+        if hiding { hiding = false; generation += 1 } // opened again while closing: the close is called off
         if haptic { self.haptic() }
         lastInteraction = Date()
         withAnimation(islandSpring) {
@@ -734,6 +742,10 @@ final class IslandPanel: NSPanel {
     let model: IslandModel
     private let panel: IslandPanel
     private var tracker: Timer?
+    /// Tests only: a pointer position to use instead of the real one.
+    var mouseOverride: NSPoint?
+    func trackOnce() { track() }
+    var notchRect: NSRect { shapeRect() }
     private var clickMonitor: Any?
     private var moveMonitors: [Any] = []
     private var hoverSince: Date?
@@ -927,7 +939,7 @@ final class IslandPanel: NSPanel {
 
     /// Clicks only land on the island itself; hovering it for a moment expands it.
     private func track() {
-        let mouse = NSEvent.mouseLocation
+        let mouse = mouseOverride ?? NSEvent.mouseLocation
         if model.stage != .hidden { followSpace() }
         if model.stage == .hidden {
             // Nothing running: hovering the notch itself for a moment opens it.
@@ -1136,7 +1148,7 @@ struct IslandView: View {
         if g.hasNotch {
             switch model.stage {
             // The bottom corners match the ears where it meets the screen edge, and don't change when it opens.
-            case .expanded: return IslandShape(ear: 12, top: 0, bottom: 12)
+            case .expanded: return IslandShape(ear: 12, top: 0, bottom: IslandView.cardRadius + IslandModel.expandedInset) // concentric with the cards
             case .compact: return IslandShape(ear: 12, top: 0, bottom: 12)
             default: return IslandShape(ear: 6, top: 0, bottom: 10)
             }
@@ -1378,12 +1390,11 @@ struct IslandView: View {
                 HStack(alignment: .center, spacing: IslandGeometry.gap) {
                     if let first = slots.first {
                         detail(first)
-                            .padding(.horizontal, first == .media ? 0 : Self.rowPad)
                             .frame(width: model.mainWidth)
                             .offset(x: first == .media ? model.pull.width : 0)
                             .contextMenu { promoteMenu(first) }
                     } else {
-                        idleClock.padding(.horizontal, Self.rowPad).frame(width: model.mainWidth)
+                        idleClock.frame(width: model.mainWidth)
                     }
                     if !model.tiles.isEmpty { tileGrid }
                 }
@@ -1766,7 +1777,7 @@ struct IslandView: View {
     private var alarmDetail: some View {
         let a = Alarms.shared
         return HStack(spacing: 12) {
-            icon(.alarm, size: 28)
+            icon(.alarm, size: 24)
             VStack(alignment: .leading, spacing: 1) {
                 Text(a.ringing?.label.isEmpty == false ? a.ringing!.label : "Alarm").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
                 Text(a.ringing?.time ?? "").font(.system(size: 26, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
@@ -1818,57 +1829,63 @@ struct IslandView: View {
     /// the time, and the controls centred under them (the lyrics button at the end of the lane). Its lyrics face: the
     /// art shrinks into a header with the song and the controls, and the lines being sung fill the space below.
     private var mediaDetail: some View {
+        // One set of views in both faces: switching only moves and resizes them (the art shrinks into the header, the
+        // song slides beside it, the buttons rise to the header's end), while the time and visualizer fade out and the
+        // lines fade in. Swapping two separate layouts made the song show twice and the art jump mid-way.
         let m = NowPlaying.shared
-        let lyrics = model.lyricsFace
-        return Group {
-            if lyrics {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 10) {
-                        art(m, size: Self.rowButton)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Marquee(text: m.songTitle, font: .system(size: 13, weight: .semibold), color: .white)
-                            Marquee(text: m.artistLine, font: .system(size: 11), color: .white.opacity(0.6))
-                        }
-                        playerControls(m, spacing: 8)
-                    }
-                    Spacer(minLength: 0)
-                    LyricLines(lyrics: Lyrics.shared, size: 15)
-                }
-                .transition(.opacity)
-            } else {
-                HStack(spacing: 14) {
-                    art(m, size: Self.artBig)
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack(alignment: .top, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
-                                Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
-                            }
-                            EqualizerBars(playing: m.playing, color: ArtTint.color(m.artwork)).padding(.top, 2)
-                        }
-                        Spacer(minLength: 0)
-                        if m.duration > 0 {
-                            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                                let at = min(m.livePosition, m.duration)
-                                HStack(spacing: 8) {
-                                    Text(Self.songClock(at)).frame(width: 34, alignment: .leading)
-                                    bar(at / max(1, m.duration), .white.opacity(0.85))
-                                    Text("-" + Self.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
-                                }
-                                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.5))
-                            }
-                            .frame(height: 14)
-                            Spacer(minLength: 0)
-                        }
-                        playerControls(m, spacing: 14)
-                    }
-                }
-                .transition(.opacity)
+        let on = model.lyricsFace
+        let w = model.mainWidth, b = Self.rowButton, gap: CGFloat = 14, big = Self.artBig
+        let artSize = on ? b : big
+        let textX = artSize + gap
+        let trioWidth = 3 * b + 2 * gap
+        let trioX = on ? w - b - gap - trioWidth : textX + (w - textX - trioWidth) / 2
+        let rowY = on ? 0 : big - b
+        let titleWidth = max(0, on ? trioX - gap - textX : w - textX - 24)
+        return ZStack(alignment: .topLeading) {
+            // Under everything, so lines still fading out never draw over the art growing back.
+            if on {
+                LyricLines(lyrics: Lyrics.shared, size: 15)
+                    .frame(width: w, height: big - b - 8, alignment: .bottomLeading)
+                    .offset(y: b + 8)
+                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 10)),
+                                            removal: .opacity.animation(.easeOut(duration: 0.12))))
             }
+            art(m, size: artSize)
+            VStack(alignment: .leading, spacing: 1) {
+                Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
+                Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
+            }
+            .frame(width: titleWidth, alignment: .leading)
+            .offset(x: textX)
+            EqualizerBars(playing: m.playing, color: ArtTint.color(m.artwork))
+                .frame(width: w - textX, alignment: .trailing)
+                .offset(x: textX, y: 2)
+                .opacity(on ? 0 : 1)
+            if m.duration > 0 {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    let at = min(m.livePosition, m.duration)
+                    HStack(spacing: 8) {
+                        Text(Self.songClock(at)).frame(width: 34, alignment: .leading)
+                        bar(at / max(1, m.duration), .white.opacity(0.85))
+                        Text("-" + Self.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
+                    }
+                    .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+                }
+                .frame(width: w - textX, height: 14)
+                .offset(x: textX, y: (35 + big - b) / 2 - 7) // centred between the song and the buttons
+                .opacity(on ? 0 : 1)
+            }
+            HStack(spacing: gap) {
+                RoundButton(symbol: "backward.fill", tint: nil, size: b) { m.previous() }
+                RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: b) { m.playPause() }
+                RoundButton(symbol: "forward.fill", tint: nil, size: b) { m.next() }
+            }
+            .offset(x: trioX, y: rowY)
+            if !Lyrics.shared.cues.isEmpty { lyricsButton.offset(x: w - b, y: rowY) }
         }
-        .frame(height: Self.artBig)
-        .animation(islandSpring, value: lyrics)
+        .frame(width: w, height: big, alignment: .topLeading)
+        .animation(islandSpring, value: on)
     }
 
     private func art(_ m: NowPlaying, size: CGFloat) -> some View {
@@ -1879,27 +1896,12 @@ struct IslandView: View {
             .help("Open \(m.appName)")
     }
 
-    /// Previous, play and next (centred under the song, or in the lyrics face's header), and when the song has timed
-    /// lyrics, the lyrics button on the lane every other button ends on.
-    @ViewBuilder private func playerControls(_ m: NowPlaying, spacing: CGFloat) -> some View {
-        let b = Self.rowButton, on = model.lyricsFace
-        let trio = HStack(spacing: spacing) {
-            RoundButton(symbol: "backward.fill", tint: nil, size: b) { m.previous() }
-            RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: b) { m.playPause() }
-            RoundButton(symbol: "forward.fill", tint: nil, size: b) { m.next() }
-        }
-        if on {
-            HStack(spacing: spacing) { trio; lyricsButton }
-        } else {
-            trio.frame(maxWidth: .infinity)
-                .overlay(alignment: .trailing) { if !Lyrics.shared.cues.isEmpty { lyricsButton } }
-        }
-    }
-
     private var lyricsButton: some View {
         let on = model.lyricsFace
         return RoundButton(symbol: on ? "quote.bubble.fill" : "quote.bubble", tint: on ? .white : nil, size: Self.rowButton) {
-            if model.lyricsOverride != nil { model.lyricsOverride?.toggle() } else { Store.shared.settings.notchLyricsOpen.toggle() }
+            withAnimation(islandSpring) {
+                if model.lyricsOverride != nil { model.lyricsOverride?.toggle() } else { Store.shared.settings.notchLyricsOpen.toggle() }
+            }
         }
         .help(on ? "Hide Lyrics" : "Show Lyrics")
     }
@@ -1933,7 +1935,7 @@ struct IslandView: View {
     }
 
     private var toastDetail: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             if let t = model.toast {
                 icon(.toast, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
@@ -2225,7 +2227,7 @@ private struct MiniWave: View {
         HStack(spacing: 2) {
             ForEach(0..<5, id: \.self) { i in
                 let l = levels.isEmpty ? 0 : levels[max(0, levels.count - 1 - i * 2)]
-                Capsule().fill(.white).frame(width: 2.5, height: 3 + CGFloat(l) * 12)
+                Capsule().fill(.white).frame(width: 2, height: 3 + CGFloat(l) * 12) // five bars and their gaps fill the 18 pt icon slot
             }
         }
         .frame(height: 16)

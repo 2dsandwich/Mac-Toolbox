@@ -3,7 +3,7 @@ import SwiftUI
 
 private let listInset = Metrics.listInset
 private let rowGap = Metrics.rowGap
-private let textLeft: CGFloat = 26
+let textLeft: CGFloat = 26
 /// Where a borderless NSTextField starts drawing its text, measured from snapshots.
 private let fieldTextInset: CGFloat = 0
 

@@ -298,7 +298,7 @@ struct MeetingView: View {
                             VStack(alignment: .leading, spacing: 12) { transcript }
                         }
                     }
-                    .padding(.leading, 22)
+                    .padding(.leading, textLeft) // the bar's text starts here
                     .padding(.trailing, Metrics.listInset) // the bar's buttons end here too
                     .padding(.vertical, 8)
                 }
@@ -334,7 +334,7 @@ struct MeetingView: View {
                     if !meeting.volatileOthers.isEmpty { LineRow(me: false, text: meeting.volatileOthers, time: nil, live: true) }
                     Color.clear.frame(height: 1).id("end")
                 }
-                .padding(.leading, 22)
+                .padding(.leading, textLeft)
                 .padding(.trailing, Metrics.listInset)
                 .padding(.vertical, 8)
             }
