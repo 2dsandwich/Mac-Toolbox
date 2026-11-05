@@ -12,7 +12,7 @@ import SwiftUI
     private(set) var meeting: MeetingRecorder!
     private(set) var pomodoro: Pomodoro!
     var island: IslandModel!
-    private var islandController: IslandController!
+    private(set) var islandController: IslandController!
     private let fnKeys = FnKeyMonitor()
     private var copilot: MeetingCopilot!
     private var copilotWindow: CopilotWindow!

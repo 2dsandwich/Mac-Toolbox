@@ -1704,6 +1704,7 @@ private struct NotchPane: View {
             store.settings.eventCalendarsOff = d.eventCalendarsOff
             store.settings.mediaInNotch = d.mediaInNotch
             store.settings.notchLyrics = d.notchLyrics
+            store.settings.notchLyricsOpen = d.notchLyricsOpen
             store.settings.notchLyricLine = d.notchLyricLine
             store.settings.notchInCaptures = d.notchInCaptures
             store.settings.notchHideInFullScreen = d.notchHideInFullScreen

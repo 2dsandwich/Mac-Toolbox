@@ -5,8 +5,8 @@ import SwiftUI
 
 // Synced lyrics for the song in Music or Spotify, from LRCLIB (lrclib.net): looked up when the song changes, for
 // display only, and kept on disk so each song is asked for once. Nothing is bundled, and nothing is fetched while
-// Settings › Notch › Lyrics is off. Shown under the song in the open notch, and (if you like) as one line under the
-// closed notch.
+// Settings › Notch › Lyrics is off. Shown by the open notch's player when you turn its lyrics on, and (if you like) as
+// one line under the closed notch.
 
 @MainActor @Observable final class Lyrics {
     static let shared = Lyrics()
@@ -53,8 +53,6 @@ import SwiftUI
     private static let agent = "MONEY! (https://github.com/2dsandwich/Mac-Toolbox)"
 
     var closedLine: Bool { !cues.isEmpty && (demo || Store.shared.settings.notchLyricLine) }
-    /// Extra height the lyrics take in the open notch's music player.
-    var openHeight: CGFloat { cues.isEmpty ? 0 : LyricLines.height + IslandView.lyricGap }
 
     func start() { follow() }
 
@@ -262,23 +260,23 @@ private struct LyricClock: Hashable {
 private let lyricMove = Animation.spring(response: 0.45, dampingFraction: 0.9)
 
 /// A lyric line, or the quiet note for a break.
-@ViewBuilder private func lyricText(_ cue: Lyrics.Cue) -> some View {
+@ViewBuilder private func lyricText(_ cue: Lyrics.Cue, size: CGFloat = 12.5) -> some View {
     if let text = cue.text {
-        Text(text).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
+        Text(text).font(.system(size: size, weight: size > 13 ? .semibold : .medium)).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
     } else {
-        Image(systemName: "music.note").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+        Image(systemName: "music.note").font(.system(size: size - 1.5, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
     }
 }
 
-/// Open notch, under the song: the line being sung, the next one dimmer; they move up as the song goes on.
+/// The open notch's player, lyrics face: the line being sung, the next one dimmer; they move up as the song goes on.
 struct LyricLines: View {
     let lyrics: Lyrics
-    /// Centred under the player (the open notch), instead of starting at the left.
+    /// Centred, instead of starting at the left.
     var centered = false
+    var size: CGFloat = 12.5
     @State private var index: Int?
 
-    static let lineHeight: CGFloat = 18
-    static let height: CGFloat = lineHeight * 2
+    private var lineHeight: CGFloat { (size * 1.45).rounded() }
 
     var body: some View {
         let cues = lyrics.cues
@@ -286,15 +284,15 @@ struct LyricLines: View {
         ZStack(alignment: centered ? .top : .topLeading) {
             if !cues.isEmpty {
                 ForEach(max(0, i - 1)...min(cues.count - 1, max(0, i + 2)), id: \.self) { k in
-                    lyricText(cues[k])
+                    lyricText(cues[k], size: size)
                         .frame(maxWidth: centered ? .infinity : nil, alignment: .center)
-                        .frame(height: Self.lineHeight)
+                        .frame(height: lineHeight)
                         .opacity(k == i ? 1 : k == i + 1 ? 0.45 : 0)
-                        .offset(y: CGFloat(k - i) * Self.lineHeight)
+                        .offset(y: CGFloat(k - i) * lineHeight)
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: Self.height, maxHeight: Self.height, alignment: centered ? .top : .topLeading)
+        .frame(maxWidth: .infinity, minHeight: lineHeight * 2, maxHeight: lineHeight * 2, alignment: centered ? .top : .topLeading)
         .clipped()
         .task(id: lyricClock(lyrics)) {
             await lyrics.track { i in
