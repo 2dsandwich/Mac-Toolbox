@@ -17,10 +17,18 @@ struct IslandGeometry: Equatable {
     var compactSize: CGSize
     var expandedSize: CGSize
 
-    /// Room for up to four activities side by side (compact) or stacked (expanded).
-    var panelSize: CGSize { CGSize(width: max(expandedSize.width, compactSize.width + 460) + 48, height: expandedSize.height + CGFloat(IslandGeometry.maxRows) * IslandGeometry.rowHeight + topInset + 24) }
+    /// Room for the closed notch at its widest, and the open one with every column of tiles (or the camera).
+    var panelSize: CGSize {
+        CGSize(width: max(expandedSize.width + CGFloat(Self.maxColumns) * (Self.tileWidth + Self.gap), compactSize.width + 460) + 48,
+               height: expandedSize.height + CGFloat(Self.maxRows) * Self.rowHeight + topInset + 24)
+    }
     static let rowHeight: CGFloat = 52
     static let maxRows = 5
+    /// The open notch: everything after the first thing is a tile beside it, two to a column, up to three columns.
+    static let tileWidth: CGFloat = 156
+    static let tileHeight: CGFloat = rowHeight - 10
+    static let gap: CGFloat = 8
+    static let maxColumns = 3
     var panelFrame: NSRect {
         NSRect(x: centerX - panelSize.width / 2, y: screenFrame.maxY - panelSize.height, width: panelSize.width, height: panelSize.height)
     }
@@ -51,7 +59,22 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 @MainActor @Observable final class IslandModel {
     enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media, event }
 
-    var stage = IslandStage.hidden { didSet { if stage != oldValue { onStage?(stage) } } }
+    var stage = IslandStage.hidden {
+        didSet {
+            guard stage != oldValue else { return }
+            // The camera and a tile brought to the front last only while it's open.
+            if stage != .expanded { camera = false; focus = nil }
+            onStage?(stage)
+        }
+    }
+    /// The open notch shows the front camera as a mirror (the camera runs only while it shows).
+    var camera = false { didSet { if !camera { CameraMirror.shared.stop() } } }
+    /// A tile tapped in the open notch: it takes the main spot until the notch closes.
+    var focus: Slot?
+    /// The player shows the song's lyrics in place of its timeline (Settings keeps the choice).
+    var lyricsFace: Bool { !Lyrics.shared.cues.isEmpty && (lyricsOverride ?? Store.shared.settings.notchLyricsOpen) }
+    /// `--island-snapshot --lyrics-face`: the lyrics face without touching the saved settings.
+    var lyricsOverride: Bool?
     var contentVisible = false
     var hovering = false
     var geometry = IslandGeometry.current()
@@ -228,12 +251,38 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         // buttons) come first, above the music and the rest.
         let listening = [.starting, .listening].contains(dictation.phase)
         if activities.contains(.dictation), out.isEmpty || listening { out.insert(.dictation, at: 0) }
+        // A tapped tile goes first (dictation that's listening keeps the lead).
+        if let focus, out.first != .dictation || !listening, let k = out.firstIndex(of: focus) { out.insert(out.remove(at: k), at: 0) }
         return Array(out.prefix(IslandGeometry.maxRows + 1))
     }
 
+    /// Open: the tiles beside the first thing.
+    var tiles: [Slot] { camera ? [] : Array(slots.dropFirst()) }
+    /// One row for a lone tile, else two (as tall as the player), filling columns left to right.
+    var tileRows: Int { tiles.count > 1 ? 2 : 1 }
+    var tileColumns: Int { min(IslandGeometry.maxColumns, (tiles.count + tileRows - 1) / tileRows) }
+    /// Width the columns of tiles add (counted even while the camera shows, so the notch doesn't jump sideways).
+    var tilesWidth: CGFloat {
+        let n = slots.count - 1, rows = n > 1 ? 2 : 1, cols = min(IslandGeometry.maxColumns, max(0, n + rows - 1) / rows)
+        return CGFloat(cols) * (IslandGeometry.tileWidth + IslandGeometry.gap)
+    }
+    var tilesHeight: CGFloat { tiles.isEmpty ? 0 : CGFloat(tileRows) * IslandGeometry.tileHeight + CGFloat(tileRows - 1) * IslandGeometry.gap }
+
+    /// Space between the open notch's content and the shape's sides (past the ears).
+    var sideInset: CGFloat { Self.expandedInset + (geometry.hasNotch ? 12 : 0) }
+    /// The first thing's width in the open notch.
+    var mainWidth: CGFloat { geometry.expandedSize.width - 2 * sideInset }
+    /// The band at the top of the open notch (beside the notch, at menu-bar height), and where the content starts.
+    var bandHeight: CGFloat { geometry.hasNotch ? geometry.notchHeight : 32 }
+    var bandTop: CGFloat { geometry.hasNotch ? 0 : 8 }
+    var contentTop: CGFloat { bandTop + bandHeight + 6 }
+    /// The mirror: the open notch's full width, as tall as the camera's shape at the first thing's width (so a notch
+    /// widened by tiles shows a wider crop, not a taller notch).
+    var cameraHeight: CGFloat { (mainWidth * 9 / 16).rounded() }
+
     /// The live words in the open notch: as tall as they need, up to five lines (then they scroll).
     var dictationTextHeight: CGFloat {
-        let w = geometry.expandedSize.width - 2 * (Self.expandedInset + (geometry.hasNotch ? 12 : 0)) - (dictationControls ? Self.dictationControlsWidth : 0)
+        let w = mainWidth - (dictationControls ? Self.dictationControlsWidth : 0)
         let h = (dictation.preview as NSString).boundingRect(with: NSSize(width: w, height: .greatestFiniteMagnitude),
                                                             options: [.usesLineFragmentOrigin, .usesFontLeading],
                                                             attributes: [.font: NSFont.systemFont(ofSize: 14)]).height
@@ -254,7 +303,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Height of the first item's detail in the expanded notch.
     var detailHeight: CGFloat {
         switch slots.first {
-        case .media: IslandView.artBig + Lyrics.shared.openHeight
+        case .media: IslandView.artBig
         case .timer: 56
         case .stopwatch: 56
         case .pomodoro: 80
@@ -380,10 +429,9 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             let L = compactLayout
             return CGSize(width: geometry.seedSize.width + L.side * 2, height: geometry.compactSize.height)
         case .expanded:
-            // As tall as what it shows: the first item's controls, then a row for each other one.
-            let top: CGFloat = geometry.hasNotch ? geometry.notchHeight + 6 : 16 + (dictationInStrip ? 28 : 0)
-            let rows = CGFloat(max(0, slots.count - 1)) * IslandGeometry.rowHeight
-            return CGSize(width: geometry.expandedSize.width, height: top + detailHeight + rows + Self.expandedInset)
+            // The band, then the first thing with the tiles beside it (wider before taller), or the mirror.
+            let content = camera ? cameraHeight : max(detailHeight, tilesHeight)
+            return CGSize(width: geometry.expandedSize.width + tilesWidth, height: contentTop + content + Self.expandedInset)
         }
     }
 
@@ -410,6 +458,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         if list != activities {
             withAnimation(list.count < activities.count ? islandSettle : islandSpring) { activities = list }
         }
+        // Dictation takes the band the camera button sits in: the mirror closes.
+        if camera, dictationInStrip { withAnimation(islandSettle) { camera = false } }
         let next = list.first
         guard next != nil else { return hide() }
         show()
@@ -455,7 +505,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         if w.axis == nil, hypot(w.x, w.y) > 6 {
             w.axis = abs(w.x) > abs(w.y) ? .horizontal : .vertical
             w.ours = w.axis == .vertical ? (stage == .compact || (stage == .expanded && slots.first != .dictation))
-                : stage == .expanded && slots.first == .media && overPlayer
+                : stage == .expanded && slots.first == .media && !camera && overPlayer
         }
         defer { swipe = w }
         guard w.ours else { return false }
@@ -665,10 +715,11 @@ final class IslandPanel: NSPanel {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
+        // Above the menu bar (24), so clicks in the band at menu-bar height land here. No `isFloatingPanel`: setting
+        // it puts the level back to floating (3), under the menu bar, which then takes those clicks.
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         // On every Space but not stationary, so it slides along with the desktop when you swipe between Spaces.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.isReleasedWhenClosed = false
@@ -745,14 +796,19 @@ final class IslandPanel: NSPanel {
         // Finger travel, whatever the scrolling direction is set to.
         let k: CGFloat = e.isDirectionInvertedFromDevice ? 1 : -1
         let g = model.geometry
-        let depth = g.screenFrame.maxY - g.topInset - NSEvent.mouseLocation.y
-        let player = (g.hasNotch ? g.notchHeight + 6 : 16) + model.detailHeight + 8
-        let took = model.swipe(phase, dx: e.scrollingDeltaX * k, dy: e.scrollingDeltaY * k, overPlayer: depth < player)
+        let p = NSEvent.mouseLocation
+        let depth = g.screenFrame.maxY - g.topInset - p.y
+        // The player is the first thing, left of the tiles.
+        let playerRight = g.centerX - model.shapeSize.width / 2 + model.sideInset + model.mainWidth
+        let over = depth < model.contentTop + model.detailHeight + 8 && p.x < playerRight + 4
+        let took = model.swipe(phase, dx: e.scrollingDeltaX * k, dy: e.scrollingDeltaY * k, overPlayer: over)
         if took { setTracking(fast: true) }
         return took
     }
 
     func setSharing(_ hidden: Bool) { panel.sharingType = hidden ? .none : .readOnly }
+    /// For `--island-snapshot`: the panel's window level (it must be above the menu bar's).
+    var panelLevel: Int { panel.level.rawValue }
 
     private func layout() {
         let g = IslandGeometry.current()
@@ -981,7 +1037,7 @@ private struct PressStyle: ButtonStyle {
 private struct RoundButton: View {
     var symbol: String
     var tint: Color?
-    var size: CGFloat = 40
+    var size: CGFloat = 32 // IslandView.rowButton: one button size all through the open notch
     var action: () -> Void
 
     var body: some View {
@@ -1243,54 +1299,45 @@ struct IslandView: View {
     // MARK: Expanded: details and controls
 
     @ViewBuilder private var expanded: some View {
-        let g = model.geometry
         let slots = model.slots
-        let rows = Array(slots.dropFirst())
-        VStack(spacing: 10) {
-            if let first = slots.first {
-                detail(first)
-                    .padding(.horizontal, first == .media ? 0 : Self.rowPad)
-                    .offset(x: first == .media ? model.pull.width : 0)
-                    .contextMenu { promoteMenu(first) }
-            }
-            // A row carried up toward the preview of the closed notch shrinks, step by step, into its closed-notch
-            // icon; near the preview the icons there make room and it glides into the gap, and letting go settles it
-            // there (that order is kept for this mix). Let go anywhere else and it slides back into its row.
-            ForEach(rows, id: \.self) { slot in
-                let dragged = drag?.slot == slot
-                ZStack(alignment: .leading) {
-                    row(slot).opacity(dragged ? 0 : 1)
-                    // Type-erased: inferred, the carried row (which draws the row itself) loops the opaque type check.
-                    if dragged, let d = drag, let f = rowFrames[slot.key] { AnyView(carried(slot, d, f)) }
-                }
-                .zIndex(dragged ? 1 : 0)
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rowFrames[slot.key] = $0 }
-                .contextMenu { promoteMenu(slot) }
-                .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                    .onChanged { v in
-                        model.lastInteraction = Date()
-                        if drag == nil {
-                            drag = RowDrag(slot: slot, start: v.startLocation, point: v.location)
-                        } else if drag?.settling == false {
-                            drag?.point = v.location
-                        }
+        Group {
+            if model.camera {
+                CameraView()
+                    .frame(height: model.cameraHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else {
+                // The first thing, with the rest as tiles beside it: the notch grows wider before it grows taller.
+                HStack(alignment: .center, spacing: IslandGeometry.gap) {
+                    if let first = slots.first {
+                        detail(first)
+                            .padding(.horizontal, first == .media ? 0 : Self.rowPad)
+                            .frame(width: model.mainWidth)
+                            .offset(x: first == .media ? model.pull.width : 0)
+                            .contextMenu { promoteMenu(first) }
                     }
-                    .onEnded { _ in finishDrag() })
-                .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
+                    if !model.tiles.isEmpty { tileGrid }
+                }
+                .transition(.opacity)
             }
         }
         .animation(islandSpring, value: slots)
-        .padding(.horizontal, IslandModel.expandedInset + (g.hasNotch ? 12 : 0))
-        .padding(.top, g.hasNotch ? g.notchHeight + 6 : 16 + (model.dictationInStrip ? 28 : 0))
+        .padding(.horizontal, model.sideInset)
+        .padding(.top, model.contentTop)
         .padding(.bottom, IslandModel.expandedInset)
         .frame(maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .top) {
-            if let d = drag, let plan = arrangement() {
-                closedPreview(model.layout(for: Array(plan.order.prefix(IslandModel.compactMax))), hole: plan.near ? d.slot : nil, faded: plan.near ? nil : d.slot)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
-            } else if model.dictationInStrip {
-                dictationStrip
+            Group {
+                if let d = drag, let plan = arrangement() {
+                    closedPreview(model.layout(for: Array(plan.order.prefix(IslandModel.compactMax))), hole: plan.near ? d.slot : nil, faded: plan.near ? nil : d.slot)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
+                } else if model.dictationInStrip {
+                    dictationStrip
+                } else {
+                    band.transition(.opacity)
+                }
             }
+            .padding(.top, model.bandTop)
         }
         .animation(.spring(duration: 0.25), value: drag == nil)
         .onChange(of: drag == nil) { _, idle in model.dragging = !idle }
@@ -1302,6 +1349,45 @@ struct IslandView: View {
                 drag = RowDrag(slot: s, start: CGPoint(x: f.midX, y: f.midY), point: CGPoint(x: f.minX + 30, y: 22))
             }
         }
+    }
+
+    /// The tiles beside the first thing, two to a column. Tap one to bring it to the front (with all its controls);
+    /// carry one up toward the preview of the closed notch and it shrinks, step by step, into its closed-notch icon;
+    /// near the preview the icons there make room and it glides into the gap, and letting go settles it there (that
+    /// order is kept for this mix). Let go anywhere else and it slides back.
+    private var tileGrid: some View {
+        let tiles = model.tiles, rows = model.tileRows
+        let w = IslandGeometry.tileWidth, h = IslandGeometry.tileHeight, gap = IslandGeometry.gap
+        return ZStack(alignment: .topLeading) {
+            ForEach(Array(tiles.prefix(rows * IslandGeometry.maxColumns).enumerated()), id: \.element) { k, slot in
+                let dragged = drag?.slot == slot
+                ZStack(alignment: .leading) {
+                    tile(slot).opacity(dragged ? 0 : 1)
+                    // Type-erased: inferred, the carried tile (which draws the tile itself) loops the opaque type check.
+                    if dragged, let d = drag, let f = rowFrames[slot.key] { AnyView(carried(slot, d, f)) }
+                }
+                .frame(width: w, height: h)
+                .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rowFrames[slot.key] = $0 }
+                .onTapGesture { withAnimation(islandSpring) { model.focus = slot } }
+                .contextMenu { promoteMenu(slot) }
+                .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                    .onChanged { v in
+                        model.lastInteraction = Date()
+                        if drag == nil {
+                            drag = RowDrag(slot: slot, start: v.startLocation, point: v.location)
+                        } else if drag?.settling == false {
+                            drag?.point = v.location
+                        }
+                    }
+                    .onEnded { _ in finishDrag() })
+                .padding(.leading, CGFloat(k / rows) * (w + gap))
+                .padding(.top, CGFloat(k % rows) * (h + gap))
+                .zIndex(dragged ? 1 : 0)
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+        }
+        .frame(width: CGFloat(model.tileColumns) * (w + gap) - gap, height: model.tilesHeight, alignment: .topLeading)
     }
 
     /// The closed notch as it would be, drawn where it sits (beside the notch, at menu-bar height), with an
@@ -1324,7 +1410,6 @@ struct IslandView: View {
             }
             .animation(islandSpring, value: L.keys)
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { previewFrame = $0 }
-            .padding(.top, g.hasNotch ? 0 : 6)
     }
 
     private struct RowDrag {
@@ -1367,7 +1452,7 @@ struct IslandView: View {
             c = CGPoint(x: mix(c.x, t.x, pull), y: mix(c.y, t.y, pull))
         }
         return ZStack(alignment: .leading) {
-            row(slot).frame(width: f.width, height: f.height).opacity(Double(max(0, 1 - p * 1.8)))
+            tile(slot).frame(width: f.width, height: f.height).opacity(Double(max(0, 1 - p * 1.8)))
             slotIcon(slot).frame(width: iconW, height: iconW)
                 .frame(width: w, height: h)
                 .opacity(Double(min(1, max(0, p * 2.2 - 0.5))))
@@ -1438,6 +1523,24 @@ struct IslandView: View {
         }
     }
 
+    /// The band beside the notch (at menu-bar height) while nothing else needs it: the battery left of the notch, the
+    /// camera button right of it, in the lane every other button ends on.
+    private var band: some View {
+        let g = model.geometry
+        return HStack(spacing: 8) {
+            BatteryGlance()
+            Spacer(minLength: g.hasNotch ? g.seedSize.width + 16 : 0)
+            if CameraMirror.available {
+                RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
+                    withAnimation(islandSpring) { model.camera.toggle() }
+                }
+                .help(model.camera ? "Close Mirror" : "Mirror")
+            }
+        }
+        .padding(.horizontal, model.sideInset)
+        .frame(height: model.bandHeight)
+    }
+
     /// Dictation in the band beside the notch (at menu-bar height) while the notch is open: the waveform (a spinner
     /// while it polishes) left of the notch, its controls right. The words go underneath.
     private var dictationStrip: some View {
@@ -1460,9 +1563,8 @@ struct IslandView: View {
             }
         }
         .animation(.spring(duration: 0.35, bounce: 0.2), value: polishing)
-        .padding(.horizontal, IslandModel.expandedInset + (g.hasNotch ? 12 : 0))
-        .frame(height: g.hasNotch ? g.notchHeight : 28)
-        .padding(.top, g.hasNotch ? 0 : 8)
+        .padding(.horizontal, model.sideInset)
+        .frame(height: model.bandHeight)
     }
 
     @ViewBuilder private func detail(_ slot: IslandModel.Slot) -> some View {
@@ -1627,56 +1729,98 @@ struct IslandView: View {
         }
     }
 
-    /// The open player: big art on the left; beside it the song, the time, and the controls centred under them; the
-    /// lyrics (when there are some) centred under the whole block, under the notch.
+    /// The open player, in the same footprint either way. Its usual face: big art on the left; beside it the song,
+    /// the time, and the controls centred under them (the lyrics button at the end of the lane). Its lyrics face: the
+    /// art shrinks into a header with the song and the controls, and the lines being sung fill the space below.
     private var mediaDetail: some View {
         let m = NowPlaying.shared
-        return VStack(spacing: Self.lyricGap) {
-            HStack(spacing: 14) {
-                AlbumArt(image: m.artwork, corner: 12, note: 30)
-                    .frame(width: Self.artBig, height: Self.artBig)
-                    .matchedGeometryEffect(id: IslandModel.Slot.media.key, in: ns)
-                    .onTapGesture { m.openPlayer() }
-                    .help("Open \(m.appName)")
+        let lyrics = model.lyricsFace
+        return Group {
+            if lyrics {
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(alignment: .top, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
-                            Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
+                    HStack(spacing: 10) {
+                        art(m, size: Self.rowButton)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Marquee(text: m.songTitle, font: .system(size: 13, weight: .semibold), color: .white)
+                            Marquee(text: m.artistLine, font: .system(size: 11), color: .white.opacity(0.6))
                         }
-                        EqualizerBars(playing: m.playing, color: ArtTint.color(m.artwork)).padding(.top, 2)
+                        playerControls(m, spacing: 8)
                     }
                     Spacer(minLength: 0)
-                    if m.duration > 0 {
-                        TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            let at = min(m.livePosition, m.duration)
-                            HStack(spacing: 8) {
-                                Text(Self.songClock(at)).frame(width: 34, alignment: .leading)
-                                bar(at / max(1, m.duration), .white.opacity(0.85))
-                                Text("-" + Self.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
-                            }
-                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.5))
-                        }
-                        .frame(height: 14)
-                        Spacer(minLength: 0)
-                    }
-                    HStack(spacing: 14) {
-                        RoundButton(symbol: "backward.fill", tint: nil, size: Self.rowButton) { m.previous() }
-                        RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: Self.rowButton) { m.playPause() }
-                        RoundButton(symbol: "forward.fill", tint: nil, size: Self.rowButton) { m.next() }
-                    }
-                    .frame(maxWidth: .infinity)
+                    LyricLines(lyrics: Lyrics.shared, size: 15)
                 }
-                .frame(height: Self.artBig)
+                .transition(.opacity)
+            } else {
+                HStack(spacing: 14) {
+                    art(m, size: Self.artBig)
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
+                                Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
+                            }
+                            EqualizerBars(playing: m.playing, color: ArtTint.color(m.artwork)).padding(.top, 2)
+                        }
+                        Spacer(minLength: 0)
+                        if m.duration > 0 {
+                            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                                let at = min(m.livePosition, m.duration)
+                                HStack(spacing: 8) {
+                                    Text(Self.songClock(at)).frame(width: 34, alignment: .leading)
+                                    bar(at / max(1, m.duration), .white.opacity(0.85))
+                                    Text("-" + Self.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
+                                }
+                                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.5))
+                            }
+                            .frame(height: 14)
+                            Spacer(minLength: 0)
+                        }
+                        playerControls(m, spacing: 14)
+                    }
+                }
+                .transition(.opacity)
             }
-            if !Lyrics.shared.cues.isEmpty { LyricLines(lyrics: Lyrics.shared, centered: true) }
         }
+        .frame(height: Self.artBig)
+        .animation(islandSpring, value: lyrics)
+    }
+
+    private func art(_ m: NowPlaying, size: CGFloat) -> some View {
+        AlbumArt(image: m.artwork, corner: size > 40 ? 12 : 8, note: size * 0.33)
+            .frame(width: size, height: size)
+            .matchedGeometryEffect(id: IslandModel.Slot.media.key, in: ns)
+            .onTapGesture { m.openPlayer() }
+            .help("Open \(m.appName)")
+    }
+
+    /// Previous, play and next (centred under the song, or in the lyrics face's header), and when the song has timed
+    /// lyrics, the lyrics button on the lane every other button ends on.
+    @ViewBuilder private func playerControls(_ m: NowPlaying, spacing: CGFloat) -> some View {
+        let b = Self.rowButton, on = model.lyricsFace
+        let trio = HStack(spacing: spacing) {
+            RoundButton(symbol: "backward.fill", tint: nil, size: b) { m.previous() }
+            RoundButton(symbol: m.playing ? "pause.fill" : "play.fill", tint: .pink, size: b) { m.playPause() }
+            RoundButton(symbol: "forward.fill", tint: nil, size: b) { m.next() }
+        }
+        if on {
+            HStack(spacing: spacing) { trio; lyricsButton }
+        } else {
+            trio.frame(maxWidth: .infinity)
+                .overlay(alignment: .trailing) { if !Lyrics.shared.cues.isEmpty { lyricsButton } }
+        }
+    }
+
+    private var lyricsButton: some View {
+        let on = model.lyricsFace
+        return RoundButton(symbol: on ? "quote.bubble.fill" : "quote.bubble", tint: on ? .white : nil, size: Self.rowButton) {
+            if model.lyricsOverride != nil { model.lyricsOverride?.toggle() } else { Store.shared.settings.notchLyricsOpen.toggle() }
+        }
+        .help(on ? "Hide Lyrics" : "Show Lyrics")
     }
 
     /// The open player's art, as tall as the song, time and controls beside it.
     static let artBig: CGFloat = 92
-    static let lyricGap: CGFloat = 12
 
     static func songClock(_ t: Double) -> String {
         let s = max(0, Int(t.rounded(.down)))
@@ -1716,106 +1860,96 @@ struct IslandView: View {
         }
     }
 
-    /// A one-line row for each slot after the first (expanded notch).
-    /// The buttons on a row: their real size (not shrunk), so they line up with the ones above.
+    /// The 32 pt round buttons everywhere in the open notch except the first thing's own big ones.
     static let rowButton: CGFloat = 32
-    /// A row's inset: the same on every side ((row height − button) / 2), and the first item's controls are inset by it
-    /// too, so every button in the open notch ends on one line.
-    static let rowPad: CGFloat = (IslandGeometry.rowHeight - 10 - rowButton) / 2
+    /// A tile's inset: the same on every side ((tile height − button) / 2).
+    static let rowPad: CGFloat = (IslandGeometry.tileHeight - rowButton) / 2
+    /// Tiles and the camera: concentric with the round buttons `rowPad` in from the edge.
+    static let cardRadius: CGFloat = rowButton / 2 + rowPad
 
-    @ViewBuilder private func row(_ slot: IslandModel.Slot) -> some View {
-        HStack(spacing: 10) {
-            // In a button-sized slot, so icons line up with the buttons' lane on the other side.
+    /// A tile beside the first thing: its icon, its time (and what it is), and its one control.
+    private func tile(_ slot: IslandModel.Slot) -> some View {
+        HStack(spacing: 8) {
+            // In a button-sized slot, so the icon sits as far in as the button on the other side.
             icon(slot, size: 20).frame(width: Self.rowButton, height: Self.rowButton)
+            tileText(slot).frame(maxWidth: .infinity, alignment: .leading)
+            tileButton(slot)
+        }
+        .padding(.horizontal, Self.rowPad)
+        .frame(width: IslandGeometry.tileWidth, height: IslandGeometry.tileHeight)
+        .background(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous).fill(Color.white.opacity(0.07)))
+    }
+
+    /// A tile's value (a time, the song) over what it is, when that says more than the icon.
+    @ViewBuilder private func tileText(_ slot: IslandModel.Slot) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             switch slot {
             case .timer(let id):
                 let t = Timers.shared
                 if let n = t.list.first(where: { $0.id == id }) {
-                    Spacer(minLength: 0)
                     let clock = Pomodoro.clock(n.remaining(t.now))
-                    Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock, down: true)
-                    RoundButton(symbol: n.paused ? "play.fill" : "pause.fill", tint: nil, size: Self.rowButton) { t.toggle(n) }
-                    RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { t.remove(n) }
+                    Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(n.paused ? 0.6 : 1)).rolling(clock, down: true)
+                    caption(n.name)
                 }
             case .stopwatch(let id):
                 let s = Stopwatches.shared
                 if let w = s.list.first(where: { $0.id == id }) {
-                    Spacer(minLength: 0)
                     let clock = Stopwatch.format(w.elapsed(s.now), hundredths: false)
                     Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
-                    RoundButton(symbol: w.running ? "pause.fill" : "play.fill", tint: nil, size: Self.rowButton) { s.toggle(w) }
-                    RoundButton(symbol: "flag.fill", tint: nil, size: Self.rowButton) { s.lap(w) }
                 }
-            case .alarm: rowContent(.alarm)
-            case .dictation: rowContent(.dictation)
-            case .toast: rowContent(.toast)
-            case .meeting: rowContent(.meeting)
-            case .pomodoro: rowContent(.pomodoro)
-            case .media: rowContent(.media)
-            case .event: rowContent(.event)
-            }
-        }
-        .frame(height: IslandGeometry.rowHeight - 10)
-        .padding(.horizontal, Self.rowPad)
-        // Concentric with the round buttons, which sit `rowPad` in from every edge.
-        .background(RoundedRectangle(cornerRadius: Self.rowButton / 2 + Self.rowPad, style: .continuous).fill(Color.white.opacity(0.07)))
-    }
-
-    /// A one-line row for each activity after the first (expanded notch).
-    @ViewBuilder private func rowContent(_ a: IslandModel.Activity) -> some View {
-            switch a {
             case .pomodoro:
-                Spacer(minLength: 0)
-                trailing(a)
-                RoundButton(symbol: model.pomodoro.paused ? "play.fill" : "pause.fill", tint: nil, size: Self.rowButton) { model.pomodoro.toggle() }
-                RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { model.pomodoro.stop() }
-            case .meeting:
-                Spacer(minLength: 0)
-                trailing(a)
-                RoundButton(symbol: "text.alignleft", tint: nil, size: Self.rowButton) { openMeeting() }
-                RoundButton(symbol: "stop.fill", tint: .red, size: Self.rowButton) { model.meeting.stop() }
+                trailing(.pomodoro)
+                caption(model.pomodoro.status)
+            case .event:
+                trailing(.event)
+                caption(CalendarEvents.shared.upcoming?.title ?? "")
+            case .media:
+                let m = NowPlaying.shared
+                Marquee(text: m.songTitle, font: .system(size: 12.5, weight: .semibold), color: .white)
+                caption(m.artistLine)
             case .dictation:
                 Text(model.dictation.preview.isEmpty ? "Listening" : model.dictation.preview)
                     .font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.75)).lineLimit(1).truncationMode(.head)
-                Spacer(minLength: 0)
             case .toast:
-                trailing(a)
-                if let t = model.toast, !t.detail.isEmpty { Text(t.detail).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(1) }
-                Spacer(minLength: 0)
-            case .alarm:
-                trailing(a)
-                Spacer(minLength: 0)
-                RoundButton(symbol: "zzz", tint: nil, size: Self.rowButton) { Alarms.shared.snooze() }
-                RoundButton(symbol: "stop.fill", tint: .orange, size: Self.rowButton) { Alarms.shared.dismiss() }
-            case .stopwatch:
-                Spacer(minLength: 0)
-                trailing(a)
-                if let w = Stopwatches.shared.running.first {
-                    RoundButton(symbol: "pause.fill", tint: nil, size: Self.rowButton) { Stopwatches.shared.toggle(w) }
-                    RoundButton(symbol: "flag.fill", tint: nil, size: Self.rowButton) { Stopwatches.shared.lap(w) }
-                }
-            case .timer:
-                Spacer(minLength: 0)
-                trailing(a)
-                if let n = Timers.shared.next {
-                    RoundButton(symbol: "pause.fill", tint: nil, size: Self.rowButton) { Timers.shared.toggle(n) }
-                    RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { Timers.shared.remove(n) }
-                }
-            case .media:
-                Marquee(text: NowPlaying.shared.songTitle, font: .system(size: 12.5, weight: .medium), color: .white.opacity(0.85))
-                Spacer(minLength: 0)
-                RoundButton(symbol: NowPlaying.shared.playing ? "pause.fill" : "play.fill", tint: nil, size: Self.rowButton) { NowPlaying.shared.playPause() }
-                RoundButton(symbol: "forward.fill", tint: nil, size: Self.rowButton) { NowPlaying.shared.next() }
-            case .event:
-                let c = CalendarEvents.shared
-                if let e = c.upcoming {
-                    Text(e.title).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    trailing(a)
-                    if e.link != nil { RoundButton(symbol: "video.fill", tint: .green, size: Self.rowButton) { c.join(e) }.help("Join") }
-                    RoundButton(symbol: "xmark", tint: nil, size: Self.rowButton) { c.dismiss(e) }.help("Dismiss")
-                }
+                trailing(.toast)
+                caption(model.toast?.detail ?? "")
+            case .alarm: trailing(.alarm)
+            case .meeting: trailing(.meeting)
             }
+        }
+    }
+
+    @ViewBuilder private func caption(_ s: String) -> some View {
+        if !s.isEmpty { Text(s).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.55)).lineLimit(1) }
+    }
+
+    /// A tile's one control (the rest are a tap away, with the tile at the front).
+    @ViewBuilder private func tileButton(_ slot: IslandModel.Slot) -> some View {
+        let b = Self.rowButton
+        switch slot {
+        case .timer(let id):
+            let t = Timers.shared
+            if let n = t.list.first(where: { $0.id == id }) { RoundButton(symbol: n.paused ? "play.fill" : "pause.fill", tint: nil, size: b) { t.toggle(n) } }
+        case .stopwatch(let id):
+            let s = Stopwatches.shared
+            if let w = s.list.first(where: { $0.id == id }) { RoundButton(symbol: w.running ? "pause.fill" : "play.fill", tint: nil, size: b) { s.toggle(w) } }
+        case .pomodoro:
+            RoundButton(symbol: model.pomodoro.paused ? "play.fill" : "pause.fill", tint: nil, size: b) { model.pomodoro.toggle() }
+        case .meeting:
+            RoundButton(symbol: "stop.fill", tint: .red, size: b) { model.meeting.stop() }
+        case .media:
+            RoundButton(symbol: NowPlaying.shared.playing ? "pause.fill" : "play.fill", tint: nil, size: b) { NowPlaying.shared.playPause() }
+        case .event:
+            let c = CalendarEvents.shared
+            if let e = c.upcoming {
+                if e.link != nil { RoundButton(symbol: "video.fill", tint: .green, size: b) { c.join(e) }.help("Join") }
+                else { RoundButton(symbol: "xmark", tint: nil, size: b) { c.dismiss(e) }.help("Dismiss") }
+            }
+        case .alarm:
+            RoundButton(symbol: "stop.fill", tint: .orange, size: b) { Alarms.shared.dismiss() }
+        case .toast, .dictation:
+            EmptyView()
+        }
     }
 
     private func bar(_ progress: Double, _ color: Color) -> some View {

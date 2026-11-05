@@ -325,6 +325,7 @@ extension AppDelegate {
             // panel stays hidden (nothing shows on screen), and the demo song stands in for whatever is really playing.
             island.onStage = nil
             island.haptic = {}
+            CameraMirror.placeholder = true // the real camera never comes on here
             NowPlaying.shared.demo = true
             if !args.contains("--media-only") {
                 Timers.shared.add(minutes: 25, label: "Tea")
@@ -340,11 +341,13 @@ extension AppDelegate {
                 m.duration = 200
                 m.position = 80
                 m.artwork = args.contains("--no-art") ? nil : Self.demoArt()
-                if args.contains("--lyrics") {
+                if args.contains("--lyrics") || args.contains("--lyrics-face") {
                     // Made-up lines (`--lyrics-at <seconds>` moves the song, 92 for the break's note).
                     if let j = args.firstIndex(of: "--lyrics-at"), j + 1 < args.count { m.position = Double(args[j + 1]) ?? 80 }
                     m.updated = Date()
                     Lyrics.shared.showDemo()
+                    // The player's lyrics face (the saved setting stays as it is).
+                    if args.contains("--lyrics-face") { island.lyricsOverride = true }
                 }
             }
             if let j = args.firstIndex(of: "--dictation"), j + 1 < args.count {
@@ -392,6 +395,11 @@ extension AppDelegate {
                 island.lastInteraction = .distantFuture // keep it open for the picture
                 island.stage = stage
                 island.contentVisible = true
+                if stage == .expanded {
+                    // `--camera`: the mirror (a stand-in picture); `--promote-tile`: the first tile tapped to the front.
+                    if args.contains("--camera") { island.camera = true }
+                    if args.contains("--promote-tile") { island.focus = island.tiles.first }
+                }
                 let size = island.geometry.panelSize
                 let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
                 setbuf(stdout, nil)
@@ -401,13 +409,19 @@ extension AppDelegate {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.6))
                 if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) { hv.cacheDisplay(in: hv.bounds, to: rep); images.append(rep) }
                 if stage == .expanded, let k = args.firstIndex(of: "--click"), k + 1 < args.count {
-                    // Clicks a strip button (stop or cancel) the way the mouse would, and says what dictation did.
+                    // Clicks a button the way the mouse would and says what happened: hands-free dictation's stop or
+                    // cancel (right of the words, under the band), or the camera button in the band itself.
                     let g = island.geometry
-                    // The buttons sit at the right of the first detail, under the band (bottom-aligned with the words).
-                    let right = size.width / 2 + g.expandedSize.width / 2 - (IslandModel.expandedInset + (g.hasNotch ? 12 : 0)) - 16
-                    let x = args[k + 1] == "stop" ? right : right - 32 - 8
-                    let top = g.topInset + (g.hasNotch ? g.notchHeight + 6 : 16 + 28)
-                    let p = NSPoint(x: x, y: size.height - top - island.detailHeight + 16)
+                    let left = size.width / 2 - island.shapeSize.width / 2 + island.sideInset
+                    let p: NSPoint
+                    if args[k + 1] == "camera" {
+                        p = NSPoint(x: size.width / 2 + island.shapeSize.width / 2 - island.sideInset - 16, y: size.height - g.topInset - island.bandTop - island.bandHeight / 2)
+                    } else {
+                        // Bottom-aligned with the words, the words centred beside the tiles.
+                        let right = left + island.mainWidth - IslandView.rowPad - 16, d = island.detailHeight
+                        let y = g.topInset + island.contentTop + max(d, island.tilesHeight) / 2 + d / 2 - 16
+                        p = NSPoint(x: args[k + 1] == "stop" ? right : right - 32 - 8, y: size.height - y)
+                    }
                     for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                         if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                       windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
@@ -415,7 +429,7 @@ extension AppDelegate {
                         }
                         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
                     }
-                    print("clicked", args[k + 1], "at", p, "→ phase", island.dictation.phase, "handsFree", island.dictation.handsFree)
+                    print("clicked", args[k + 1], "at", p, "→ phase", island.dictation.phase, "handsFree", island.dictation.handsFree, "camera", island.camera)
                 }
                 w.orderOut(nil)
             }
@@ -444,7 +458,8 @@ extension AppDelegate {
                 try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1] + "-\(n).png"))
             }
             print("song:", NowPlaying.shared.songTitle, "| with:", NowPlaying.shared.artistLine)
-            print("seed", island.geometry.seedSize.width, "compact", island.compactLayout.side)
+            print("seed", island.geometry.seedSize.width, "compact", island.compactLayout.side, "open", island.shapeSize, "tiles", island.tiles.count)
+            print("panel level", islandController.panelLevel, "(menu bar \(NSWindow.Level.mainMenu.rawValue))")
             exit(0)
         }
         if args.contains("--highlight-test") {
