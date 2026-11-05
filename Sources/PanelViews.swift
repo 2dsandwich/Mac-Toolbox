@@ -390,48 +390,50 @@ struct NotesView: View, Animatable {
     }
 
     var body: some View {
-        var at = 0.0
-        let lines = markdown.components(separatedBy: "\n").map { raw in
-            defer { at += Double(raw.count + 1) }
-            return (raw, at)
-        }
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, l in
-                line(l.0, FadeIn(shown: shown - l.1))
-            }
-        }
-        .textSelection(.enabled)
+        // One text for the whole thing, so a selection can run across every line.
+        Text(Self.attributed(markdown))
+            .font(.system(size: 13.5))
+            .lineSpacing(5)
+            .textRenderer(FadeIn(shown: shown))
+            .contentTransition(.identity) // new text fades in by `shown`, never by cross-fading the whole thing
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
-    @ViewBuilder private func line(_ raw: String, _ fade: FadeIn) -> some View {
-        let t = raw.trimmingCharacters(in: .whitespaces)
-        if t.hasPrefix("# ") {
-            inline(String(t.dropFirst(2)), fade).font(.system(size: 18, weight: .semibold)).padding(.bottom, 2)
-        } else if t.hasPrefix("## ") || t.hasPrefix("### ") {
-            inline(String(t.drop { $0 == "#" }.dropFirst()), fade).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 8)
-        } else if t.hasPrefix("- [ ] ") || t.hasPrefix("- [x] ") {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: t.hasPrefix("- [x]") ? "checkmark.square" : "square").font(.system(size: 12)).foregroundStyle(.secondary)
-                    .opacity(fade.opacity(0))
-                inline(String(t.dropFirst(6)), fade).font(.system(size: 13.5))
+    static func attributed(_ markdown: String) -> AttributedString {
+        var out = AttributedString()
+        let lines = markdown.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        for (n, t) in lines.enumerated() {
+            if n > 0 { out += AttributedString("\n") }
+            if t.hasPrefix("# ") {
+                var h = inline(String(t.dropFirst(2)))
+                h.font = .system(size: 18, weight: .semibold)
+                out += h
+            } else if t.hasPrefix("## ") || t.hasPrefix("### ") {
+                var h = inline(String(t.drop { $0 == "#" }.dropFirst()))
+                h.font = .system(size: 12, weight: .semibold)
+                h.foregroundColor = .secondary
+                out += h
+            } else if t.hasPrefix("- [ ] ") || t.hasPrefix("- [x] ") {
+                var box = AttributedString(t.hasPrefix("- [x]") ? "☑\u{2002}" : "☐\u{2002}")
+                box.foregroundColor = .secondary
+                out += box + inline(String(t.dropFirst(6)))
+            } else if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("・") {
+                var dot = AttributedString("•\u{2002}")
+                dot.foregroundColor = .secondary
+                out += dot + inline(String(t.hasPrefix("・") ? t.dropFirst(1) : t.dropFirst(2)))
+            } else {
+                out += inline(t)
             }
-        } else if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("・") {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•").foregroundStyle(.secondary).opacity(fade.opacity(0))
-                inline(String(t.hasPrefix("・") ? t.dropFirst(1) : t.dropFirst(2)), fade).font(.system(size: 13.5))
-            }
-        } else if !t.isEmpty {
-            inline(t, fade).font(.system(size: 13.5))
         }
+        return out
     }
 
-    private func inline(_ raw: String, _ fade: FadeIn) -> some View {
+    private static func inline(_ raw: String) -> AttributedString {
         // A line still streaming in can end inside **bold** or `code`: close it so the markers never show.
         var s = raw
         for mark in ["**", "`"] where s.components(separatedBy: mark).count % 2 == 0 { s += mark }
-        return Text((try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s))
-            .textRenderer(fade)
-            .contentTransition(.identity) // new text fades in by `shown`, never by cross-fading the whole line
+        return (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
     }
 }
 

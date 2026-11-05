@@ -779,7 +779,7 @@ final class IslandPanel: NSPanel {
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    if name == NSWorkspace.activeSpaceDidChangeNotification { self?.followSpace() }
+                    self?.followSpaceSoon()
                     self?.checkFullScreen()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { MainActor.assumeIsolated { self?.checkFullScreen() } }
                 }
@@ -860,6 +860,13 @@ final class IslandPanel: NSPanel {
         NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
     }
 
+    /// The Space notification can come before the switch settles (or not at all, e.g. into a full-screen app):
+    /// looked at again shortly after, and on every pointer check, so the notch is never left on another Space.
+    private func followSpaceSoon() {
+        followSpace()
+        for d in [0.15, 0.5] { DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in MainActor.assumeIsolated { self?.followSpace() } } }
+    }
+
     private func stageChanged(_ stage: IslandStage) {
         if stage == .hidden {
             panel.ignoresMouseEvents = true
@@ -921,6 +928,7 @@ final class IslandPanel: NSPanel {
     /// Clicks only land on the island itself; hovering it for a moment expands it.
     private func track() {
         let mouse = NSEvent.mouseLocation
+        if model.stage != .hidden { followSpace() }
         if model.stage == .hidden {
             // Nothing running: hovering the notch itself for a moment opens it.
             let s = Store.shared.settings
