@@ -334,12 +334,6 @@ extension AppDelegate {
             if args.contains("--focus") { pomodoro.start(Pomodoro.Plan()) }
             if !args.contains("--no-media") {
                 let m = NowPlaying.shared
-                if args.contains("--peek") {
-                    // The song before, so the next refresh sees a new one and peeks.
-                    m.title = "Starboy"
-                    m.artist = "The Weeknd"
-                    island.refresh()
-                }
                 m.title = args.contains("--long") ? "Save Your Tears (Remix) [feat. Ariana Grande] - Extended Club Mix" : "Blinding Lights"
                 m.artist = args.contains("--long") ? "The Weeknd & Kendrick Lamar" : "The Weeknd"
                 m.playing = !args.contains("--paused")
@@ -372,7 +366,6 @@ extension AppDelegate {
                 if args.contains("--no-media") { NowPlaying.shared.onChange = nil; NowPlaying.shared.title = "" }
             }
             island.refresh()
-            if args.contains("--peek") { print("peek:", island.peek) }
             if args.contains("--swipe-test") {
                 // Feeds trackpad swipes (finger travel in points) to the notch and says what it did.
                 var skipped: [Bool] = []
@@ -429,7 +422,6 @@ extension AppDelegate {
             if args.contains("--frames") {
                 // Opening and closing caught part way: 60, 120 and 220 ms into each.
                 island.stage = .compact
-                island.peek = false
                 let size = island.geometry.panelSize
                 let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
                 let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)

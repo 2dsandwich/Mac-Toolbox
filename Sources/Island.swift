@@ -60,9 +60,6 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Everything happening now, most urgent first. The notch widens for each one.
     var activities: [Activity] = []
     var activity: Activity? { activities.first }
-    /// A new song: its name and artist show under the closed notch for a few seconds.
-    var peek = false
-    static let peekHeight: CGFloat = 22
     /// A full-screen app is in front on the notch's screen.
     var fullScreen = false
     /// Rubber band while swiping on the trackpad: down (or, negative, up) and sideways, in points.
@@ -83,8 +80,6 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     @ObservationIgnored var lastInteraction = Date()
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var toastWork: DispatchWorkItem?
-    @ObservationIgnored private var peekWork: DispatchWorkItem?
-    @ObservationIgnored private var peekTitle: String?
     @ObservationIgnored var isLauncherShowing: () -> Bool = { false }
 
     init(pomodoro: Pomodoro, dictation: DictationController, meeting: MeetingRecorder) {
@@ -383,7 +378,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             // Sized to what it shows: the first activity's icon left of the notch, its text right, and a small icon for
             // each other one. Never wider than twice the bare notch (the text truncates instead).
             let L = compactLayout
-            return CGSize(width: geometry.seedSize.width + L.side * 2, height: geometry.compactSize.height + (peek ? Self.peekHeight : 0))
+            return CGSize(width: geometry.seedSize.width + L.side * 2, height: geometry.compactSize.height)
         case .expanded:
             // As tall as what it shows: the first item's controls, then a row for each other one.
             let top: CGFloat = geometry.hasNotch ? geometry.notchHeight + 6 : 16 + (dictationInStrip ? 28 : 0)
@@ -415,7 +410,6 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         if list != activities {
             withAnimation(list.count < activities.count ? islandSettle : islandSpring) { activities = list }
         }
-        peekIfNewSong()
         let next = list.first
         guard next != nil else { return hide() }
         show()
@@ -436,22 +430,6 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         return listening && (dictation.handsFree || !dictation.preview.isEmpty)
     }
 
-    /// A new song (not the first one seen, and not over dictation or an alarm): its name and artist show under the
-    /// closed notch for three seconds, then it settles back.
-    private func peekIfNewSong() {
-        // The song itself, shown or not, so coming back from full screen doesn't peek at the same one again.
-        let title = NowPlaying.shared.title
-        defer { peekTitle = title }
-        guard let last = peekTitle, title != last, !title.isEmpty, compactShown.contains(.media),
-              !activities.contains(.dictation), !activities.contains(.alarm) else { return }
-        peekWork?.cancel()
-        withAnimation(islandSpring) { peek = true }
-        let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { withAnimation(islandSettle) { self?.peek = false } }
-        }
-        peekWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
-    }
 
     // MARK: Trackpad
 
@@ -637,9 +615,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         guard stage == .compact || stage == .seed else { return }
         if haptic { self.haptic() }
         lastInteraction = Date()
-        peekWork?.cancel()
         withAnimation(islandSpring) {
-            peek = false
             hovering = false
             stage = .expanded
             contentVisible = true
@@ -1089,39 +1065,10 @@ struct IslandView: View {
 
     private var compact: some View {
         let g = model.geometry
-        return VStack(spacing: 0) {
-            closedContent(model.compactLayout, glide: true)
-                .frame(height: g.compactSize.height)
-            if model.peek {
-                songPeek.transition(.opacity.combined(with: .offset(y: -6)).animation(.easeOut(duration: 0.22)))
-            }
-        }
+        return closedContent(model.compactLayout, glide: true)
+            .frame(height: g.compactSize.height)
         .frame(maxHeight: .infinity, alignment: .top)
         .animation(islandSettle, value: model.compactLayout.keys)
-    }
-
-    /// The new song under the closed notch: name and artist centred, or scrolling by when they don't fit.
-    private var songPeek: some View {
-        let m = NowPlaying.shared
-        let room = model.shapeSize.width - 2 * (model.geometry.hasNotch ? IslandModel.compactPad : 10)
-        func width(_ s: String, _ weight: NSFont.Weight) -> CGFloat {
-            ceil((s as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: weight)]).width)
-        }
-        let title = m.songTitle, artist = m.artistLine
-        let fits = width(title, .semibold) + (artist.isEmpty ? 0 : 6 + width(artist, .regular)) <= room
-        return Group {
-            if fits {
-                HStack(spacing: 6) {
-                    Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
-                    if !artist.isEmpty { Text(artist).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)) }
-                }
-                .lineLimit(1)
-            } else {
-                Marquee(text: artist.isEmpty ? title : "\(title) · \(artist)", font: .system(size: 12, weight: .medium), color: .white.opacity(0.9))
-            }
-        }
-        .frame(width: room, height: IslandModel.peekHeight - 6)
-        .padding(.bottom, 6)
     }
 
     /// The closed notch's contents: each side's things read left to right, a time just after its icon. Both
