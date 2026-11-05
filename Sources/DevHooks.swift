@@ -618,6 +618,7 @@ extension AppDelegate {
             case "mixer": .mixer
             case "translate": .translate
             case "weather": .weather
+            case "calendar": .calendar
             case "assistant", "ask": .assistant
             default: .apps
             }
@@ -657,6 +658,20 @@ extension AppDelegate {
             // Made-up events, never the real calendar ("calendar", "予定"); the real notch stays hidden.
             island.onStage = nil
             CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
+            if scope == .calendar {
+                let board = CalendarBoard.shared
+                if let span = value("--span").flatMap(CalendarSpan.init(rawValue:)) { board.span = span }
+                // --focus event: ↩ opens the next event; --focus day: today's "+N more".
+                if let f = value("--focus") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        if f == "day" {
+                            board.open(.day(board.anchor), from: board.frames.first { $0.key.hasPrefix("more") }?.value ?? .zero)
+                        } else {
+                            _ = board.handle(#selector(NSResponder.insertNewline(_:)), typing: false)
+                        }
+                    }
+                }
+            }
             if scope == .calculator { launcher.model.calcHistory = ["12×8 = 96", "1200×1.1 = 1,320"] }
             if let m = value("--clock").flatMap(ClockMode.init(rawValue:)) { launcher.model.clockMode = m }
             if launcher.model.clockMode == .stopwatch, let w = Stopwatches.shared.list.first { w.banked = 83.42; w.laps = [83.42, 51.2, 24.9] }

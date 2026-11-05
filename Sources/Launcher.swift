@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 
 enum Scope: Equatable {
-    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant
+    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar
 
     var title: String {
         switch self {
@@ -22,6 +22,7 @@ enum Scope: Equatable {
         case .notes: "Notes"
         case .weather: "Weather"
         case .assistant: "Ask"
+        case .calendar: "Calendar"
         }
     }
 
@@ -42,15 +43,16 @@ enum Scope: Equatable {
         case .notes: "note.text"
         case .weather: "cloud.sun.fill"
         case .assistant: "sparkles"
+        case .calendar: "calendar"
         }
     }
 
     /// Modes with their own body instead of a result list.
-    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes].contains(self) }
+    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar].contains(self) }
 }
 
 enum Builtin: String, CaseIterable {
-    case clipboard, switcher, pomodoro, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
+    case clipboard, switcher, pomodoro, calendar, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
          allApps, settings, quit
 
     var title: String {
@@ -58,6 +60,7 @@ enum Builtin: String, CaseIterable {
         case .clipboard: "Clipboard History"
         case .switcher: "Switch Apps"
         case .pomodoro: "Clock"
+        case .calendar: "Calendar View"
         case .calculator: "Calculator"
         case .timer: "Timer"
         case .stopwatch: "Stopwatch"
@@ -79,6 +82,7 @@ enum Builtin: String, CaseIterable {
         case .clipboard: "doc.on.clipboard"
         case .switcher: "rectangle.stack"
         case .pomodoro: "timer"
+        case .calendar: "calendar"
         case .calculator: "plus.forwardslash.minus"
         case .timer: "timer"
         case .stopwatch: "stopwatch"
@@ -100,6 +104,7 @@ enum Builtin: String, CaseIterable {
         case .clipboard: .clipboard
         case .switcher: .switcher
         case .pomodoro: .pomodoro
+        case .calendar: .calendar
         case .calculator: .calculator
         case .timer, .stopwatch, .alarm: .pomodoro
         case .mixer: .mixer
@@ -283,6 +288,7 @@ enum Metrics {
         if scope == .clipboard || scope == .meeting { return Metrics.clipboardList(s) }
         if scope == .pomodoro { return ClockHub.height(self) }
         if scope == .calculator { return CalculatorView.height }
+        if scope == .calendar { return CalendarPanel.height }
         if scope == .translate { return TranslateView.height }
         if scope == .assistant { return AssistantView.height(Assistant.shared) }
         if scope == .notes { return NoteBoardView.height }
@@ -338,6 +344,7 @@ enum Metrics {
         case .notes: "New note…"
         case .weather: "City or place…"
         case .assistant: "Ask anything"
+        case .calendar: "Search events"
         }
     }
 
@@ -531,7 +538,7 @@ enum Metrics {
         case .weather:
             // A place's weather as you type it (here, or your default city, when it's empty).
             items = LiveData.shared.weather(place: q, kind: .full, s).enumerated().map { answerItem($1, $0) }
-        case .text, .meeting, .calculator, .timer, .mixer, .notes, .assistant:
+        case .text, .meeting, .calculator, .timer, .mixer, .notes, .assistant, .calendar:
             items = []
         case .web:
             let r = BrowserSites.suggest(query, in: sites, limit: max(s.maxRows, 6))
@@ -631,6 +638,7 @@ enum Metrics {
         case .clipboard: [s.clipboardKeyword.lowercased(), "clipboard", "history", "paste"]
         case .switcher: [s.switcherKeyword.lowercased(), "running", "switch"]
         case .pomodoro: ["clock", "clocks", "pomodoro", "pomo", "focus", "時計", "ポモドーロ", "集中"]
+        case .calendar: ["calendar", "cal", "予定", "カレンダー"]
         case .calculator: ["calc", "calculator", "keypad", "電卓", "計算機"]
         case .timer: ["timer", "countdown", "タイマー"]
         case .stopwatch: ["stopwatch", "stop watch", "lap", "ストップウォッチ"]
@@ -945,6 +953,7 @@ enum Metrics {
 
     /// Commands the text field forwards (arrows, Tab, Return, Esc, delete).
     func handle(_ sel: Selector) -> Bool {
+        if model.scope == .calendar, CalendarBoard.shared.handle(sel, typing: !model.query.isEmpty) { return true }
         switch sel {
         case #selector(NSResponder.moveUp(_:)) where model.scope == .pomodoro && model.clockMode == .alarms && model.alarmDraft != nil:
             model.nudgeAlarm(1)
@@ -1457,6 +1466,7 @@ enum Metrics {
                 if let m = b.clockMode { model.clockMode = m }
                 enter(.pomodoro)
             case .calculator: enter(.calculator)
+            case .calendar: enter(.calendar)
             case .mixer: enter(.mixer)
             case .translate: enter(.translate)
             case .notes: enter(.notes)

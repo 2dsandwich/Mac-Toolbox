@@ -12,6 +12,10 @@ struct CalendarEvent: Identifiable, Equatable {
     var end: Date
     var color: NSColor
     var link: URL?
+    var allDay = false
+    var calendar = ""
+    var location: String?
+    var notes: String?
 
     /// Repeating events share an identifier, so each occurrence is told apart by its start.
     var key: String { "\(id)@\(Int(start.timeIntervalSince1970))" }
@@ -184,11 +188,7 @@ struct CalendarEvent: Identifiable, Equatable {
                             && e.attendees?.first(where: \.isCurrentUser)?.participantStatus != .declined
                     }
                     .sorted { $0.startDate < $1.startDate }
-                    .map { e in
-                        CalendarEvent(id: e.eventIdentifier ?? UUID().uuidString, title: e.title?.isEmpty == false ? e.title! : "Event",
-                                      start: e.startDate, end: e.endDate, color: e.calendar?.color ?? .systemRed,
-                                      link: CalendarEvent.meetingLink([e.url?.absoluteString, e.location, e.notes]))
-                    }
+                    .map(Self.make)
             }
             if found != events { events = found }
             fetched = Date()
@@ -197,6 +197,63 @@ struct CalendarEvent: Identifiable, Equatable {
             if !dismissed.isSubset(of: live) { dismissed.formIntersection(live) }
         }
         onChange?()
+    }
+
+    private static func make(_ e: EKEvent) -> CalendarEvent {
+        CalendarEvent(id: e.eventIdentifier ?? UUID().uuidString, title: e.title?.isEmpty == false ? e.title! : "Event",
+                      start: e.startDate, end: e.endDate, color: e.calendar?.color ?? .systemRed,
+                      link: CalendarEvent.meetingLink([e.url?.absoluteString, e.location, e.notes]),
+                      allDay: e.isAllDay, calendar: e.calendar?.title ?? "", location: e.location?.isEmpty == false ? e.location : nil,
+                      notes: e.notes?.isEmpty == false ? e.notes : nil)
+    }
+
+    /// Every event overlapping from..<to (all-day ones too) in the calendars switched on, for the Calendar mode.
+    func range(from: Date, to: Date) -> [CalendarEvent] {
+        if demo { return Self.demoRange(from: from, to: to) }
+        access = EKEventStore.authorizationStatus(for: .event)
+        guard access == .fullAccess else { return [] }
+        let off = Store.shared.settings.eventCalendarsOff
+        let shown = eventStore.calendars(for: .event).filter { !off.contains($0.calendarIdentifier) }
+        guard !shown.isEmpty else { return [] }
+        return eventStore.events(matching: eventStore.predicateForEvents(withStart: from, end: to, calendars: shown))
+            .filter { $0.status != .canceled && $0.attendees?.first(where: \.isCurrentUser)?.participantStatus != .declined }
+            .map(Self.make)
+            .sorted { ($0.start, $0.allDay ? 0 : 1) < ($1.start, $1.allDay ? 0 : 1) }
+    }
+
+    /// A made-up month for the snapshots: the same pattern every month, and a busy today.
+    static func demoRange(from: Date, to: Date) -> [CalendarEvent] {
+        let cal = Calendar(identifier: .gregorian)
+        let today = cal.startOfDay(for: Date())
+        var list: [CalendarEvent] = []
+        func add(_ day: Date, _ title: String, _ h: Double, _ minutes: Double, _ color: NSColor, link: String? = nil, place: String? = nil,
+                 notes: String? = nil, days: Int = 0) {
+            let start = days > 0 ? day : day.addingTimeInterval(h * 3600)
+            let end = days > 0 ? cal.date(byAdding: .day, value: days, to: day)!.addingTimeInterval(-1) : start.addingTimeInterval(minutes * 60)
+            list.append(CalendarEvent(id: "demo-\(title)-\(Int(day.timeIntervalSince1970))", title: title, start: start, end: end, color: color,
+                                      link: link.flatMap(URL.init(string:)), allDay: days > 0, calendar: days > 0 ? "Personal" : "Work",
+                                      location: place, notes: notes))
+        }
+        var day = from
+        while day < to {
+            let n = cal.component(.day, from: day), w = cal.component(.weekday, from: day)
+            if n == 12 { add(day, "Tokyo Game Show", 0, 0, .systemOrange, place: "Makuhari Messe", days: 3) }
+            if n == 20 { add(day, "Mom’s birthday", 0, 0, .systemPink, days: 1) }
+            if [2, 4, 6].contains(w) { add(day, "Standup", 9.5, 15, .systemBlue, link: "https://meet.google.com/abc-defg-hij") }
+            if n == 3 { add(day, "Dentist", 16, 60, .systemGreen, place: "Shibuya Dental Clinic") }
+            if n % 7 == 2 || day == today {
+                add(day, "Design review", 13, 60, .systemPurple, link: "https://meet.google.com/xyz-abcd-efg",
+                    notes: "Walk through the new calendar view and the notch timings.")
+            }
+            if n % 5 == 0, w != 1, w != 7 { add(day, "Gym", 19, 60, .systemTeal) }
+            if n == 25 { add(day, "Sponsor sync", 11, 30, .systemOrange, link: "https://us02web.zoom.us/j/81234567890") }
+            if day == today {
+                add(day, "Lunch with Aki", 12.5, 60, .systemGreen, place: "AFURI Ebisu")
+                add(day, "Venue walkthrough", 15, 60, .systemRed, place: "Zepp Shinjuku")
+            }
+            day = cal.date(byAdding: .day, value: 1, to: day)!
+        }
+        return list.sorted { ($0.start, $0.allDay ? 0 : 1) < ($1.start, $1.allDay ? 0 : 1) }
     }
 
     /// Made-up events in place of EventKit, for the off-screen snapshots.
@@ -225,7 +282,7 @@ struct CalendarEvent: Identifiable, Equatable {
     }
 
     /// The search bar's answer: a card with what's left of today. ↩ joins the call that's on now or about to
-    /// start; otherwise it opens Calendar (so "calendar ↩" still does what it used to).
+    /// start; otherwise it opens the Calendar mode.
     func answer() -> Answer {
         let header = "Today’s events"
         if !demo { access = EKEventStore.authorizationStatus(for: .event) }
@@ -237,9 +294,8 @@ struct CalendarEvent: Identifiable, Equatable {
         let list = remainingToday()
         let lead = Double(Store.shared.settings.notchEventLead) * 60
         let soon = list.first { $0.link != nil && $0.start.timeIntervalSince(now) <= lead && $0.end > now }
-        let app = URL(fileURLWithPath: "/System/Applications/Calendar.app")
         return Answer(title: header, subtitle: list.isEmpty ? "Nothing left today" : "\(list.count) left today", symbol: "calendar", color: .systemRed,
-                      action: soon?.link.map { .open($0) } ?? .open(app), hint: soon != nil ? "Join ↩" : "Open Calendar ↩",
-                      card: .events(list, now: now))
+                      action: soon?.link.map { .open($0) } ?? .run(keepOpen: true) { Tools.enterScope(.calendar, "") },
+                      hint: soon != nil ? "Join ↩" : "Calendar ↩", card: .events(list, now: now))
     }
 }
