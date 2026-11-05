@@ -180,8 +180,8 @@ enum Metrics {
     var scope = Scope.apps {
         didSet {
             if scope != .notes { controlFrames["board"] = nil }
-            // Leaving Ask (or closing the popup in it) ends the thread; Tab starts a fresh one.
-            if oldValue == .assistant, scope != .assistant { Assistant.shared.reset() }
+            // Leaving Ask (or closing the popup in it) ends the thread, kept in the chat list; Tab starts a fresh one.
+            if oldValue == .assistant, scope != .assistant { Assistant.shared.leave(draft: query) }
         }
     }
     var items: [ResultItem] = []
@@ -293,7 +293,7 @@ enum Metrics {
         if scope == .calculator { return CalculatorView.height }
         if scope == .calendar { return CalendarPanel.height }
         if scope == .translate { return TranslateView.height }
-        if scope == .assistant { return AssistantView.height(Assistant.shared) }
+        if scope == .assistant { return AssistantView.height(Assistant.shared, query: query, s) }
         if scope == .notes { return NoteBoardView.height }
         if scope == .mixer { return MixerView.height(AudioMixer.shared.apps.count) }
         if scope == .library {
@@ -550,7 +550,11 @@ enum Metrics {
         case .weather:
             // A place's weather as you type it (here, or your default city, when it's empty).
             items = LiveData.shared.weather(place: q, kind: .full, s).enumerated().map { answerItem($1, $0) }
-        case .text, .meeting, .calculator, .timer, .mixer, .notes, .assistant, .calendar:
+        case .assistant:
+            // Earlier chats: the newest is picked (↩ continues it) until you type, then ↩ asks.
+            items = []
+            Assistant.shared.pick = q.isEmpty ? 0 : nil
+        case .text, .meeting, .calculator, .timer, .mixer, .notes, .calendar:
             items = []
         case .web:
             let r = BrowserSites.suggest(query, in: sites, limit: max(s.maxRows, 6))
@@ -965,6 +969,7 @@ enum Metrics {
     /// Commands the text field forwards (arrows, Tab, Return, Esc, delete).
     func handle(_ sel: Selector) -> Bool {
         if model.scope == .calendar, CalendarBoard.shared.handle(sel, typing: !model.query.isEmpty) { return true }
+        if model.scope == .assistant, handleAsk(sel) { return true }
         switch sel {
         case #selector(NSResponder.moveUp(_:)) where model.scope == .pomodoro && model.clockMode == .alarms && model.alarmDraft != nil:
             model.nudgeAlarm(1)
@@ -1005,8 +1010,6 @@ enum Metrics {
                 model.setQuery("")
             } else if model.scope == .translate {
                 if let r = Translator.shared.result { copyTranslation(r) }
-            } else if model.scope == .assistant {
-                if Assistant.shared.ask(model.query) { model.setQuery("") }
             } else if model.scope == .pomodoro {
                 switch model.clockMode {
                 case .focus: startPomodoro(Pomodoro.parse(model.query))
@@ -1041,6 +1044,8 @@ enum Metrics {
         if model.scope == .apps, model.query.isEmpty {
             AI.prewarm(.assistant)
             enter(.assistant)
+            model.setQuery(Assistant.shared.draft)
+            Assistant.shared.draft = ""
             return
         }
         if model.scope == .apps, case .app(let a)? = model.selected?.kind, BrowserSites.browserPaths.contains(a.path) {
@@ -1146,6 +1151,12 @@ enum Metrics {
         case ("p", _):
             guard case .clip(let c)? = model.selected?.kind else { return false }
             togglePin(c.id)
+        case ("n", _) where model.scope == .assistant: // a new chat
+            Assistant.shared.leave(draft: "")
+            model.recompute()
+        case ("r", _) where model.scope == .assistant: // the last answer again
+            guard !Assistant.shared.busy, !Assistant.shared.turns.isEmpty else { return false }
+            Assistant.shared.regenerate()
         case ("c", _) where model.scope == .assistant:
             guard (model.field?.currentEditor()?.selectedRange.length ?? 0) == 0, let a = Assistant.shared.lastAnswer else { return false }
             copyAnswer(a)
@@ -1319,6 +1330,41 @@ enum Metrics {
     func copyAnswer(_ text: String) {
         clipboard.copy(text: text, source: "Ask")
         hide()
+    }
+
+    /// Settings › AI: continues a saved chat in the popup.
+    func openChat(_ chat: AskChat) {
+        show(.assistant)
+        Assistant.shared.open(chat)
+    }
+
+    /// While the thread is empty, ↑↓ pick an earlier chat and ↩ continues it. In a chat, ↑ in an empty bar brings back
+    /// the last question, Esc stops an answer being written (keeping it), and ⌫ in an empty bar goes back to the list.
+    func handleAsk(_ sel: Selector) -> Bool {
+        let a = Assistant.shared
+        let chats = a.turns.isEmpty ? AskChats.shared.matching(model.query) : []
+        switch sel {
+        case #selector(NSResponder.moveDown(_:)) where !chats.isEmpty:
+            a.pick = min(chats.count - 1, (a.pick ?? -1) + 1)
+        case #selector(NSResponder.moveUp(_:)) where !chats.isEmpty:
+            a.pick = a.pick.flatMap { $0 > 0 ? $0 - 1 : model.query.isEmpty ? 0 : nil }
+        case #selector(NSResponder.moveUp(_:)) where model.query.isEmpty && a.turns.last != nil:
+            model.setQuery(a.turns.last!.question)
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertLineBreak(_:)):
+            if let i = a.pick, chats.indices.contains(i) {
+                a.open(chats[i])
+                model.setQuery("")
+            } else if a.ask(model.query) {
+                model.setQuery("")
+            }
+        case #selector(NSResponder.cancelOperation(_:)) where a.busy:
+            a.stop()
+        case #selector(NSResponder.deleteBackward(_:)) where model.query.isEmpty && !a.turns.isEmpty:
+            a.leave(draft: "")
+        default:
+            return false
+        }
+        return true
     }
 
     // MARK: Alarms

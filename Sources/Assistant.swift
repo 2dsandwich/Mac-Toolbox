@@ -7,7 +7,7 @@ import SwiftUI
 @MainActor @Observable final class Assistant {
     static let shared = Assistant()
 
-    struct Source: Hashable {
+    struct Source: Hashable, Codable {
         let title: String
         let url: URL
     }
@@ -32,17 +32,25 @@ import SwiftUI
         }
     }
 
-    struct Turn: Identifiable {
-        let id = UUID()
+    struct Turn: Identifiable, Codable {
+        var id = UUID()
         let question: String
         var answer = ""
         var sources: [Source] = []
         var failed = false
         var status: Status = .thinking
+
+        private enum CodingKeys: String, CodingKey { case id, question, answer, sources, failed }
     }
 
     var turns: [Turn] = []
     var busy = false
+    /// The saved chat this thread is (nil until its first answer is saved).
+    private(set) var chatID: UUID?
+    /// The chat picked in the list shown while the thread is empty (nil: ↩ asks what's typed).
+    var pick: Int? = 0
+    /// What was typed when Ask closed, put back on the next Tab.
+    @ObservationIgnored var draft = ""
     /// The thread's laid-out height, so the card fits it.
     var contentHeight: CGFloat = 0
     /// Claude's side of the thread, block for block: search results have to go back exactly as they came.
@@ -62,6 +70,62 @@ import SwiftUI
         messages = []
         busy = false
         contentHeight = 0
+        chatID = nil
+        pick = 0
+    }
+
+    /// Leaving Ask: an answer still coming stops where it is, and the chat (already saved) closes. Tab starts a
+    /// fresh one with this chat first in the list, so ↩ goes straight back to it.
+    func leave(draft: String) {
+        stop()
+        reset()
+        self.draft = draft
+    }
+
+    /// Continues a saved chat.
+    func open(_ chat: AskChat) {
+        reset()
+        chatID = chat.id
+        turns = chat.turns
+        messages = (chat.messages.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [[String: Any]]) ?? []
+    }
+
+    /// Stops the answer being written, keeping what came so far (also in the thread Claude sees next).
+    func stop() {
+        guard busy, let last = turns.last else { return }
+        work?.cancel()
+        work = nil
+        generation += 1
+        busy = false
+        if last.answer.isEmpty {
+            turns[turns.count - 1].answer = "Stopped"
+            turns[turns.count - 1].failed = true
+        } else {
+            messages += [["role": "user", "content": last.question], ["role": "assistant", "content": [["type": "text", "text": last.answer]]]]
+        }
+        save()
+    }
+
+    /// Takes the last exchange off the thread and returns its question, to ask again.
+    func takeBackLast() -> String? {
+        guard !busy, let last = turns.popLast() else { return nil }
+        if messages.count >= 2, messages[messages.count - 2]["content"] as? String == last.question { messages.removeLast(2) }
+        return last.question
+    }
+
+    /// The last question again, for a new answer.
+    func regenerate() {
+        if let q = takeBackLast() { ask(q) }
+    }
+
+    /// Writes the thread to the saved chats once something in it is answered.
+    private func save() {
+        guard let first = turns.first, turns.contains(where: { !$0.failed && !$0.answer.isEmpty }) else { return }
+        let raw = JSONSerialization.isValidJSONObject(messages) ? try? JSONSerialization.data(withJSONObject: messages) : nil
+        let chat = AskChat(id: chatID ?? UUID(), title: first.question, date: Date(), turns: turns,
+                           messages: raw.flatMap { String(data: $0, encoding: .utf8) } ?? "[]")
+        chatID = chat.id
+        AskChats.shared.save(chat)
     }
 
     /// Sends a question; false when it can't be sent yet (nothing typed, or still answering).
@@ -97,7 +161,10 @@ import SwiftUI
                     }
                 }
             }
-            if gen == generation { busy = false }
+            if gen == generation {
+                busy = false
+                save()
+            }
         }
         return true
     }
@@ -159,6 +226,34 @@ import SwiftUI
         }
     }
 
+    /// Opens a link from an answer in the default browser, closing the popup. Tests catch it in `onOpen` instead.
+    static var onOpen: ((URL) -> Void)?
+    static func open(_ url: URL) {
+        if let onOpen { return onOpen(url) }
+        (NSApp.delegate as? AppDelegate)?.launcher.hide()
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Every page an answer links to (its Markdown links, bare addresses, then its sources), once each.
+    static func links(_ turn: Turn) -> [URL] {
+        var out: [URL] = []
+        for url in NotesView.attributed(turn.answer).runs.compactMap(\.link) + turn.sources.map(\.url) where !out.contains(url) { out.append(url) }
+        return out
+    }
+
+    /// Right-click on an exchange: copy it, or open the pages it links to.
+    static func menu(_ turn: Turn) -> [(title: String, run: () -> Void)] {
+        let copy = { (s: String) -> () -> Void in { (NSApp.delegate as? AppDelegate)?.launcher.copyAnswer(s) } }
+        var items: [(title: String, run: () -> Void)] = []
+        if !turn.failed, !turn.answer.isEmpty {
+            items.append(("Copy", copy(String(NotesView.attributed(turn.answer).characters))))
+            items.append(("Copy as Markdown", copy(turn.answer)))
+        }
+        items.append(("Copy Question", copy(turn.question)))
+        for url in links(turn) { items.append(("Open \(url.host ?? url.absoluteString)", { open(url) })) }
+        return items
+    }
+
     /// Local reasoning models write their thinking inside <think> tags before the answer: only the answer shows.
     static func withoutReasoning(_ s: String) -> String {
         guard let r = s.range(of: "</think>") else { return s.hasPrefix("<think>") ? "" : s }
@@ -205,6 +300,7 @@ import SwiftUI
                 **Early July to early September**, when the trails and mountain huts are open.
                 - Mid-July to late August has the steadiest weather
                 - Weekdays are far less crowded than Obon week
+                - Trail status is on the [official climbing site](https://www.fujisan-climb.jp/en/)
                 """, sources: [Source(title: "Climbing Mt. Fuji", url: URL(string: "https://www.fujisan-climb.jp/en/")!)]),
             Turn(question: "Can I make it there and back in a day from Tokyo?", answer: "The request timed out. Check your connection and try again.", failed: true),
         ]
@@ -246,22 +342,37 @@ import SwiftUI
 
 /// The thread under the bar: one card that reads like a chat, newest exchange on top. Your question is a bubble on
 /// the right, the answer plain text on the left with its sources under it. The card grows with the answer, then scrolls.
+/// With no thread yet, earlier chats show there instead.
 struct AssistantView: View {
     let assistant: Assistant
+    let model: LauncherModel
+    let s: Settings
     let radius: CGFloat
 
     static let maxCard: CGFloat = 440
 
-    static func height(_ a: Assistant) -> CGFloat {
-        guard !a.turns.isEmpty else { return 0 }
+    static func height(_ a: Assistant, query: String, _ s: Settings) -> CGFloat {
+        guard !a.turns.isEmpty else { return AskChatList.height(AskChats.shared.matching(query).count, s) }
         return Metrics.rowGap + min(maxCard, max(a.contentHeight, 52)) + Metrics.listInset
     }
 
     static var animates: Bool { Store.shared.settings.animations && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
     var body: some View {
+        if assistant.turns.isEmpty {
+            AskChatList(assistant: assistant, chats: AskChats.shared.matching(model.query), s: s,
+                        radius: max(4, min(radius - Metrics.listInset, s.rowHeight / 2))) { chat in
+                assistant.open(chat)
+                model.setQuery("")
+            }
+        } else {
+            thread
+        }
+    }
+
+    private var thread: some View {
         let shape = RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous)
-        ScrollViewReader { proxy in
+        return ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 22) {
                     ForEach(assistant.turns.reversed()) { t in
@@ -286,12 +397,12 @@ struct AssistantView: View {
         .padding(.horizontal, Metrics.listInset)
         .padding(.top, Metrics.rowGap)
         .padding(.bottom, Metrics.listInset)
-        .frame(height: Self.height(assistant), alignment: .top)
+        .frame(height: Self.height(assistant, query: model.query, s), alignment: .top)
     }
 }
 
 /// One exchange: the question as a bubble, then the answer, which dissolves in as it streams.
-private struct AssistantTurn: View {
+struct AssistantTurn: View {
     let turn: Assistant.Turn
     let busy: Bool
     /// How much of the answer is revealed (see `NotesView.shown`); a turn still being answered starts hidden.
@@ -318,7 +429,7 @@ private struct AssistantTurn: View {
             if turn.failed {
                 Label(turn.answer, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
             } else if !turn.answer.isEmpty {
-                NotesView(markdown: turn.answer, shown: shown)
+                NotesView(markdown: turn.answer, shown: shown, selectable: false)
             } else if busy {
                 StatusLine(status: turn.status)
             }
@@ -333,6 +444,10 @@ private struct AssistantTurn: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(AssistantView.animates ? .easeOut(duration: 0.3) : nil, value: turn.sources)
         .onChange(of: turn.answer) { old, new in reveal(old, new) }
+        .contextMenu {
+            ForEach(Array(Assistant.menu(turn).enumerated()), id: \.offset) { _, item in Button(item.title, action: item.run) }
+        }
+        .environment(\.openURL, OpenURLAction { Assistant.open($0); return .handled })
     }
 
     /// Paces the reveal: each arrival takes longer the more it brings, so bursts glide in instead of jumping.
@@ -355,10 +470,7 @@ private struct SourceLink: View {
     @State private var hover = false
 
     var body: some View {
-        Button {
-            (NSApp.delegate as? AppDelegate)?.launcher.hide()
-            NSWorkspace.shared.open(source.url)
-        } label: {
+        Button { Assistant.open(source.url) } label: {
             Text(source.url.host.map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } ?? source.title)
                 .font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
                 .padding(.horizontal, 9)

@@ -841,6 +841,8 @@ private struct AIPane: View {
 
     var body: some View {
         Form {
+            AskChatsSection(chats: AskChats.shared)
+
             Section {
                 ForEach(AITask.allCases) { task in
                     TaskRow(store: store, task: task, lists: lists)
@@ -1186,7 +1188,7 @@ private struct StatsPane: View {
                 HStack(spacing: 10) {
                     tile(number(stats.total(.words)), "words dictated", "mic.fill", .pink)
                     tile(duration(stats.minutesSaved(stats.total(.words), speaking: stats.total(.speakingSeconds))), "saved by talking", "bolt.fill", .orange)
-                    tile("\(stats.streak)", stats.streak == 1 ? "day streak" : "days in a row", "flame.fill", .red)
+                    tile(number(stats.total(.appsOpened) + stats.total(.answers)), "searches", "magnifyingglass", .blue)
                 }
                 .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
                 .listRowBackground(Color.clear)
@@ -1252,14 +1254,10 @@ private struct StatsPane: View {
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.06)))
     }
 
-    /// All time, with today's beside it.
+    /// All time.
     private func row(_ title: String, _ symbol: String, _ m: Stats.Metric, minutes: Bool = false) -> some View {
         LabeledContent {
-            HStack(spacing: 8) {
-                let today = stats.today(m)
-                if today > 0 { Text("+\(minutes ? duration(today) : number(today)) today").font(.caption).foregroundStyle(.green) }
-                Text(minutes ? duration(stats.total(m)) : number(stats.total(m))).monospacedDigit().foregroundStyle(.secondary)
-            }
+            Text(minutes ? duration(stats.total(m)) : number(stats.total(m))).monospacedDigit().foregroundStyle(.secondary)
         } label: { Label(title, systemImage: symbol) }
     }
 

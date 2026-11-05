@@ -166,7 +166,7 @@ import SwiftUI
         }
     }
 
-    lazy var menuPanel = MenuPanel(content: MenuView(store: store, clipboard: clipboard, meeting: meeting, pomodoro: pomodoro) { [weak self] action in
+    lazy var menuPanel = MenuPanel(content: MenuView(store: store, meeting: meeting, pomodoro: pomodoro) { [weak self] action in
         self?.menuAction(action)
     })
 
@@ -177,31 +177,15 @@ import SwiftUI
     }
 
     private func menuAction(_ action: MenuAction) {
-        if case .copy(let c) = action {
-            clipboard.write(c, plain: false) // keep the panel open so you can see "Copied"
-            return
-        }
         menuPanel.close()
         switch action {
         case .apps: launcher.show(.apps)
-        case .clipboard: launcher.show(.clipboard)
         case .text: launcher.startScreenText()
-        case .dictate:
-            // Hands-free; press the dictation key (or Fn) again to finish.
-            dictation.startHandsFree()
         case .meeting:
             if !meeting.isRunning, meeting.phase != .summarizing { meeting.reset(); meeting.start() }
             showMeetingWindow()
-        case .focus: launcher.show(.pomodoro)
-        case .notes: launcher.show(.notes)
-        case .calculator: launcher.show(.calculator)
-        case .translate: launcher.show(.translate)
-        case .mixer: launcher.show(.mixer)
-        case .library: launcher.show(.library)
-        case .stats: showSettings(pane: .stats)
         case .settings: showSettings()
         case .quit: NSApp.terminate(nil)
-        case .copy: break
         }
     }
 
