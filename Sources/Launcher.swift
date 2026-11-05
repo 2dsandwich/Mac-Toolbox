@@ -22,7 +22,7 @@ enum Scope: Equatable {
         case .notes: "Notes"
         case .weather: "Weather"
         case .assistant: "Ask"
-        case .calendar: "Calendar"
+        case .calendar: "Google Calendar"
         case .tasks: "Tasks"
         case .dictation: "Dictation"
         }
@@ -64,7 +64,7 @@ enum Builtin: String, CaseIterable {
         case .clipboard: "Clipboard History"
         case .switcher: "Switch Apps"
         case .pomodoro: "Clock"
-        case .calendar: "Calendar View"
+        case .calendar: "Google Calendar"
         case .tasks: "Google Tasks"
         case .dictation: "Dictation History"
         case .calculator: "Calculator"
@@ -667,7 +667,7 @@ enum Metrics {
         case .clipboard: [s.clipboardKeyword.lowercased(), "clipboard", "history", "paste"]
         case .switcher: [s.switcherKeyword.lowercased(), "running", "switch"]
         case .pomodoro: ["clock", "clocks", "pomodoro", "pomo", "focus", "時計", "ポモドーロ", "集中"]
-        case .calendar: ["calendar", "cal", "予定", "カレンダー"]
+        case .calendar: ["calendar", "cal", "gcal", "予定", "カレンダー"]
         case .tasks: ["tasks", "task", "todo", "to-do", "todos", "google tasks", "タスク", "やること"]
         case .dictation: ["dictation", "dictations", "dictate", "transcribe", "transcript", "音声入力", "文字起こし"]
         case .calculator: ["calc", "calculator", "keypad", "電卓", "計算機"]

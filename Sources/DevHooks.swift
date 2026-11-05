@@ -889,19 +889,29 @@ extension AppDelegate {
                     if args.contains("--edit"), let t = b.selectedTask { b.startEditing(t, self.launcher.model) }
                 }
             }
+            var calendarFocus: () -> Void = {}
             if scope == .calendar {
                 let board = CalendarBoard.shared
                 if let span = value("--span").flatMap(CalendarSpan.init(rawValue:)) { board.span = span }
-                // --focus event: ↩ opens the next event; --focus day: today's "+N more".
+                // --focus event: the next event's chip, as if clicked; --focus day: a "+N more".
                 if let f = value("--focus") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        if f == "day" {
-                            board.open(.day(board.anchor), from: board.frames.first { $0.key.hasPrefix("more") }?.value ?? .zero)
+                    calendarFocus = {
+                        if f == "day", let more = board.frames.filter({ $0.key.contains("more") }).min(by: { $0.value.minY < $1.value.minY }) {
+                            board.open(.day(Date(timeIntervalSince1970: Double(more.key.drop { !$0.isNumber })!)), from: more.value)
                         } else {
-                            _ = board.handle(#selector(NSResponder.insertNewline(_:)), typing: false)
+                            // The next timed event whose chip is in view.
+                            let shown = CGRect(origin: .zero, size: board.area)
+                            for e in board.events.filter({ $0.end > Date() && !$0.allDay }).sorted(by: { $0.start < $1.start }) {
+                                guard let chip = board.frames.first(where: { ($0.key.hasSuffix(e.key) || $0.key.contains("m\(e.key)")) && shown.contains($0.value) })
+                                else { continue }
+                                board.open(.event(e), from: chip.value, tint: e.fill)
+                                break
+                            }
                         }
                     }
+                    if !args.contains("--frames") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: calendarFocus) }
                 }
+                if args.contains("--frames") { calendarFrames(open: calendarFocus, to: args[i + 1]) }
             }
             if scope == .dictation {
                 // Made-up dictations only (--raw: the original words, --job: a file being transcribed, --setup: what's missing,
@@ -1050,6 +1060,44 @@ extension AppDelegate {
         w.contentView = hv
         w.orderFrontRegardless()
         return (w, hv)
+    }
+
+    /// The chip growing into its card (`<path>-open.png`) and shrinking back (`<path>-close.png`), every 40 ms, in an off-screen
+    /// window of the calendar panel alone (the launcher's snapshot window stops redrawing after its first capture). A capture takes
+    /// longer than 40 ms, so each frame is its own run: open (or open fully, then close), wait that long, capture, reset.
+    func calendarFrames(open: @escaping () -> Void, to path: String) -> Never {
+        let s = store.settings, board = CalendarBoard.shared
+        let size = NSSize(width: CGFloat(s.width), height: CalendarPanel.height)
+        let root = CalendarPanel(board: board, query: "", radius: CGFloat(s.scopedCornerRadius))
+            .frame(width: size.width, height: size.height).background(Color(white: 0.1)).environment(\.colorScheme, .dark)
+        let hv = NSHostingView(rootView: root)
+        let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.contentView = hv
+        w.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        let base = path.replacingOccurrences(of: ".png", with: "")
+        for name in ["open", "close"] {
+            var frames: [(String, NSBitmapImageRep)] = []
+            for ms in stride(from: 0.0, through: name == "open" ? 480 : 320, by: 40) {
+                open()
+                if name == "close" {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+                    board.close()
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(ms / 1000))
+                if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) { hv.cacheDisplay(in: hv.bounds, to: rep); frames.append(("\(Int(ms)) ms", rep)) }
+                // Back to the bare grid at once.
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { board.appear() }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            }
+            try? Self.contactSheet(frames, columns: 4).flatMap { $0.representation(using: .png, properties: [:]) }?
+                .write(to: URL(fileURLWithPath: "\(base)-\(name).png"))
+        }
+        w.orderOut(nil)
+        exit(0)
     }
 
     /// Frames side by side, each with its label, at half size.

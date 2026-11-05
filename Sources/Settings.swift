@@ -92,7 +92,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .text: "Text from screen"
         case .meeting: "Meetings"
         case .clock: "Clock"
-        case .calendar: "Calendar"
+        case .calendar: "Google Calendar"
         case .tasks: "Tasks"
         case .dictation: "Dictation"
         case .notes: "Sticky notes"

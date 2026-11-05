@@ -45,6 +45,9 @@ extension CalendarEvent {
             : "\(longDate(start)) \(clock(start)) – \(longDate(end)) \(clock(end))"
     }
 
+    /// A chip's fill: the calendar colour for all-day events, a wash of it for the rest.
+    var fill: Color { allDay ? Color(nsColor: color) : Color(nsColor: color).opacity(0.25) }
+
     /// Dark text on light calendar colours, white on the rest.
     var ink: Color {
         guard let c = color.usingColorSpace(.sRGB) else { return .white }
@@ -69,9 +72,10 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
     var anchor = day(Date())
     private(set) var byDay: [Date: [CalendarEvent]] = [:]
     private(set) var events: [CalendarEvent] = []
-    /// What's open over the grid, the chip it grew from, and whether it's at full size.
+    /// What's open over the grid, the chip it grew from (and its fill), and whether it's at full size.
     private(set) var focus: Focus?
     private(set) var from = CGRect.zero
+    private(set) var tint = Color.clear
     private(set) var expanded = false
     var measured: CGFloat?
     /// The new period slides in from the side it came from.
@@ -205,11 +209,12 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
 
     // MARK: Focus
 
-    func open(_ f: Focus, from rect: CGRect) {
+    func open(_ f: Focus, from rect: CGRect, tint: Color = .clear) {
         leaving = false
         measured = nil
         expanded = false
         from = rect
+        self.tint = tint
         focus = f
     }
 
@@ -223,7 +228,8 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
     func close() {
         guard focus != nil, !leaving else { return }
         leaving = true
-        withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: 0.22)) {
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        withAnimation(reduce ? nil : .timingCurve(0.65, 0, 0.35, 1, duration: 0.22)) {
             expanded = false
         } completion: {
             guard self.leaving else { return }
@@ -235,7 +241,10 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
     private func openNext() {
         let now = Date()
         guard let next = events.filter({ $0.end > now }).min(by: { $0.start < $1.start }) else { return }
-        open(.event(next), from: CGRect(x: area.width / 2 - 20, y: area.height / 2 - 10, width: 40, height: 20))
+        // From its chip when this span shows one, else from the middle.
+        let marks = span == .month ? ["m"] : ["b", "a"]
+        let chip = frames.first { f in marks.contains { f.key.hasPrefix($0 + next.key) } }?.value
+        open(.event(next), from: chip ?? CGRect(x: area.width / 2 - 20, y: area.height / 2 - 10, width: 40, height: 20), tint: next.fill)
     }
 
     /// The bar's keys: ↩ opens the next event (or joins / shows the open one), Esc closes it, Page Up/Down and ←→ move,
@@ -433,7 +442,7 @@ private struct DayCell: View {
         VStack(alignment: .leading, spacing: 2) {
             DayBadge(date: date)
             ForEach(items.prefix(shown), id: \.key) { e in
-                Chip(event: e, lines: lines, key: "m\(e.key)\(date.timeIntervalSince1970)", board: board) { board.open(.event(e), from: $0) }
+                Chip(event: e, lines: lines, key: "m\(e.key)\(date.timeIntervalSince1970)", board: board) { board.open(.event(e), from: $0, tint: e.fill) }
             }
             if items.count > shown {
                 More(count: items.count - shown, key: "more\(date.timeIntervalSince1970)", board: board) { board.open(.day(date), from: $0) }
@@ -478,7 +487,7 @@ private struct Chip: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 1.75)
             .frame(minHeight: 16)
-            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(event.allDay ? color : color.opacity(0.25)))
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(event.fill))
             .contentShape(Rectangle())
             .modifier(Tracked(key: key, board: board))
         }
@@ -584,7 +593,7 @@ private struct CalendarTimeline: View {
                 ForEach(columns, id: \.day) { c in
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(c.allDay.prefix(2), id: \.key) { e in
-                            Chip(event: e, lines: 1, key: "a\(e.key)\(c.day.timeIntervalSince1970)", board: board) { board.open(.event(e), from: $0) }
+                            Chip(event: e, lines: 1, key: "a\(e.key)\(c.day.timeIntervalSince1970)", board: board) { board.open(.event(e), from: $0, tint: e.fill) }
                         }
                         if c.allDay.count > 2 {
                             More(count: c.allDay.count - 2, key: "amore\(c.day.timeIntervalSince1970)", board: board) { board.open(.day(c.day), from: $0) }
@@ -653,7 +662,7 @@ private struct EventBlock: View {
         let e = block.event
         let color = Color(nsColor: e.color)
         let compact = block.height < 13 * 2 + 4
-        Button { board.open(.event(e), from: board.frames["b\(block.id)"] ?? .zero) } label: {
+        Button { board.open(.event(e), from: board.frames["b\(block.id)"] ?? .zero, tint: e.fill) } label: {
             VStack(alignment: .leading, spacing: 0) {
                 if compact {
                     Text("\(Text(e.title).font(.system(size: 10.5, weight: .semibold))) \(Text(clock(e.start)).font(.system(size: 10)).foregroundStyle(.secondary))")
@@ -670,7 +679,7 @@ private struct EventBlock: View {
             .background(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 1.5).fill(color).frame(width: 3).padding(.vertical, 2.5).padding(.leading, 2.5)
             }
-            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(color.opacity(0.25)))
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(e.fill))
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .contentShape(Rectangle())
             .modifier(Tracked(key: "b\(block.id)", board: board))
@@ -692,39 +701,16 @@ private struct FocusCard: View {
         let width = min(380, area.width - 24)
         let height = min(board.measured ?? area.height, area.height - 24)
         let to = CGRect(x: (area.width - width) / 2, y: max(12, (area.height - height) / 2), width: width, height: height)
-        let rect = board.expanded ? to : board.from
-        let open = board.expanded
-        ZStack(alignment: .topLeading) {
-            VStack(spacing: 0) {
-                LinearGradient(colors: [.clear, .black.opacity(0.5)], startPoint: .top, endPoint: .bottom).frame(height: 56)
-                Color.black.opacity(0.5)
+        FocusMorph(progress: board.expanded ? 1 : 0, from: board.from, to: to, area: area, tint: board.tint, radius: radius, close: board.close) {
+            ScrollView(.vertical, showsIndicators: false) {
+                detail
+                    .frame(width: width, alignment: .topLeading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                        board.measured = h
+                        board.grow()
+                    }
             }
-            .contentShape(Rectangle())
-            .onTapGesture { board.close() }
-            .opacity(open ? 1 : 0)
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255))
-                    .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.13), lineWidth: 0.5))
-                    .opacity(open ? 1 : 0)
-                    .animation(open ? .easeOut(duration: 0.07) : .easeIn(duration: 0.07).delay(0.15), value: open)
-                ScrollView(.vertical, showsIndicators: false) {
-                    detail
-                        .frame(width: width, alignment: .topLeading)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                            board.measured = h
-                            board.grow()
-                        }
-                }
-                .frame(width: width, height: height)
-                .opacity(open ? 1 : 0)
-                .animation(open ? .easeOut(duration: 0.12).delay(0.1) : .linear(duration: 0.08), value: open)
-            }
-            .frame(width: max(1, rect.width), height: max(1, rect.height), alignment: .topLeading)
-            .clipShape(RoundedRectangle(cornerRadius: open ? radius : 4, style: .continuous))
-            .offset(x: rect.minX, y: rect.minY)
         }
-        .frame(width: area.width, height: area.height, alignment: .topLeading)
     }
 
     @ViewBuilder private var detail: some View {
@@ -733,6 +719,54 @@ private struct FocusCard: View {
         case .day(let d)?: DayDetail(date: d, items: board.byDay[d] ?? [], radius: radius, board: board)
         case nil: EmptyView()
         }
+    }
+}
+
+/// Moneybag's FocusMorph: one progress (0 = the chip, 1 = the card) drives the shape's place, size and corners, the chip's
+/// colour giving way to the card's surface, the content fading in late, and the dim behind. Being one animatable value, every
+/// part rides the same curve (the spring in, the ease out).
+private struct FocusMorph<Content: View>: View, Animatable {
+    var progress: CGFloat
+    let from: CGRect
+    let to: CGRect
+    let area: CGSize
+    let tint: Color
+    let radius: CGFloat
+    let close: () -> Void
+    @ViewBuilder let content: Content
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    private func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * progress }
+    private func ramp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { min(max((progress - a) / (b - a), 0), 1) }
+
+    var body: some View {
+        let solid = ramp(0, 0.3) // the surface is fully there by 30% (SURFACE_SOLID_AT)
+        let shape = RoundedRectangle(cornerRadius: 4 + (radius - 4) * solid, style: .continuous)
+        let width = max(1, lerp(from.width, to.width)), height = max(1, lerp(from.height, to.height))
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black.opacity(0.5)], startPoint: .top, endPoint: .bottom).frame(height: 56)
+                Color.black.opacity(0.5)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: close)
+            .opacity(ramp(0, 1))
+            Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255).opacity(solid)
+                // The chip's own fill, which comes in over the chip (so it doesn't double up at rest) and gives way to the surface.
+                .overlay(tint.opacity(ramp(0, 0.08) * (1 - ramp(0.08, 0.45))))
+                .overlay(shape.strokeBorder(Color.white.opacity(0.13 * solid), lineWidth: 0.5))
+                .frame(width: width, height: height)
+                .overlay(alignment: .topLeading) {
+                    content.frame(width: to.width, height: to.height).opacity(ramp(0.55, 1))
+                }
+                .clipShape(shape)
+                .offset(x: lerp(from.minX, to.minX), y: lerp(from.minY, to.minY))
+        }
+        .frame(width: area.width, height: area.height, alignment: .topLeading)
     }
 }
 
@@ -794,7 +828,7 @@ private struct DayDetail: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(longDate(date)).font(.system(size: 15, weight: .semibold)).padding(.horizontal, 8).padding(.bottom, 6) // the rows' colour bars start here
             ForEach(items, id: \.key) { e in
-                Button { board.open(.event(e), from: board.from) } label: {
+                Button { board.open(.event(e), from: board.from, tint: e.fill) } label: {
                     HStack(spacing: 10) {
                         RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: e.color)).frame(width: 3, height: 16)
                         Text(e.allDay ? "All day" : "\(clock(e.start)) – \(clock(e.end))").font(.system(size: 12)).foregroundStyle(.secondary)
