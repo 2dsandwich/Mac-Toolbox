@@ -76,6 +76,8 @@ struct LauncherRoot: View {
                         .transition(.opacity)
                 } else if model.scope == .tasks {
                     TasksPanel(board: TasksBoard.shared, radius: radius)
+                } else if model.scope == .dictation {
+                    DictationPanel(model: model, s: s, radius: radius)
                         .transition(.opacity)
                 } else if model.scope == .notes {
                     NoteBoardView(model: model, board: NoteBoard.shared, radius: radius)

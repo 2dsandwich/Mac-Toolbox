@@ -11,6 +11,8 @@ struct HotKey: Codable, Equatable, Hashable {
     static let dictationDefault = HotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey))
     static let commandDefault = HotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey | shiftKey))
     static let escape = HotKey(keyCode: UInt32(kVK_Escape), modifiers: 0)
+    static let pasteLastDefault = HotKey(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | cmdKey))
+    static let undoPolishDefault = HotKey(keyCode: UInt32(kVK_ANSI_Z), modifiers: UInt32(controlKey | cmdKey))
     static let clipboardDefault = HotKey(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | optionKey))
     static let switcherDefault = HotKey(keyCode: UInt32(kVK_Tab), modifiers: UInt32(optionKey))
 

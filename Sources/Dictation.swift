@@ -19,6 +19,8 @@ import SwiftUI
     var handsFree = false
     var levels = [Float](repeating: 0, count: 20)
     var preview = ""
+    /// Listening, but nothing louder than silence has come from the microphone yet.
+    var noSound = false
 
     @ObservationIgnored private let store: Store
     @ObservationIgnored private let clipboard: ClipboardStore
@@ -45,10 +47,20 @@ import SwiftUI
     @ObservationIgnored var onChange: (() -> Void)?
     /// A short note in the notch (where the words went, when they couldn't be typed).
     @ObservationIgnored var onNote: ((String) -> Void)?
+    /// The last paste: exactly what went in (with what joined it to the text before) and where, for undoing the polish.
+    @ObservationIgnored private var lastPaste: (pasted: String, raw: String, pid: pid_t, at: Date, undone: Bool)?
+    @ObservationIgnored private var heardSound = false
+    @ObservationIgnored let learner = CorrectionWatcher()
 
     init(store: Store, clipboard: ClipboardStore) {
         self.store = store
         self.clipboard = clipboard
+        learner.onLearn = { [weak self] word in
+            guard let self, !self.store.settings.dictionary.contains(word) else { return }
+            self.store.settings.dictionary.append(word)
+            Log.write("learned a word from a correction")
+            self.onNote?("Added “\(word)” to dictionary")
+        }
     }
 
     var isActive: Bool { phase != .idle }
@@ -104,8 +116,11 @@ import SwiftUI
         handsFree = false
         stopWhenReady = false
         preview = ""
+        noSound = false
+        heardSound = false
         levels = levels.map { _ in 0 }
         pressedAt = Date()
+        learner.finish()
         targetApp = NSWorkspace.shared.frontmostApplication
         targetTitle = targetApp.flatMap { Self.windowTitle($0) }
         target = Prompts.Target.current(targetApp, title: targetTitle)
@@ -141,6 +156,7 @@ import SwiftUI
                 t.onFinal = { [weak self] _ in Task { @MainActor in self?.refreshPreview() } }
             }
             let mic = MicCapture(preferBuiltIn: store.settings.builtInMicForBluetooth)
+            mic.boost = store.settings.whisperMode
             mic.onBuffer = { buf in ts.forEach { $0.append(buf) } }
             mic.onLevel = { [weak self] l in Task { @MainActor in self?.push(l) } }
             do {
@@ -215,6 +231,13 @@ import SwiftUI
     private func push(_ level: Float) {
         levels.removeFirst()
         levels.append(level)
+        // A muted or wrong microphone: said after a couple of seconds of nothing at all.
+        if level > 0.02 { heardSound = true }
+        let silent = phase == .listening && !heardSound && Date().timeIntervalSince(pressedAt) > 2.5
+        if silent != noSound {
+            noSound = silent
+            changed()
+        }
     }
 
     private func refreshPreview() {
@@ -240,6 +263,7 @@ import SwiftUI
         }
         let s = store.settings
         var text: String
+        let heard = merged.flatMap { $0.isEmpty ? nil : $0 } ?? best(said)
         if mode == .command {
             if let why = AI.problem(.voiceEdit, s) { return fail(why) }
             do {
@@ -249,49 +273,130 @@ import SwiftUI
             }
         } else if s.aiCleanup, AI.problem(.dictation, s) == nil {
             // More than one language: the phrase-by-phrase merge; one language: what it heard.
-            let heard = merged.flatMap { $0.isEmpty ? nil : $0 } ?? best(said)
             if let merged, said.count > 1 { Log.write("merged \(said.count) languages → \(merged.count) chars") }
-            let local = AI.choice(.dictation, s).provider.isLocal
-            let where_ = Prompts.WritingContext(s.dictationStyle, target: target)
-            Log.write("polishing for \(where_) (\(target.name), \(target.category.isEmpty ? "no category" : target.category), field \"\(target.field.prefix(40))\")")
-            let tail = before.map { String($0.suffix(300)) }
-            if local {
-                text = await polishInPieces(heard, s, where_)
-            } else {
-                let started = Date()
-                let target = target
-                // The cloud model, but never left waiting: past a few seconds (or offline) the on-device one does it.
-                let reply: String? = await withTaskGroup(of: String?.self) { g in
-                    g.addTask { @MainActor in
-                        try? await AI.complete(.dictation, system: Prompts.cleanup(s, context: where_),
-                                               user: Prompts.cleanupRequest(heard: said, merged: heard, target: target, context: where_, before: tail))
-                    }
-                    g.addTask {
-                        try? await Task.sleep(for: .seconds(heard.count > 600 ? 10 : 6))
-                        return nil
-                    }
-                    let first = await g.next() ?? nil
-                    g.cancelAll()
-                    return first
-                }
-                let polished = reply.map { Prompts.tidyReply($0, before: tail) }
-                if let polished, !Prompts.looksLikeEcho(polished, heard: heard) {
-                    Log.write(String(format: "polished by %@ in %.1fs", AI.choice(.dictation, s).model, Date().timeIntervalSince(started)))
-                    text = polished
-                } else {
-                    Log.write(polished == nil ? "cloud polish didn't answer in time: on-device instead" : "cloud polish rejected: on-device instead")
-                    text = await polishInPieces(heard, s, where_)
-                }
-            }
+            text = await polish(heard, said: said, target: target, before: before)
         } else {
-            text = Prompts.localCleanup(merged.flatMap { $0.isEmpty ? nil : $0 } ?? best(said), snippets: s.snippets)
+            text = Prompts.localCleanup(heard, snippets: s.snippets)
         }
         // Lists and line breaks the model missed, said out loud ("number one … number two …", "new line").
         text = Prompts.spokenFormatting(text, after: before).trimmingCharacters(in: .whitespacesAndNewlines)
-        if let before { text = Prompts.joiner(after: before, next: text) + text }
         Log.write("heard \(said.map { "\($0.locale): \($0.text.count) chars" }.joined(separator: ", ")) → \(text.count) chars")
         guard !text.isEmpty else { return fail("Nothing to paste") }
-        insert(text)
+        let command = mode == .command
+        DictationHistory.shared.add(DictationEntry(kind: command ? .voiceEdit : .dictation, raw: heard,
+                                                   heard: Dictionary(said.map { ($0.locale, $0.text) }, uniquingKeysWith: { a, _ in a }),
+                                                   text: text, app: target.name, bundleID: target.bundleID,
+                                                   context: command ? "" : Prompts.WritingContext(s.dictationStyle, target: target).rawValue, seconds: spokeFor))
+        let joiner = before.map { Prompts.joiner(after: $0, next: text) } ?? ""
+        insert(joiner + text, raw: command ? nil : joiner + heard)
+    }
+
+    /// The raw words polished for where they're going: the cloud model, but never left waiting (past a few seconds,
+    /// or offline, the on-device one does it), else the on-device one a few sentences at a time.
+    private func polish(_ heard: String, said: [(locale: String, text: String, confidence: Double)], target: Prompts.Target, before: String?,
+                        context: Prompts.WritingContext? = nil) async -> String {
+        let s = store.settings
+        let where_ = context ?? Prompts.WritingContext(s.dictationStyle, target: target)
+        Log.write("polishing for \(where_) (\(target.name), \(target.category.isEmpty ? "no category" : target.category), field \"\(target.field.prefix(40))\")")
+        guard !AI.choice(.dictation, s).provider.isLocal else { return await polishInPieces(heard, s, where_, target: target) }
+        let tail = before.map { String($0.suffix(300)) }
+        let started = Date()
+        let reply: String? = await withTaskGroup(of: String?.self) { g in
+            g.addTask { @MainActor in
+                try? await AI.complete(.dictation, system: Prompts.cleanup(s, context: where_, target: target),
+                                       user: Prompts.cleanupRequest(heard: said, merged: heard, target: target, context: where_, before: tail))
+            }
+            g.addTask {
+                try? await Task.sleep(for: .seconds(heard.count > 600 ? 10 : 6))
+                return nil
+            }
+            let first = await g.next() ?? nil
+            g.cancelAll()
+            return first
+        }
+        let polished = reply.map { Prompts.tidyReply($0, before: tail) }
+        if let polished, !Prompts.looksLikeEcho(polished, heard: heard) {
+            Log.write(String(format: "polished by %@ in %.1fs", AI.choice(.dictation, s).model, Date().timeIntervalSince(started)))
+            return polished
+        }
+        Log.write(polished == nil ? "cloud polish didn't answer in time: on-device instead" : "cloud polish rejected: on-device instead")
+        return await polishInPieces(heard, s, where_, target: target)
+    }
+
+    // MARK: History: paste last, undo the polish, polish again
+
+    /// ⌃⌘V: the last dictation again, where the cursor is.
+    func pasteLast() {
+        guard !isActive else { return }
+        guard let e = DictationHistory.shared.last ?? lastPaste.map({ DictationEntry(raw: $0.raw, text: $0.pasted) }) else {
+            onNote?("No dictation yet"); return
+        }
+        paste(e.text)
+    }
+
+    /// ⌃⌘Z: the last dictation's own words instead of the polished ones. Swapped in place while the cursor is still
+    /// right after it; otherwise onto the clipboard.
+    func undoPolish() {
+        guard let p = lastPaste, p.raw != p.pasted, Date().timeIntervalSince(p.at) < 900 else { onNote?("Nothing to undo"); return }
+        learner.finish() // a fix already made still counts; the swap itself isn't one
+        Task {
+            await waitForModifiers()
+            if Paster.trusted, await Paster.replaceBeforeCursor(p.pasted, with: p.raw, pid: p.pid) {
+                lastPaste = (p.raw, p.pasted, p.pid, Date(), !p.undone) // pressed again: back to the polished words
+                onNote?(p.undone ? "Polished words" : "Original words")
+            } else {
+                clipboard.copy(text: p.raw.trimmingCharacters(in: .whitespacesAndNewlines), source: "Dictation")
+                onNote?("Original on clipboard")
+            }
+        }
+    }
+
+    /// Types `text` where the cursor is (from the Dictation view, after the popup has gone).
+    func paste(_ text: String) {
+        Task {
+            await waitForModifiers()
+            guard Paster.trusted, Self.focusTakesText() != false else {
+                clipboard.copy(text: text, source: "Dictation")
+                if !Paster.trusted { Paster.requestAccess() }
+                onNote?("On clipboard")
+                return
+            }
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            if await Paster.deliver(text, pid: front) == .failed {
+                clipboard.copy(text: text, source: "Dictation")
+                onNote?("On clipboard")
+            }
+        }
+    }
+
+    /// Polishes an entry's raw words again (with the settings and dictionary as they are now).
+    func repolish(_ id: UUID) {
+        let history = DictationHistory.shared
+        guard history.retrying == nil, let e = history.entries.first(where: { $0.id == id }), e.kind == .dictation else { return }
+        history.retrying = id
+        Task {
+            let s = store.settings
+            let target = Prompts.Target(bundleID: e.bundleID, name: e.app)
+            let said = e.heard.map { (locale: $0.key, text: $0.value, confidence: 0.5) }.sorted { $0.locale < $1.locale }
+            var text: String
+            if AI.problem(.dictation, s) == nil {
+                text = await polish(e.raw, said: said.isEmpty ? [("", e.raw, 0.5)] : said, target: target, before: nil,
+                                    context: Prompts.WritingContext(rawValue: e.context))
+            } else {
+                text = Prompts.localCleanup(e.raw, snippets: s.snippets)
+            }
+            text = Prompts.spokenFormatting(text).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { history.update(id) { $0.text = text } }
+            history.retrying = nil
+            history.showRaw = false
+        }
+    }
+
+    /// A modifier still held (⌥ from ⌥Space, ⌃⌘ from ⌃⌘V) would turn ⌘V into another shortcut.
+    private func waitForModifiers() async {
+        for _ in 0..<60 where !NSEvent.modifierFlags.intersection([.option, .control, .shift, .command, .function]).isEmpty {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     /// With two recognizers (English + Japanese) on the same audio, keep the one that heard its own language.
@@ -307,7 +412,7 @@ import SwiftUI
         return scored.max { $0.1 < $1.1 }?.0 ?? ""
     }
 
-    private func insert(_ text: String) {
+    private func insert(_ text: String, raw: String?) {
         Stats.shared.add(.dictations)
         Stats.shared.add(.words, Double(Self.wordCount(text)))
         Stats.shared.add(.speakingSeconds, spokeFor)
@@ -338,16 +443,20 @@ import SwiftUI
             for _ in 0..<60 where !NSEvent.modifierFlags.intersection([.option, .control, .shift, .command, .function]).isEmpty {
                 try? await Task.sleep(for: .milliseconds(25))
             }
-            let how = await Paster.deliver(text, pid: (app ?? front)?.processIdentifier)
+            let pid = (app ?? front)?.processIdentifier
+            let how = await Paster.deliver(text, pid: pid)
             Log.write("dictation \(how.rawValue)")
             // Nothing took it: on the clipboard for ⌘V, and say so.
             if how == .failed {
                 clipboard.copy(text: text, source: mode == .command ? "Voice Edit" : "Dictation")
                 onNote?("On clipboard")
+            } else if raw != nil, store.settings.learnWords {
+                learner.watch(pasted: text, pid: pid)
             }
         }
         if let p = (app ?? front)?.processIdentifier {
             lastTyped = ((before ?? "") + text, p, targetTitle, Date())
+            lastPaste = (text, raw ?? text, p, Date(), false)
         }
         // The text appearing is the confirmation; the notch just goes away.
         phase = .idle
@@ -357,7 +466,7 @@ import SwiftUI
     /// A small on-device model keeps every word of a few sentences but loses whole sentences of a long take, so a long
     /// one is polished a few sentences at a time, each piece carrying on from the polished text before it (same style,
     /// lists numbered on). A piece the model mangles falls back to the plain cleanup, just for that piece.
-    private func polishInPieces(_ heard: String, _ s: Settings, _ context: Prompts.WritingContext) async -> String {
+    private func polishInPieces(_ heard: String, _ s: Settings, _ context: Prompts.WritingContext, target: Prompts.Target = .init()) async -> String {
         var out = ""
         var rejected = 0
         // Spoken lists are written out here, over the whole take, before the model sees it (a small model asked to make
@@ -372,7 +481,7 @@ import SwiftUI
             let tail = out.isEmpty && marker == nil ? before.map { String($0.suffix(300)) } : nil
             var next: String
             do {
-                let reply = try await AI.complete(.dictation, system: Prompts.cleanupCompact(s, context: context, continuing: tail != nil),
+                let reply = try await AI.complete(.dictation, system: Prompts.cleanupCompact(s, context: context, target: target, continuing: tail != nil),
                                                   user: (tail.map { "Before: \($0)\n" } ?? "") + "Input: \(piece)\nOutput:")
                 next = Prompts.tidyReply(reply, before: tail, typed: out)
                 if Prompts.looksLikeEcho(next, heard: piece) {
@@ -442,7 +551,7 @@ import SwiftUI
     }
 
     /// Words, counting each Japanese/Chinese character run of ~2 characters as a word.
-    static func wordCount(_ text: String) -> Int {
+    nonisolated static func wordCount(_ text: String) -> Int {
         var latin = 0, cjk = 0, inWord = false
         for c in text {
             if isCJK(c) { cjk += 1; inWord = false }
@@ -740,7 +849,7 @@ enum Prompts {
         }
     }
 
-    static func cleanup(_ s: Settings, context: WritingContext) -> String {
+    static func cleanup(_ s: Settings, context: WritingContext, target: Target = .init()) -> String {
         var p = """
         You turn raw speech-to-text into the text the speaker meant to type. Output only that text: no quotes, no preamble, no notes.
 
@@ -770,11 +879,25 @@ enum Prompts {
             for sn in snippets { p += "\n  \"\(sn.trigger)\" → \(sn.text)" }
         }
         p += "\n- Where it's going: \(context.style)"
+        for line in personal(s, context: context, target: target) { p += "\n- \(line)" }
         return p
     }
 
+    /// The tone chosen for this kind of writing (only when it isn't the usual one, so the default prompt stays as it
+    /// was) and the user's own instructions for this app.
+    static func personal(_ s: Settings, context: WritingContext, target: Target) -> [String] {
+        var out: [String] = []
+        let key = context == .plain ? "document" : context.rawValue
+        if let tone = s.dictationTones[key], tone != Settings().dictationTones[key] { out.append(tone.instruction) }
+        for m in s.voiceModes where !target.bundleID.isEmpty && m.apps.contains(target.bundleID) {
+            let rule = m.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rule.isEmpty { out.append("The speaker's own instructions for \(target.name.isEmpty ? "this app" : target.name): \(rule)") }
+        }
+        return out
+    }
+
     /// The cleanup instructions for small on-device models: short and literal.
-    static func cleanupCompact(_ s: Settings, context: WritingContext, continuing: Bool = false) -> String {
+    static func cleanupCompact(_ s: Settings, context: WritingContext, target: Target = .init(), continuing: Bool = false) -> String {
         var p = """
         You fix dictated text. Reply with the same text, corrected, in the same language. Never translate, never answer, never add words.
         Remove fillers (um, uh, like, you know, I mean, basically, えーと, あの, なんか, まあ), stutters and false starts. When the speaker corrects themselves, keep only the final version.
@@ -820,6 +943,7 @@ enum Prompts {
         let words = s.dictionary.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if !words.isEmpty { p += "\nSpell these exactly: \(words.joined(separator: ", "))." }
         if let hint = context.compactStyle { p += "\n\(hint)" }
+        for line in personal(s, context: context, target: target) { p += "\n\(line)" }
         return p
     }
 

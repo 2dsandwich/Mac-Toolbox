@@ -248,6 +248,11 @@ struct TimedWord: Sendable {
 enum SpeechMerge {
     static func merge(_ takes: [(locale: String, words: [TimedWord])]) -> String? {
         guard takes.count > 1, takes.contains(where: { !$0.words.isEmpty }) else { return nil }
+        return joinSegments(phrases(takes).map(\.text))
+    }
+
+    /// The phrases kept, in order, with when they were said (one language: its own phrases).
+    static func phrases(_ takes: [(locale: String, words: [TimedWord])]) -> [DictationEntry.Line] {
         let languages = takes.map { language($0.locale) }
         struct Phrase { var take: Int; var start: Double; var end: Double; var text: String; var score: Double }
         // Each language's words, grouped into phrases at its own pauses. A token said over seconds (a recognizer
@@ -293,7 +298,7 @@ enum SpeechMerge {
             }
             if !clash { kept.append(p) }
         }
-        return joinSegments(kept.sorted { $0.start < $1.start }.map(\.text))
+        return kept.sorted { $0.start < $1.start }.map { DictationEntry.Line(start: $0.start, end: $0.end, text: $0.text) }
     }
 
     private static func language(_ locale: String) -> NLLanguage {
@@ -353,6 +358,9 @@ final class MicCapture: @unchecked Sendable {
     var onLevel: ((Float) -> Void)?
     private(set) var buffers = 0
     private(set) var peak: Float = 0
+    /// Whisper mode: a quiet voice is brought up to a normal speaking level before recognition.
+    var boost = false
+    private var gain: Float = 1
 
     /// `preferBuiltIn`: when the default microphone is Bluetooth (AirPods…), use the Mac's own instead.
     /// Bluetooth headsets drop to call quality and go silent for a moment while switching, which loses words.
@@ -402,11 +410,12 @@ final class MicCapture: @unchecked Sendable {
             if frames > 0, let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames), let ch = pcm.floatChannelData?[0] {
                 pcm.frameLength = frames
                 memcpy(ch, buffer.pointee.mAudioData, bytes)
-                self.onBuffer?(pcm)
-                self.buffers += 1
                 var sum: Float = 0
                 for i in 0..<Int(frames) { sum += ch[i] * ch[i] }
-                let rms = sqrt(sum / Float(max(Int(frames), 1)))
+                var rms = sqrt(sum / Float(max(Int(frames), 1)))
+                if self.boost { rms = self.amplify(ch, frames: Int(frames), rms: rms) }
+                self.onBuffer?(pcm)
+                self.buffers += 1
                 self.peak = max(self.peak, rms)
                 self.onLevel?(min(1, max(0, (20 * log10(max(rms, 1e-6)) + 55) / 45)))
             }
@@ -434,6 +443,15 @@ final class MicCapture: @unchecked Sendable {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
         Log.write("mic format: \(format)")
+    }
+
+    /// Raises quiet speech toward a normal level (up to 10×, eased so it doesn't pump), leaving room noise alone.
+    /// Returns the new level.
+    func amplify(_ samples: UnsafeMutablePointer<Float>, frames: Int, rms: Float) -> Float {
+        if rms > 0.002 { gain += (min(10, max(1, 0.06 / rms)) - gain) * 0.25 }
+        guard gain > 1.01 else { return rms }
+        for i in 0..<frames { samples[i] = max(-1, min(1, samples[i] * gain)) }
+        return min(1, rms * gain)
     }
 
     func stop() {

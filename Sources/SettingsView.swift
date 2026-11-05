@@ -634,6 +634,8 @@ private struct DictationPane: View {
                 Toggle("Hold Fn (🌐) to dictate, Fn + Control to edit by voice", isOn: $store.settings.fnDictation)
                 LabeledContent("Dictate") { HotKeyField(hotKey: $store.settings.dictationHotKey).frame(width: 150, height: 26) }
                 LabeledContent("Edit by voice") { HotKeyField(hotKey: $store.settings.commandHotKey).frame(width: 150, height: 26) }
+                LabeledContent("Paste last dictation") { HotKeyField(hotKey: $store.settings.pasteLastHotKey).frame(width: 150, height: 26) }
+                LabeledContent("Undo polish") { HotKeyField(hotKey: $store.settings.undoPolishHotKey).frame(width: 150, height: 26) }
             } footer: {
                 Text("For Fn, set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”. Hold the key and talk, then let go: the text appears where your cursor is. Tap it (once or twice) to keep listening hands-free, and tap again to finish. Esc cancels. “Edit by voice” works on the selected text: select something, hold the key, and say what to do (“make this more polite”, “translate to English”). With nothing selected it writes what you ask for.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -672,22 +674,39 @@ private struct DictationPane: View {
                     ForEach(DictationStyle.allCases) { Text($0.title).tag($0) }
                 }
                 Toggle("Show words while you speak", isOn: $store.settings.livePreview)
+                Toggle("Whisper mode (raise a quiet voice)", isOn: $store.settings.whisperMode)
                 Toggle("Use the Mac's microphone when AirPods or another Bluetooth mic is the default", isOn: $store.settings.builtInMicForBluetooth)
                 Toggle("Mute the Mac’s sound while dictating (not during meetings)", isOn: $store.settings.muteWhileDictating)
                 Toggle("Start and stop sounds", isOn: $store.settings.dictationSounds)
                 Toggle("Keep dictations in clipboard history", isOn: $store.settings.saveDictations)
+                Toggle("Keep a dictation history with the original words", isOn: $store.settings.keepDictationHistory)
             } header: {
                 Text("Polish")
             } footer: {
                 Text("The AI (Settings › AI; on this Mac by default) removes “um”s and false starts, keeps only what you meant when you correct yourself, fixes punctuation (、。 in Japanese) and writes lists, numbers and emails properly. “Match the app” is casual in chat apps, formal in mail, exact in code editors. With it off, MONEY! still removes fillers on its own.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if store.settings.dictationStyle == .auto {
+                Section("Styles") {
+                    ForEach([("email", "Email"), ("chat", "Messages"), ("document", "Notes and other"), ("prompt", "AI prompts")], id: \.0) { key, title in
+                        Picker(title, selection: Binding(get: { store.settings.dictationTones[key] ?? .formal },
+                                                         set: { store.settings.dictationTones[key] = $0 })) {
+                            ForEach(DictationTone.allCases) { Text($0.title).tag($0) }
+                        }
+                    }
+                }
+            }
+            VoiceModesSection(store: store)
             Section {
+                Toggle("Learn words you correct after a dictation", isOn: $store.settings.learnWords)
                 ForEach(store.settings.dictionary, id: \.self) { w in
                     HStack {
                         Text(w)
                         Spacer()
-                        Button { store.settings.dictionary.removeAll { $0 == w } } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain)
+                        Button {
+                            store.settings.dictionary.removeAll { $0 == w }
+                            if !store.settings.dictionaryIgnored.contains(w) { store.settings.dictionaryIgnored.append(w) }
+                        } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain)
                     }
                 }
                 HStack {
@@ -755,11 +774,60 @@ private struct DictationPane: View {
         let w = newWord.trimmingCharacters(in: .whitespaces)
         guard !w.isEmpty, !store.settings.dictionary.contains(w) else { return }
         store.settings.dictionary.append(w)
+        store.settings.dictionaryIgnored.removeAll { $0 == w }
         newWord = ""
     }
 
     private func open(_ anchor: String) {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!)
+    }
+}
+
+/// Your own polish instructions for some apps ("always British spelling", "bullet points") on top of the usual rules.
+private struct VoiceModesSection: View {
+    @Bindable var store: Store
+
+    var body: some View {
+        Section("Instructions for apps") {
+            ForEach($store.settings.voiceModes) { $m in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        ForEach(m.apps, id: \.self) { id in
+                            HStack(spacing: 4) {
+                                if let img = IconCache.icon(forBundleID: id) { Image(nsImage: img).resizable().frame(width: 16, height: 16) }
+                                Text(Self.name(id)).lineLimit(1)
+                                Button { m.apps.removeAll { $0 == id } } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
+                                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 8).frame(height: 24)
+                            .background(Capsule().fill(Color.primary.opacity(0.08)))
+                        }
+                        Menu {
+                            ForEach(Self.runningApps.filter { !m.apps.contains($0.id) }, id: \.id) { app in
+                                Button(app.name) { m.apps.append(app.id) }
+                            }
+                        } label: { Image(systemName: "plus") }
+                            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        Spacer()
+                        Button { store.settings.voiceModes.removeAll { $0.id == m.id } } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain)
+                    }
+                    TextField("Instructions", text: $m.instructions, axis: .vertical).lineLimit(1...4)
+                }
+                .padding(.vertical, 4)
+            }
+            Button("Add Instructions") { store.settings.voiceModes.append(VoiceMode()) }
+        }
+    }
+
+    private static var runningApps: [(id: String, name: String)] {
+        NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .compactMap { a in a.bundleIdentifier.map { ($0, a.localizedName ?? $0) } }
+            .sorted { $0.name < $1.name }
+    }
+
+    private static func name(_ id: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return id }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
     }
 }
 

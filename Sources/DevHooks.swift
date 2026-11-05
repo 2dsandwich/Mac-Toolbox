@@ -91,6 +91,24 @@ extension AppDelegate {
             }
             return true
         }
+        if let i = args.firstIndex(of: "--transcribe-media"), i + 1 < args.count {
+            // The Dictation view's file transcription: any audio or video file → text and subtitles, every installed
+            // dictation language at once (or the locales given after the path).
+            let path = args[i + 1], given = args.dropFirst(i + 2).filter { !$0.hasPrefix("-") }
+            Task {
+                let start = Date()
+                do {
+                    let r = try await FileTranscriber.transcribe(URL(fileURLWithPath: path), locales: given.isEmpty ? store.settings.listenLocales : Array(given)) { _ in }
+                    print(String(format: "%.1fs of audio in %.1fs", r.seconds, Date().timeIntervalSince(start)))
+                    print("text:", r.text)
+                    print(FileTranscriber.srt(r.lines))
+                } catch {
+                    print("failed:", error.localizedDescription)
+                }
+                exit(0)
+            }
+            return true
+        }
         if args.contains("--dictation-check") {
             // Reports everything dictation depends on, without recording.
             registerHotKeys(force: true)
@@ -210,6 +228,41 @@ extension AppDelegate {
                         return "before \(before) → \(r.rawValue), after \(Paster.snapshot(el).map { "\($0)" } ?? "nil")"
                     }.value
                     print("\(name): \(how); \(was.count) → \(read().count) chars")
+                }
+                // Undo polish: the polished words just typed swap for the raw ones in place (and back), in the text view.
+                w.makeFirstResponder(view)
+                view.string = "Notes: Can you move the standup to 11?"
+                view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
+                try? await Task.sleep(for: .milliseconds(150))
+                let app = AXUIElementCreateApplication(pid)
+                var f: AnyObject?
+                if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &f) == .success, let f, CFGetTypeID(f) == AXUIElementGetTypeID() {
+                    let el = f as! AXUIElement
+                    let polished = " Can you move the standup to 11?", raw = " um can you move the standup to ten no eleven"
+                    let swapped = await Paster.replaceBeforeCursor(polished, with: raw, pid: pid, field: el, post: false)
+                    print("undo polish:", swapped ? "swapped" : "NOT SWAPPED", "→", view.string)
+                    let back = await Paster.replaceBeforeCursor(raw, with: polished, pid: pid, field: el, post: false)
+                    print("again:", back ? "swapped back" : "NOT SWAPPED", "→", view.string)
+                    let stale = await Paster.replaceBeforeCursor("something else", with: raw, pid: pid, field: el, post: false)
+                    print("not right before the cursor:", stale ? "SWAPPED (wrong)" : "left alone")
+                    // Learning: the watcher reads this field, a word is fixed by hand, it's added.
+                    let learner = CorrectionWatcher()
+                    var got: [String] = []
+                    learner.onLearn = { got.append($0) }
+                    view.string = "Deploy it to cooper netties today"
+                    view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
+                    learner.watch(pasted: "Deploy it to cooper netties today", pid: pid, field: el)
+                    view.string = "Deploy it to Kubernetes today"
+                    learner.poll(focusCheck: false)
+                    learner.finish()
+                    print("learned from the field:", got)
+                }
+                let span = { (s: String) in NSRange(location: 0, length: (s as NSString).length) }
+                for (before, after) in [("Send it to Ayko tomorrow", "Send it to Aiko tomorrow"), ("ship it with test flight", "ship it with TestFlight"),
+                                        ("I think their right", "I think they're right"), ("so we should go", "So we should go"),
+                                        ("meet at 3", "meet at 4"), ("open the link", "open https://example.com"),
+                                        ("we talked about the plan", "we talked about the plan and then a whole lot more was written here")] {
+                    print("learn \"\(before)\" → \"\(after)\":", CorrectionWatcher.learned(before: before, after: after, span: span(before), known: []) ?? "nothing")
                 }
                 exit(0)
             }
@@ -409,10 +462,12 @@ extension AppDelegate {
                 let d = island.dictation
                 d.phase = args[j + 1] == "polishing" ? .processing : .listening
                 d.handsFree = args.contains("--hands-free")
+                d.noSound = args.contains("--no-sound")
                 d.preview = args.contains("--long")
                     ? "So the plan for tomorrow is number one finish the notch drag and drop, number two fix the dictation paste, number three ship the build before lunch, and then we can look at the settings preview again and maybe the meeting chat too"
                     : "So the plan for tomorrow is"
                 d.levels = (0..<20).map { i in Float(0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
+                if d.noSound { d.preview = ""; d.levels = d.levels.map { _ in 0 } }
             }
             if args.contains("--event") || args.contains("--event-now") {
                 // A made-up event with a Meet link, 12 minutes off (or just started), instead of the real calendar.
@@ -683,6 +738,7 @@ extension AppDelegate {
             case "weather": .weather
             case "calendar": .calendar
             case "tasks": .tasks
+            case "dictation": .dictation
             case "assistant", "ask": .assistant
             default: .apps
             }
@@ -753,6 +809,17 @@ extension AppDelegate {
                         }
                     }
                 }
+            }
+            if scope == .dictation {
+                // Made-up dictations only (--raw: the original words, --job: a file being transcribed, --setup: what's missing,
+                // --empty: nothing yet).
+                let h = DictationHistory.shared
+                h.useDemo()
+                if args.contains("--empty") { h.clear() }
+                h.showRaw = args.contains("--raw")
+                if args.contains("--file") { h.selected = h.entries.first { $0.kind == .file }?.id }
+                if args.contains("--job") { h.job = ("Interview with Aiko.mp4", 0.42) }
+                DictationSetup.shown = args.contains("--setup") ? [.microphone, .accessibility, .model] : []
             }
             if scope == .calculator { launcher.model.calcHistory = ["12×8 = 96", "1200×1.1 = 1,320"] }
             if let m = value("--clock").flatMap(ClockMode.init(rawValue:)) { launcher.model.clockMode = m }
