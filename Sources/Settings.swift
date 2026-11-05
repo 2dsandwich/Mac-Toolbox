@@ -84,7 +84,7 @@ enum DictationStyle: String, Codable, CaseIterable, Identifiable {
 
 /// What ⌘2–⌘5 and the round buttons beside the bar open (up to four, in order).
 enum QuickMode: String, Codable, CaseIterable, Identifiable {
-    case clipboard, text, meeting, clock, calendar, notes, calculator, translate, weather, mixer, library, switcher
+    case clipboard, text, meeting, clock, calendar, dictation, notes, calculator, translate, weather, mixer, library, switcher
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -93,6 +93,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .meeting: "Meetings"
         case .clock: "Clock"
         case .calendar: "Calendar"
+        case .dictation: "Dictation"
         case .notes: "Sticky notes"
         case .calculator: "Calculator"
         case .translate: "Translate"
@@ -109,6 +110,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .meeting: "waveform"
         case .clock: "clock.fill"
         case .calendar: "calendar"
+        case .dictation: "mic.fill"
         case .notes: "note.text"
         case .calculator: "plus.forwardslash.minus"
         case .translate: "character.bubble.fill"
@@ -125,6 +127,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .meeting: .meeting
         case .clock: .pomodoro
         case .calendar: .calendar
+        case .dictation: .dictation
         case .notes: .notes
         case .calculator: .calculator
         case .translate: .translate
@@ -218,6 +221,34 @@ enum ToolGroup: String, Codable, CaseIterable, Identifiable {
         case .define: "Dictionary"
         }
     }
+}
+
+/// How much punctuation and polish a kind of writing gets (Wispr Flow's Styles).
+enum DictationTone: String, Codable, CaseIterable, Identifiable {
+    case formal, casual, veryCasual
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .formal: "Formal"
+        case .casual: "Casual"
+        case .veryCasual: "Very casual"
+        }
+    }
+    var instruction: String {
+        switch self {
+        case .formal: "Tone: formal. Full sentences, capitals and complete punctuation."
+        case .casual: "Tone: casual. Capitals, light punctuation, no full stop at the very end."
+        case .veryCasual: "Tone: very casual. All lowercase (names too, except code), almost no punctuation, no full stop at the end. Japanese stays casual."
+        }
+    }
+}
+
+/// Your own instructions for the polish in some apps (Superwhisper's modes, VoiceInk's Power Mode).
+struct VoiceMode: Codable, Equatable, Identifiable, Hashable {
+    var id = UUID()
+    var instructions = ""
+    /// Bundle identifiers it's on for.
+    var apps: [String] = []
 }
 
 struct Snippet: Codable, Equatable, Identifiable, Hashable {
@@ -375,7 +406,20 @@ struct Settings: Codable, Equatable {
     var dictationSounds = true
     var saveDictations = true
     var dictionary: [String] = []
+    /// Words taken out of the dictionary: never learned again.
+    var dictionaryIgnored: [String] = []
+    /// Add names and terms you fix right after a dictation to the dictionary.
+    var learnWords = true
     var snippets: [Snippet] = []
+    /// Tone per kind of writing ("email", "chat", "document", "prompt"), used when the style matches the app.
+    var dictationTones: [String: DictationTone] = ["email": .formal, "chat": .casual, "document": .formal, "prompt": .formal]
+    var voiceModes: [VoiceMode] = []
+    /// Boost a quiet voice (whispering in an open office).
+    var whisperMode = false
+    /// Every dictation with its raw and polished words (the Dictation view, ⌃⌘V).
+    var keepDictationHistory = true
+    var pasteLastHotKey = HotKey.pasteLastDefault
+    var undoPolishHotKey = HotKey.undoPolishDefault
 
     // Meetings
     var meetingLanguage = DictationLanguage.both

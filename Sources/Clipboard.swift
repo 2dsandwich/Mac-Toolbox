@@ -383,6 +383,34 @@ enum Paster {
         return .failed
     }
 
+    /// The field's text and cursor (nil when it doesn't tell).
+    static func textAndCursor(_ el: AXUIElement) -> (text: String, cursor: Int)? {
+        var value: AnyObject?, range: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &value) == .success, let text = value as? String,
+              AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &range) == .success, let r = range,
+              CFGetTypeID(r) == AXValueGetTypeID() else { return nil }
+        var cf = CFRange()
+        guard AXValueGetValue(r as! AXValue, .cfRange, &cf), cf.length == 0, (0...(text as NSString).length).contains(cf.location) else { return nil }
+        return (text, cf.location)
+    }
+
+    /// Swaps `old`, just before the cursor, for `new`: selects it and puts `new` in through Accessibility, else pastes
+    /// over the selection. False (and nothing changed) when `old` isn't right before the cursor.
+    static func replaceBeforeCursor(_ old: String, with new: String, pid: pid_t?, field given: AXUIElement? = nil, post: Bool = true) async -> Bool {
+        guard let el = given ?? focusedElement(pid).0, let (text, cursor) = textAndCursor(el) else { return false }
+        let ns = text as NSString, len = (old as NSString).length
+        guard cursor >= len, ns.substring(with: NSRange(location: cursor - len, length: len)) == old else { return false }
+        var cf = CFRange(location: cursor - len, length: len)
+        guard let range = AXValueCreate(.cfRange, &cf), AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, range) == .success else { return false }
+        let expected = ns.replacingCharacters(in: NSRange(location: cursor - len, length: len), with: new)
+        if AXUIElementSetAttributeValue(el, kAXSelectedTextAttribute as CFString, new as CFString) == .success {
+            try? await Task.sleep(for: .milliseconds(80))
+            if textAndCursor(el)?.text == expected { return true }
+        }
+        guard post else { return false }
+        return await deliver(new, pid: pid, field: given) != .failed
+    }
+
     /// What the field looks like now: its length and where the cursor is. nil when it says neither.
     static func snapshot(_ el: AXUIElement) -> [Int]? {
         var out: [Int] = []

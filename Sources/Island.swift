@@ -315,7 +315,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .event: 46
         case .dictation:
             if case .failed = dictation.phase { 48 } else {
-                max(dictation.preview.isEmpty ? 0 : dictationTextHeight, dictationControls ? 32 : 0)
+                max(dictation.preview.isEmpty ? (dictation.noSound ? 20 : 0) : dictationTextHeight, dictationControls ? 32 : 0)
             }
         case nil: 56 // the clock, opened with nothing running
         }
@@ -482,7 +482,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var dictationWantsRoom: Bool {
         if case .failed = dictation.phase { return true }
         let listening = [.starting, .listening].contains(dictation.phase)
-        return listening && (dictation.handsFree || !dictation.preview.isEmpty)
+        return listening && (dictation.handsFree || !dictation.preview.isEmpty || dictation.noSound)
     }
 
 
@@ -1665,8 +1665,9 @@ struct IslandView: View {
             }
             Spacer(minLength: g.hasNotch ? g.seedSize.width : 0)
             if !polishing {
-                Image(systemName: d.mode == .command ? "wand.and.stars" : "mic.fill")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
+                Image(systemName: d.noSound ? "mic.slash.fill" : d.mode == .command ? "wand.and.stars" : "mic.fill")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(d.noSound ? Color.yellow : .white.opacity(0.85))
+                    .contentTransition(.symbolEffect(.replace))
             }
         }
         .animation(.spring(duration: 0.35, bounce: 0.2), value: polishing)
@@ -1760,6 +1761,10 @@ struct IslandView: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
                     Text(msg).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineLimit(2)
                 }
+            }
+            if d.noSound, d.preview.isEmpty {
+                Text("No sound from the microphone").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                    .transition(.opacity)
             }
             if !d.preview.isEmpty {
                 let words = Text(d.preview).font(.system(size: 14))

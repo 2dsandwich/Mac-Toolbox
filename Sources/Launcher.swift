@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 
 enum Scope: Equatable {
-    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar
+    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar, dictation
 
     var title: String {
         switch self {
@@ -23,6 +23,7 @@ enum Scope: Equatable {
         case .weather: "Weather"
         case .assistant: "Ask"
         case .calendar: "Calendar"
+        case .dictation: "Dictation"
         }
     }
 
@@ -43,16 +44,17 @@ enum Scope: Equatable {
         case .notes: "note.text"
         case .weather: "cloud.sun.fill"
         case .assistant: "sparkles"
+        case .dictation: "mic.fill"
         case .calendar: "calendar"
         }
     }
 
     /// Modes with their own body instead of a result list.
-    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar].contains(self) }
+    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar, .dictation].contains(self) }
 }
 
 enum Builtin: String, CaseIterable {
-    case clipboard, switcher, pomodoro, calendar, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
+    case clipboard, switcher, pomodoro, calendar, dictation, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
          allApps, settings, quit
 
     var title: String {
@@ -61,6 +63,7 @@ enum Builtin: String, CaseIterable {
         case .switcher: "Switch Apps"
         case .pomodoro: "Clock"
         case .calendar: "Calendar View"
+        case .dictation: "Dictation History"
         case .calculator: "Calculator"
         case .timer: "Timer"
         case .stopwatch: "Stopwatch"
@@ -83,6 +86,7 @@ enum Builtin: String, CaseIterable {
         case .switcher: "rectangle.stack"
         case .pomodoro: "timer"
         case .calendar: "calendar"
+        case .dictation: "mic.fill"
         case .calculator: "plus.forwardslash.minus"
         case .timer: "timer"
         case .stopwatch: "stopwatch"
@@ -105,6 +109,7 @@ enum Builtin: String, CaseIterable {
         case .switcher: .switcher
         case .pomodoro: .pomodoro
         case .calendar: .calendar
+        case .dictation: .dictation
         case .calculator: .calculator
         case .timer, .stopwatch, .alarm: .pomodoro
         case .mixer: .mixer
@@ -288,7 +293,7 @@ enum Metrics {
     }
 
     func listHeight(_ s: Settings) -> CGFloat {
-        if scope == .clipboard || scope == .meeting { return Metrics.clipboardList(s) }
+        if scope == .clipboard || scope == .meeting || scope == .dictation { return Metrics.clipboardList(s) }
         if scope == .pomodoro { return ClockHub.height(self) }
         if scope == .calculator { return CalculatorView.height }
         if scope == .calendar { return CalendarPanel.height }
@@ -348,6 +353,7 @@ enum Metrics {
         case .weather: "City or place…"
         case .assistant: "Ask anything"
         case .calendar: "Search events"
+        case .dictation: "Search dictations"
         }
     }
 
@@ -550,7 +556,7 @@ enum Metrics {
         case .weather:
             // A place's weather as you type it (here, or your default city, when it's empty).
             items = LiveData.shared.weather(place: q, kind: .full, s).enumerated().map { answerItem($1, $0) }
-        case .text, .meeting, .calculator, .timer, .mixer, .notes, .assistant, .calendar:
+        case .text, .meeting, .calculator, .timer, .mixer, .notes, .assistant, .calendar, .dictation:
             items = []
         case .web:
             let r = BrowserSites.suggest(query, in: sites, limit: max(s.maxRows, 6))
@@ -651,6 +657,7 @@ enum Metrics {
         case .switcher: [s.switcherKeyword.lowercased(), "running", "switch"]
         case .pomodoro: ["clock", "clocks", "pomodoro", "pomo", "focus", "時計", "ポモドーロ", "集中"]
         case .calendar: ["calendar", "cal", "予定", "カレンダー"]
+        case .dictation: ["dictation", "dictations", "dictate", "transcribe", "transcript", "音声入力", "文字起こし"]
         case .calculator: ["calc", "calculator", "keypad", "電卓", "計算機"]
         case .timer: ["timer", "countdown", "タイマー"]
         case .stopwatch: ["stopwatch", "stop watch", "lap", "ストップウォッチ"]
@@ -965,6 +972,7 @@ enum Metrics {
     /// Commands the text field forwards (arrows, Tab, Return, Esc, delete).
     func handle(_ sel: Selector) -> Bool {
         if model.scope == .calendar, CalendarBoard.shared.handle(sel, typing: !model.query.isEmpty) { return true }
+        if model.scope == .dictation { return handleDictation(sel) }
         switch sel {
         case #selector(NSResponder.moveUp(_:)) where model.scope == .pomodoro && model.clockMode == .alarms && model.alarmDraft != nil:
             model.nudgeAlarm(1)
@@ -1314,6 +1322,39 @@ enum Metrics {
         hide()
     }
 
+    // MARK: Dictation
+
+    /// ↑↓ pick a dictation, ↩ pastes it where you were, Esc and the rest as usual.
+    private func handleDictation(_ sel: Selector) -> Bool {
+        let h = DictationHistory.shared
+        let list = h.search(model.query)
+        let at = list.firstIndex { $0.id == h.current(in: list)?.id } ?? 0
+        switch sel {
+        case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.moveDown(_:)):
+            guard !list.isEmpty else { return true }
+            let next = min(max(0, at + (sel == #selector(NSResponder.moveUp(_:)) ? -1 : 1)), list.count - 1)
+            h.selected = list[next].id
+            h.showRaw = false
+            return true
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertLineBreak(_:)):
+            if let e = h.current(in: list) { pasteDictation(h.showRaw ? e.raw : e.text) }
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Back to the app you were in, and the words typed there.
+    func pasteDictation(_ text: String) {
+        hide(animated: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { (NSApp.delegate as? AppDelegate)?.dictation.paste(text) }
+    }
+
+    func copyDictation(_ text: String) {
+        clipboard.copy(text: text, source: "Dictation")
+        hide()
+    }
+
     // MARK: Ask
 
     func copyAnswer(_ text: String) {
@@ -1474,6 +1515,7 @@ enum Metrics {
                 enter(.pomodoro)
             case .calculator: enter(.calculator)
             case .calendar: enter(.calendar)
+            case .dictation: enter(.dictation)
             case .mixer: enter(.mixer)
             case .translate: enter(.translate)
             case .notes: enter(.notes)

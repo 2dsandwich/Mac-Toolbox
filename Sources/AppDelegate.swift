@@ -115,7 +115,8 @@ import SwiftUI
     func registerHotKeys(force: Bool = false) {
         let s = store.settings
         let keys = [("launcher", s.launcherHotKey), ("clipboard", s.clipboardHotKey), ("switcher", s.switcherHotKey), ("copilot", s.copilotHotKey),
-                    ("dictation", s.dictationEnabled ? s.dictationHotKey : .none), ("command", s.dictationEnabled ? s.commandHotKey : .none)]
+                    ("dictation", s.dictationEnabled ? s.dictationHotKey : .none), ("command", s.dictationEnabled ? s.commandHotKey : .none),
+                    ("pastelast", s.dictationEnabled ? s.pasteLastHotKey : .none), ("undopolish", s.dictationEnabled ? s.undoPolishHotKey : .none)]
             + WindowLayout.allCases.map { ("window-\($0.rawValue)", s.windowLayouts ? $0.hotKey(s) : .none) }
         let wanted = keys.map { "\($0.0)=\($0.1.keyCode)/\($0.1.modifiers)" }.joined(separator: ";")
         guard force || wanted != registered else { return }
@@ -133,6 +134,8 @@ import SwiftUI
             hk.register(s.commandHotKey, released: { [weak self] in self?.dictation.released(.command) }) { [weak self] in
                 self?.dictation.pressed(.command)
             }
+            hk.register(s.pasteLastHotKey) { [weak self] in self?.dictation.pasteLast() }
+            hk.register(s.undoPolishHotKey) { [weak self] in self?.dictation.undoPolish() }
         }
         if s.windowLayouts {
             for l in WindowLayout.allCases { hk.register(l.hotKey(s)) { WindowMover.shared.perform(l) } }
