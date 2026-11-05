@@ -20,6 +20,7 @@ struct BatteryGlance: View {
                         .foregroundStyle(b.pct <= 20 && !b.plugged ? Color.red : b.charging ? Color.green : Color.white.opacity(0.85))
                     Text("\(b.pct)%").font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(0.85))
                 }
+                .fixedSize()
             }
         }
     }

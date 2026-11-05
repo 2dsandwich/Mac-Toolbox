@@ -280,7 +280,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var contentTop: CGFloat { bandTop + bandHeight + 6 }
     /// The mirror: the open notch's full width, as tall as the camera's shape at the first thing's width (so a notch
     /// widened by tiles shows a wider crop, not a taller notch).
-    var cameraHeight: CGFloat { (mainWidth * 9 / 16).rounded() }
+    var cameraHeight: CGFloat { (mainWidth * 3 / 4).rounded() } // a camera's own 4:3, at the notch's base width
 
     /// The live words in the open notch: as tall as they need, up to five lines (then they scroll).
     var dictationTextHeight: CGFloat {
@@ -433,7 +433,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .expanded:
             // The band, then the first thing with the tiles beside it (wider before taller), or the mirror.
             let content = camera ? cameraHeight : max(detailHeight, tilesHeight)
-            return CGSize(width: geometry.expandedSize.width + tilesWidth, height: contentTop + content + Self.expandedInset)
+            return CGSize(width: geometry.expandedSize.width + (camera ? 0 : tilesWidth), height: contentTop + content + Self.expandedInset)
         }
     }
 
@@ -786,6 +786,8 @@ final class IslandPanel: NSPanel {
             }
         }
         panel.onScroll = { [weak self] e in self?.scrolled(e) ?? false }
+        // Watched from the start: with nothing running yet the notch is hidden, and hovering it must still open it.
+        setTracking(fast: false)
         // Entering or leaving full screen switches Spaces; the window settles a moment later, so look twice.
         let ws = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
@@ -1623,15 +1625,24 @@ struct IslandView: View {
     /// camera button right of it, in the lane every other button ends on.
     private var band: some View {
         let g = model.geometry
-        return HStack(spacing: 8) {
-            BatteryGlance()
-            Spacer(minLength: g.hasNotch ? g.seedSize.width + 16 : 0)
-            if CameraMirror.available {
-                RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
-                    withAnimation(islandSpring) { model.camera.toggle() }
+        // Two equal sides with the hardware notch's width between them, so the gap sits right over the notch.
+        return HStack(spacing: 0) {
+            BatteryGlance().frame(maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: g.hasNotch ? g.seedSize.width + IslandGeometry.gap : 0)
+            HStack(spacing: IslandGeometry.gap) {
+                RoundButton(symbol: "gearshape", tint: nil, size: Self.rowButton) {
+                    model.collapse()
+                    (NSApp.delegate as? AppDelegate)?.showSettings(pane: .notch)
                 }
-                .help(model.camera ? "Close Mirror" : "Mirror")
+                .help("Settings")
+                if CameraMirror.available {
+                    RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
+                        withAnimation(islandSpring) { model.camera.toggle() }
+                    }
+                    .help(model.camera ? "Close Mirror" : "Mirror")
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, model.sideInset)
         .frame(height: model.bandHeight)

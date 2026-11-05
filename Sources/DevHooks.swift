@@ -357,11 +357,16 @@ extension AppDelegate {
             func run(_ secs: Double, _ p: NSPoint) {
                 c.mouseOverride = p
                 let end = Date().addingTimeInterval(secs)
-                while Date() < end { c.trackOnce(); RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+                // `--timer`: only the app's own pointer checks run (as on a fresh launch), none called from here.
+                while Date() < end {
+                    if !args.contains("--timer") { c.trackOnce() }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                }
             }
+            if args.contains("--real") { RunLoop.main.run(until: Date().addingTimeInterval(4)) } // real now-playing polls first
             let r = c.notchRect
-            print("activities:", island.activities, "stage:", island.stage)
-            run(1.0, NSPoint(x: r.midX, y: r.maxY - 10))
+            print("activities:", island.activities, "stage:", island.stage, "song:", NowPlaying.shared.available, NowPlaying.shared.playing)
+            run(args.contains("--timer") ? 2.5 : 1.0, NSPoint(x: r.midX, y: r.maxY - 10))
             print("after hovering:", island.stage, "idleOpen:", island.idleOpen)
             run(0.5, NSPoint(x: r.midX, y: r.minY - 60)) // just under the open notch
             print("0.5 s after leaving:", island.stage)
