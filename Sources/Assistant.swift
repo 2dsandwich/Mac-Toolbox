@@ -12,12 +12,33 @@ import SwiftUI
         let url: URL
     }
 
+    /// What it's doing before the answer starts: shown in its place instead of the model's own reasoning.
+    enum Status: Hashable {
+        case thinking, searching(String?), reading(Int)
+        var label: String {
+            switch self {
+            case .thinking: "Thinking"
+            case .searching(let q?): "Searching \u{201C}\(q)\u{201D}"
+            case .searching(nil): "Searching the web"
+            case .reading(let n): n > 0 ? "Reading \(n) results" : "Reading results"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .thinking: "sparkles"
+            case .searching: "magnifyingglass"
+            case .reading: "doc.text.magnifyingglass"
+            }
+        }
+    }
+
     struct Turn: Identifiable {
         let id = UUID()
         let question: String
         var answer = ""
         var sources: [Source] = []
         var failed = false
+        var status: Status = .thinking
     }
 
     var turns: [Turn] = []
@@ -66,7 +87,7 @@ import SwiftUI
                 } else {
                     let out = try await AI.complete(.assistant, system: Self.system(web: false),
                                                     user: Self.flatten(earlier, q, budget: AI.budget(.assistant, s)))
-                    update(i, gen) { $0.answer = out }
+                    update(i, gen) { $0.answer = Self.withoutReasoning(out) }
                 }
             } catch {
                 if !Task.isCancelled {
@@ -122,10 +143,26 @@ import SwiftUI
             guard let u = (cite["url"] as? String).flatMap(URL.init(string:)), !sources.contains(where: { $0.url.host == u.host }) else { continue }
             sources.append(Source(title: cite["title"] as? String ?? u.host ?? "", url: u))
         }
+        // Where it is, from the last block that isn't the answer itself.
+        var status = Assistant.Status.thinking
+        if let last = blocks.last(where: { !($0["type"] as? String == "text" && ($0["text"] as? String ?? "").isEmpty) }) {
+            switch last["type"] as? String {
+            case "server_tool_use": status = .searching((last["input"] as? [String: Any])?["query"] as? String)
+            case "web_search_tool_result": status = .reading((last["content"] as? [Any])?.count ?? 0)
+            default: break
+            }
+        }
         update(i, gen) {
             $0.answer = answer
             $0.sources = Array(sources.prefix(3))
+            $0.status = status
         }
+    }
+
+    /// Local reasoning models write their thinking inside <think> tags before the answer: only the answer shows.
+    static func withoutReasoning(_ s: String) -> String {
+        guard let r = s.range(of: "</think>") else { return s.hasPrefix("<think>") ? "" : s }
+        return String(s[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The basic search tool searches directly; the newer versions first run code over the results (dynamic
@@ -143,7 +180,7 @@ import SwiftUI
         You answer quick questions typed into a Mac launcher. Reply in the language of the question (Japanese question, Japanese answer). \
         Be short and direct: the answer first, in one to three sentences, or a few short bullets when a list is clearer. \
         No preamble, no headings, no restating the question, no offers of more help. \
-        \(web ? "Search the web for anything current or changing (news, prices, scores, schedules, releases, opening hours); otherwise answer from what you know. Don't say that you are searching. " : "")\
+        \(web ? "Search the web whenever the answer could be recent, local, changing or something you aren't sure of (news, prices, scores, weather, schedules, releases, opening hours, people, products, places); answer from memory only for settled facts. Don't say that you are searching. " : "")\
         Today is \(f.string(from: Date())); the user's time zone is \(TimeZone.current.identifier).
         """
     }
@@ -172,7 +209,13 @@ import SwiftUI
             Turn(question: "Can I make it there and back in a day from Tokyo?", answer: "The request timed out. Check your connection and try again.", failed: true),
         ]
         if busy {
-            turns.append(Turn(question: "Which trail is easiest for a first climb?"))
+            var t = Turn(question: "Which trail is easiest for a first climb?")
+            // `--status searching|reading`: the line shown before the answer starts.
+            let args = CommandLine.arguments
+            if let k = args.firstIndex(of: "--status"), k + 1 < args.count {
+                t.status = args[k + 1] == "searching" ? .searching("easiest Mt Fuji trail for beginners") : args[k + 1] == "reading" ? .reading(5) : .thinking
+            }
+            turns.append(t)
             self.busy = true
         }
     }
@@ -277,7 +320,7 @@ private struct AssistantTurn: View {
             } else if !turn.answer.isEmpty {
                 NotesView(markdown: turn.answer, shown: shown)
             } else if busy {
-                ThinkingDots().colorMultiply(.primary).frame(height: 18)
+                StatusLine(status: turn.status)
             }
             if !turn.sources.isEmpty {
                 HStack(spacing: 6) {
@@ -326,5 +369,43 @@ private struct SourceLink: View {
         .buttonStyle(.plain)
         .help(source.title)
         .onHover { hover = $0 }
+    }
+}
+
+/// What Ask is doing while there's no answer yet: an icon and a word or two with a light passing over them,
+/// changing in place as it goes from thinking to searching to reading.
+private struct StatusLine: View {
+    let status: Assistant.Status
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            line.id(status).transition(.opacity.combined(with: .offset(y: 3)))
+        }
+        .frame(height: 18)
+        .animation(.easeOut(duration: 0.22), value: status)
+    }
+
+    private var label: some View {
+        HStack(spacing: 7) {
+            Image(systemName: status.symbol).font(.system(size: 12, weight: .medium))
+            Text(status.label).font(.system(size: 13.5)).lineLimit(1).truncationMode(.middle)
+        }
+    }
+
+    private var line: some View {
+        label
+            .foregroundStyle(.secondary)
+            .overlay {
+                TimelineView(.animation) { t in
+                    GeometryReader { g in
+                        let x = (t.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6) * (g.size.width + 120) - 60
+                        LinearGradient(colors: [.clear, .white.opacity(0.85), .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 60)
+                            .offset(x: x)
+                    }
+                }
+                .mask { label }
+                .allowsHitTesting(false)
+            }
     }
 }
