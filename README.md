@@ -4,16 +4,16 @@ A launcher for macOS that does a lot more than launch. Press ⌘Space and type: 
 
 ## What's in it
 
-- **Search** — apps, System Settings pages and files, plus instant answers while you type: weather, currency, units, time zones, dates, maths, colours, passwords, QR codes, definitions, emoji and quick switches like dark mode or Night Shift.
-- **Clipboard history** — text, images and files, searchable, with pins. Passwords and API keys are never saved.
-- **Text from screen (⌘3)** — select any part of the screen to copy its text, or scan a QR code.
-- **Dictation (⌥Space or Fn)** — hold to talk, tap for hands-free. Speak English, Japanese or any mix; it's transcribed on device, cleaned up (fillers, self-corrections, lists) for wherever you're typing, and pasted at the cursor.
-- **Meetings (⌘4)** — records your mic and the Mac's sound, transcribes live, writes notes afterwards, and lets you ask questions about it. A floating window that stays out of screen shares.
-- **Clock (⌘5)** — focus sessions, several timers and stopwatches at once, and alarms.
-- **Ask (Tab in the empty bar)** — a quick AI answer, with web sources and follow-ups. It only opens on Tab with nothing typed.
-- **Dynamic notch** — what's going on (music with synced lyrics on demand, timers, meetings, dictation, your next calendar event) around the notch, with a drag-to-arrange order it remembers. When it's open, everything else sits as tiles beside the first thing, with the battery and a camera mirror beside the notch. Swipe down to open, sideways to skip songs.
-- **Windows** — halves, quarters, thirds, maximize, centre and next display on ⌃⌥ + arrows (editable), or by typing "left half". "quit other apps" and "hide other apps" too.
-- **Also** — calculator, translate, weather for any place, calendar, sticky notes, a per-app volume mixer, an All Apps grid, and your stats.
+- **Search**: apps, System Settings pages and files, plus instant answers while you type: weather, currency, units, time zones, dates, maths, colours, passwords, QR codes, definitions, emoji and quick switches like dark mode or Night Shift.
+- **Clipboard history**: text, images and files, searchable, with pins. Passwords and API keys are never saved.
+- **Text from screen (⌘3)**: select any part of the screen to copy its text, or scan a QR code.
+- **Dictation (⌥Space or Fn)**: hold to talk, tap for hands-free. Speak English, Japanese or any mix; it's transcribed on device, cleaned up (fillers, self-corrections, lists) for wherever you're typing, and pasted at the cursor.
+- **Meetings (⌘4)**: records your mic and the Mac's sound, transcribes live, writes notes afterwards, and lets you ask questions about it. A floating window that stays out of screen shares.
+- **Clock (⌘5)**: focus sessions, several timers and stopwatches at once, and alarms.
+- **Ask (Tab in the empty bar)**: a quick AI answer, with web sources and follow-ups. It only opens on Tab with nothing typed.
+- **Dynamic notch**: what's going on (music with synced lyrics on demand, timers, meetings, dictation, your next calendar event) around the notch, with a drag-to-arrange order it remembers. When it's open, everything else sits as tiles beside the first thing, with the battery and a camera mirror beside the notch. Swipe down to open, sideways to skip songs.
+- **Windows**: halves, quarters, thirds, maximize, centre and next display on ⌃⌥ + arrows (editable), or by typing "left half". "quit other apps" and "hide other apps" too.
+- **Also**: calculator, translate, weather for any place, a month/week/day calendar ("cal" + Tab), sticky notes, a per-app volume mixer (up to 200%), an All Apps grid, and your stats.
 
 ## Requirements
 

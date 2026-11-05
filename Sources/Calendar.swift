@@ -248,7 +248,7 @@ struct CalendarEvent: Identifiable, Equatable {
             if n % 5 == 0, w != 1, w != 7 { add(day, "Gym", 19, 60, .systemTeal) }
             if n == 25 { add(day, "Sponsor sync", 11, 30, .systemOrange, link: "https://us02web.zoom.us/j/81234567890") }
             if day == today {
-                add(day, "Lunch with Aki", 12.5, 60, .systemGreen, place: "AFURI Ebisu")
+                add(day, "Team lunch", 12.5, 60, .systemGreen, place: "Ebisu")
                 add(day, "Venue walkthrough", 15, 60, .systemRed, place: "Zepp Shinjuku")
             }
             day = cal.date(byAdding: .day, value: 1, to: day)!
