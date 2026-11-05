@@ -378,41 +378,88 @@ private struct LineRow: View {
 }
 
 /// Renders Claude's Markdown notes: headings, bullets, checkboxes and inline styling.
-struct NotesView: View {
+/// `shown` (in characters of `markdown`) reveals streamed text: what's past it is hidden and the last
+/// `FadeIn.ramp` characters before it fade in. Animating `shown` makes new text dissolve in instead of popping.
+struct NotesView: View, Animatable {
     let markdown: String
+    var shown = Double.infinity
+
+    var animatableData: Double {
+        get { shown }
+        set { shown = newValue }
+    }
 
     var body: some View {
+        var at = 0.0
+        let lines = markdown.components(separatedBy: "\n").map { raw in
+            defer { at += Double(raw.count + 1) }
+            return (raw, at)
+        }
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(markdown.components(separatedBy: "\n").enumerated()), id: \.offset) { _, raw in
-                line(raw)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, l in
+                line(l.0, FadeIn(shown: shown - l.1))
             }
         }
         .textSelection(.enabled)
     }
 
-    @ViewBuilder private func line(_ raw: String) -> some View {
+    @ViewBuilder private func line(_ raw: String, _ fade: FadeIn) -> some View {
         let t = raw.trimmingCharacters(in: .whitespaces)
         if t.hasPrefix("# ") {
-            inline(String(t.dropFirst(2))).font(.system(size: 18, weight: .semibold)).padding(.bottom, 2)
+            inline(String(t.dropFirst(2)), fade).font(.system(size: 18, weight: .semibold)).padding(.bottom, 2)
         } else if t.hasPrefix("## ") || t.hasPrefix("### ") {
-            inline(String(t.drop { $0 == "#" }.dropFirst())).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 8)
+            inline(String(t.drop { $0 == "#" }.dropFirst()), fade).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 8)
         } else if t.hasPrefix("- [ ] ") || t.hasPrefix("- [x] ") {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: t.hasPrefix("- [x]") ? "checkmark.square" : "square").font(.system(size: 12)).foregroundStyle(.secondary)
-                inline(String(t.dropFirst(6))).font(.system(size: 13.5))
+                    .opacity(fade.opacity(0))
+                inline(String(t.dropFirst(6)), fade).font(.system(size: 13.5))
             }
         } else if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("・") {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•").foregroundStyle(.secondary)
-                inline(String(t.hasPrefix("・") ? t.dropFirst(1) : t.dropFirst(2))).font(.system(size: 13.5))
+                Text("•").foregroundStyle(.secondary).opacity(fade.opacity(0))
+                inline(String(t.hasPrefix("・") ? t.dropFirst(1) : t.dropFirst(2)), fade).font(.system(size: 13.5))
             }
         } else if !t.isEmpty {
-            inline(t).font(.system(size: 13.5))
+            inline(t, fade).font(.system(size: 13.5))
         }
     }
 
-    private func inline(_ s: String) -> Text {
-        Text((try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s))
+    private func inline(_ raw: String, _ fade: FadeIn) -> some View {
+        // A line still streaming in can end inside **bold** or `code`: close it so the markers never show.
+        var s = raw
+        for mark in ["**", "`"] where s.components(separatedBy: mark).count % 2 == 0 { s += mark }
+        return Text((try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s))
+            .textRenderer(fade)
+            .contentTransition(.identity) // new text fades in by `shown`, never by cross-fading the whole line
+    }
+}
+
+/// Draws a text's glyphs up to `shown`, each one fading in over the `ramp` characters before it.
+struct FadeIn: TextRenderer {
+    static let ramp = 28.0
+    var shown: Double
+
+    func opacity(_ i: Double) -> Double {
+        let x = min(1, max(0, (shown - i) / Self.ramp))
+        return x * x * (3 - 2 * x)
+    }
+
+    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        var i = 0.0
+        for line in layout {
+            guard shown < .infinity else { ctx.draw(line); continue }
+            for run in line {
+                for glyph in run {
+                    let a = opacity(i)
+                    i += 1
+                    guard a > 0 else { continue }
+                    var c = ctx
+                    c.opacity = a
+                    c.draw(glyph)
+                }
+            }
+        }
     }
 }
 

@@ -164,15 +164,45 @@ import SwiftUI
                            Source(title: "Mount Fuji | Britannica", url: URL(string: "https://www.britannica.com/place/Mount-Fuji")!)]),
             Turn(question: "最後に噴火したのはいつ？", answer: "1707年の宝永噴火が最後です。それ以来、300年以上噴火していません。",
                  sources: [Source(title: "富士山 - Wikipedia", url: URL(string: "https://ja.wikipedia.org/wiki/富士山")!)]),
+            Turn(question: "Best time of year to climb it?", answer: """
+                **Early July to early September**, when the trails and mountain huts are open.
+                - Mid-July to late August has the steadiest weather
+                - Weekdays are far less crowded than Obon week
+                """, sources: [Source(title: "Climbing Mt. Fuji", url: URL(string: "https://www.fujisan-climb.jp/en/")!)]),
+            Turn(question: "Can I make it there and back in a day from Tokyo?", answer: "The request timed out. Check your connection and try again.", failed: true),
         ]
         if busy {
-            turns.append(Turn(question: "Best time of year to climb it?"))
+            turns.append(Turn(question: "Which trail is easiest for a first climb?"))
             self.busy = true
+        }
+    }
+
+    /// Streams a made-up answer into the question `demo(busy: true)` left open, in uneven bursts like the real
+    /// stream, so snapshots can catch the fade part way. No network.
+    func demoStream() {
+        let text = "The **Yoshida Trail** from the Fuji Subaru Line 5th Station. It has the most huts and first-aid posts, " +
+            "and the climb takes about 6 hours up and 4 down.\n- Start in the early afternoon and sleep in a hut near the 8th station\n" +
+            "- Leave before 3 am to see the sunrise from the summit"
+        let sizes = [14, 3, 22, 9, 40, 6, 18, 31, 12, 27, 8, 35, 20, 60]
+        let gen = generation, i = turns.count - 1
+        work = Task {
+            var n = 0
+            for size in sizes where n < text.count {
+                try? await Task.sleep(for: .milliseconds(90))
+                n = min(text.count, n + size)
+                update(i, gen) { $0.answer = String(text.prefix(n)) }
+            }
+            update(i, gen) {
+                $0.answer = text
+                $0.sources = [Source(title: "Yoshida Trail", url: URL(string: "https://www.fujisan-climb.jp/en/trails/yoshida.html")!)]
+            }
+            if gen == generation { busy = false }
         }
     }
 }
 
-/// The thread under the bar: one card, like an answer in the results, that grows with the answer and then scrolls.
+/// The thread under the bar: one card that reads like a chat, newest exchange on top. Your question is a bubble on
+/// the right, the answer plain text on the left with its sources under it. The card grows with the answer, then scrolls.
 struct AssistantView: View {
     let assistant: Assistant
     let radius: CGFloat
@@ -184,14 +214,16 @@ struct AssistantView: View {
         return Metrics.rowGap + min(maxCard, max(a.contentHeight, 52)) + Metrics.listInset
     }
 
+    static var animates: Bool { Store.shared.settings.animations && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous)
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(assistant.turns) { t in
-                        if t.id != assistant.turns.first?.id { Divider().opacity(0.6) }
+                VStack(alignment: .leading, spacing: 22) {
+                    ForEach(assistant.turns.reversed()) { t in
                         AssistantTurn(turn: t, busy: assistant.busy && t.id == assistant.turns.last?.id)
+                            .transition(.opacity)
                     }
                 }
                 .padding(cardPadding)
@@ -200,9 +232,12 @@ struct AssistantView: View {
                 .id("thread")
             }
             .scrollIndicators(.never)
-            .onChange(of: assistant.turns.last?.answer) { _, _ in proxy.scrollTo("thread", anchor: .bottom) }
-            .onChange(of: assistant.turns.count) { _, _ in proxy.scrollTo("thread", anchor: .bottom) }
+            // A new question goes to the top: show it there.
+            .onChange(of: assistant.turns.count) { _, _ in proxy.scrollTo("thread", anchor: .top) }
         }
+        // New questions slide the thread down; a growing answer eases the turns under it down.
+        .animation(Self.animates ? .smooth(duration: 0.3) : nil, value: assistant.turns.count)
+        .animation(Self.animates ? .smooth(duration: 0.3) : nil, value: assistant.turns.last?.answer.count)
         .background(shape.fill(cardFill))
         .clipShape(shape)
         .padding(.horizontal, Metrics.listInset)
@@ -212,17 +247,35 @@ struct AssistantView: View {
     }
 }
 
+/// One exchange: the question as a bubble, then the answer, which dissolves in as it streams.
 private struct AssistantTurn: View {
     let turn: Assistant.Turn
     let busy: Bool
+    /// How much of the answer is revealed (see `NotesView.shown`); a turn still being answered starts hidden.
+    @State private var shown: Double
+
+    init(turn: Assistant.Turn, busy: Bool) {
+        self.turn = turn
+        self.busy = busy
+        _shown = State(initialValue: busy ? 0 : Self.full(turn.answer))
+    }
+
+    private static func full(_ s: String) -> Double { Double(s.count) + FadeIn.ramp }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(turn.question).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.secondary).lineLimit(2)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(turn.question)
+                .font(.system(size: 13.5))
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.primary.opacity(0.1)))
+                .padding(.leading, 56)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             if turn.failed {
                 Label(turn.answer, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
             } else if !turn.answer.isEmpty {
-                NotesView(markdown: turn.answer)
+                NotesView(markdown: turn.answer, shown: shown)
             } else if busy {
                 ThinkingDots().colorMultiply(.primary).frame(height: 18)
             }
@@ -231,9 +284,25 @@ private struct AssistantTurn: View {
                     ForEach(turn.sources, id: \.self) { SourceLink(source: $0) }
                     Spacer(minLength: 0)
                 }
+                .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(AssistantView.animates ? .easeOut(duration: 0.3) : nil, value: turn.sources)
+        .onChange(of: turn.answer) { old, new in reveal(old, new) }
+    }
+
+    /// Paces the reveal: each arrival takes longer the more it brings, so bursts glide in instead of jumping.
+    private func reveal(_ old: String, _ new: String) {
+        guard AssistantView.animates else { shown = Self.full(new); return }
+        if !new.hasPrefix(old) {
+            // The answer started over (text after a web search replaces what came before it).
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { shown = 0 }
+        }
+        let fresh = Double(new.count - (new.hasPrefix(old) ? old.count : 0))
+        withAnimation(.linear(duration: min(1.4, max(0.35, fresh / 110)))) { shown = Self.full(new) }
     }
 }
 
