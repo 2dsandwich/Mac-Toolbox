@@ -15,8 +15,11 @@ import SwiftUI
     /// What it's doing before the answer starts: shown in its place instead of the model's own reasoning.
     enum Status: Hashable {
         case thinking, searching(String?), reading(Int)
+        /// One of Ask's own tools (AskTools.swift): what it's doing and its symbol.
+        case using(String, String)
         var label: String {
             switch self {
+            case .using(let label, _): label
             case .thinking: "Thinking"
             case .searching(let q?): "Searching \u{201C}\(q)\u{201D}"
             case .searching(nil): "Searching the web"
@@ -25,6 +28,7 @@ import SwiftUI
         }
         var symbol: String {
             switch self {
+            case .using(_, let symbol): symbol
             case .thinking: "sparkles"
             case .searching: "magnifyingglass"
             case .reading: "doc.text.magnifyingglass"
@@ -110,23 +114,33 @@ import SwiftUI
     private func askClaude(_ q: String, _ c: TaskModel, _ s: Settings, at i: Int, _ gen: Int) async throws {
         let o = AI.options(.anthropic, s)
         let task = AITask.assistant
-        let history = messages + [["role": "user", "content": q]]
+        var history = messages + [["role": "user", "content": q]]
         var blocks: [[String: Any]] = []
+        // Ask's own tools (AskTools.swift): earlier steps of this answer, kept for the status line and the answer.
+        var steps: [[String: Any]] = []
+        let tools = [Self.webSearch] + AskTools.definitions(s, history: history)
+        let turnID = turns[i].id
         // A long search can pause the turn: sending the paused turn back lets it carry on.
-        for _ in 0..<4 {
-            let before = blocks
+        for _ in 0..<10 {
+            let before = blocks, earlier = steps
             let r = try await Claude.stream(system: Self.system(web: true), messages: blocks.isEmpty ? history : history + [["role": "assistant", "content": blocks]],
                                             model: c.model, effort: o.effort == "auto" ? task.effort : o.effort, maxTokens: c.maxTokens ?? task.maxTokens,
-                                            tools: [Self.webSearch], timeout: task.timeout, fallback: o.fallback) { [weak self] now in
+                                            tools: tools, timeout: task.timeout, fallback: o.fallback) { [weak self] now in
                 guard let self, gen == self.generation else { return }
                 self.updates += 1
-                self.show(before + now, at: i, gen)
+                self.show(earlier + before + now, at: i, gen)
             }
             blocks = before + r.blocks
-            if r.stop != "pause_turn" { break }
+            if r.stop == "pause_turn" { continue }
+            // AskTools hook: run the app's tools it asked for, send the results back, and carry on.
+            guard r.stop == "tool_use", gen == generation else { break }
+            let results = await AskTools.shared.run(blocks, turn: turnID)
+            history += [["role": "assistant", "content": blocks], ["role": "user", "content": results]]
+            steps += blocks
+            blocks = []
         }
         guard gen == generation else { return }
-        show(blocks, at: i, gen)
+        show(steps + blocks, at: i, gen)
         guard turns.indices.contains(i), !turns[i].answer.isEmpty else { throw Claude.Failure.empty }
         messages = history + [["role": "assistant", "content": blocks]]
     }
@@ -149,6 +163,7 @@ import SwiftUI
             switch last["type"] as? String {
             case "server_tool_use": status = .searching((last["input"] as? [String: Any])?["query"] as? String)
             case "web_search_tool_result": status = .reading((last["content"] as? [Any])?.count ?? 0)
+            case "tool_use": status = AskTools.status(last)
             default: break
             }
         }
@@ -169,7 +184,7 @@ import SwiftUI
     /// filtering), which is slower than a quick answer wants.
     private static var webSearch: [String: Any] {
         ["type": "web_search_20250305", "name": "web_search", "max_uses": 3,
-         "user_location": ["type": "approximate", "timezone": TimeZone.current.identifier]]
+         "user_location": AskTools.searchLocation(Store.shared.settings)]
     }
 
     static func system(web: Bool) -> String {
@@ -187,6 +202,7 @@ import SwiftUI
         No preamble, no headings, no restating the question, no caveats unless they matter, no offers of more help. \
         \(web ? "Search the web whenever the answer could be recent, local, changing or something you aren't sure of (news, prices, scores, weather, schedules, releases, opening hours, people, products, places); answer from memory only for settled facts. Don't say that you are searching. " : "")\
         Today is \(f.string(from: Date())); the user's time zone is \(TimeZone.current.identifier).
+        \(web ? "\n" + AskTools.prompt(Store.shared.settings) + "\n" : "")
 
         \(AskCards.prompt)
         """
@@ -329,6 +345,7 @@ private struct AssistantTurn: View {
             } else if busy {
                 StatusLine(status: turn.status)
             }
+            AskReceipts(turn: turn.id)
             if !turn.sources.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(turn.sources, id: \.self) { SourceLink(source: $0) }
