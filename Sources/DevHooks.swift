@@ -634,7 +634,12 @@ extension AppDelegate {
             }
             exit(0)
         }
+        if args.contains("--google-test") {
+            GoogleTests.run()
+        }
         if let i = args.firstIndex(of: "--settings-snapshot"), i + 1 < args.count {
+            // Google: a made-up account (or signed out), never the Keychain.
+            Google.shared.useDemo(signedIn: !args.contains("--signed-out"), email: "ben@example.com")
             showSettings(pane: i + 2 < args.count ? Pane(rawValue: args[i + 2]) ?? .general : .general)
             settingsWindow?.setFrameOrigin(NSPoint(x: -4000, y: -4000))
             RunLoop.main.run(until: Date().addingTimeInterval(1.5))
@@ -677,6 +682,7 @@ extension AppDelegate {
             case "translate": .translate
             case "weather": .weather
             case "calendar": .calendar
+            case "tasks": .tasks
             case "assistant", "ask": .assistant
             default: .apps
             }
@@ -722,6 +728,18 @@ extension AppDelegate {
             // Made-up events, never the real calendar ("calendar", "予定"); the real notch stays hidden.
             island.onStage = nil
             CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
+            // Made-up Google tasks; --signed-out shows the sign-in row. --select <id|done>, --completed, --edit.
+            Google.shared.useDemo(signedIn: !args.contains("--signed-out"))
+            if scope == .tasks {
+                GoogleTasks.shared.useDemo()
+                let b = TasksBoard.shared
+                // After the panel's own reset on appearing.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    b.showDone = args.contains("--completed")
+                    b.selected = value("--select")
+                    if args.contains("--edit"), let t = b.selectedTask { b.startEditing(t, self.launcher.model) }
+                }
+            }
             if scope == .calendar {
                 let board = CalendarBoard.shared
                 if let span = value("--span").flatMap(CalendarSpan.init(rawValue:)) { board.span = span }

@@ -84,7 +84,7 @@ enum DictationStyle: String, Codable, CaseIterable, Identifiable {
 
 /// What ⌘2–⌘5 and the round buttons beside the bar open (up to four, in order).
 enum QuickMode: String, Codable, CaseIterable, Identifiable {
-    case clipboard, text, meeting, clock, calendar, notes, calculator, translate, weather, mixer, library, switcher
+    case clipboard, text, meeting, clock, calendar, tasks, notes, calculator, translate, weather, mixer, library, switcher
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -93,6 +93,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .meeting: "Meetings"
         case .clock: "Clock"
         case .calendar: "Calendar"
+        case .tasks: "Tasks"
         case .notes: "Sticky notes"
         case .calculator: "Calculator"
         case .translate: "Translate"
@@ -109,6 +110,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .meeting: "waveform"
         case .clock: "clock.fill"
         case .calendar: "calendar"
+        case .tasks: "checklist"
         case .notes: "note.text"
         case .calculator: "plus.forwardslash.minus"
         case .translate: "character.bubble.fill"
@@ -125,6 +127,7 @@ enum QuickMode: String, Codable, CaseIterable, Identifiable {
         case .meeting: .meeting
         case .clock: .pomodoro
         case .calendar: .calendar
+        case .tasks: .tasks
         case .notes: .notes
         case .calculator: .calculator
         case .translate: .translate

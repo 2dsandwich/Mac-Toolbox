@@ -2,7 +2,8 @@ import AppKit
 import EventKit
 import SwiftUI
 
-// MARK: Calendar mode: Moneybag's month grid, week and day timelines, and the chip → detail morph, on EventKit.
+// MARK: Calendar mode: Moneybag's month grid, week and day timelines, and the chip → detail morph, on Google Calendar
+// (EventKit when signed out).
 
 private let cal: Calendar = {
     var c = Calendar(identifier: .gregorian)
@@ -51,6 +52,7 @@ extension CalendarEvent {
     }
 
     func openInCalendar() {
+        if let web { NSWorkspace.shared.open(web); return }
         let id = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
         NSWorkspace.shared.open(URL(string: "ical://ekevent/\(id)?method=show&options=more") ?? URL(fileURLWithPath: "/System/Applications/Calendar.app"))
     }
@@ -268,6 +270,7 @@ struct CalendarPanel: View {
     let query: String
     let radius: CGFloat
     @State private var events = CalendarEvents.shared
+    @State private var google = Google.shared
 
     static let header: CGFloat = 32
     static let headerGap: CGFloat = PanelLayout.gap
@@ -278,9 +281,9 @@ struct CalendarPanel: View {
     static let space = "calendar"
 
     var body: some View {
-        let blocked = !events.authorized
+        let blocked = !google.ready
         VStack(alignment: .leading, spacing: 0) {
-            if blocked { AccessBanner(undecided: events.undecided).padding(.bottom, Self.headerGap) }
+            if blocked { GoogleBanner(service: "Google Calendar").padding(.bottom, Self.headerGap) }
             CalendarHeader(board: board).frame(height: Self.header).padding(.bottom, Self.headerGap)
             GeometryReader { g in
                 Group {
@@ -302,32 +305,16 @@ struct CalendarPanel: View {
         .onAppear { board.appear() }
         .onDisappear { board.disappear() }
         .onChange(of: events.access) { board.load(force: true) }
+        .onChange(of: google.status) { board.load(force: true) }
     }
 }
 
-private struct AccessBanner: View {
-    let undecided: Bool
-    private let coral = Color(red: 1, green: 106 / 255, blue: 85 / 255)
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "lock.open").font(.system(size: 10)).foregroundStyle(coral)
-            Text("Allow MONEY! to read your calendars").font(.system(size: 12.5))
-            Spacer(minLength: 0)
-            Button { CalendarEvents.shared.requestAccess() } label: { Pill(text: undecided ? "Allow" : "Open Settings") }.buttonStyle(Press())
-        }
-        .padding(.leading, 12).padding(.trailing, 1)
-        .frame(height: 34)
-        .background(Capsule().fill(coral.opacity(0.14)))
-    }
-}
-
-private struct Press: ButtonStyle {
+struct Press: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { configuration.label.opacity(configuration.isPressed ? 0.7 : 1) }
 }
 
 /// A capsule button the height of the round ones.
-private struct Pill: View {
+struct Pill: View {
     let text: String
     var body: some View {
         Text(text).font(.system(size: 12.5)).foregroundStyle(.secondary)
@@ -789,7 +776,7 @@ private struct EventDetail: View {
                     }
                     .buttonStyle(Press()).help("Join")
                 }
-                ClockButton(symbol: "arrow.up.right.square", help: "Open in Calendar") { event.openInCalendar() }
+                ClockButton(symbol: "arrow.up.right.square", help: event.web == nil ? "Open in Calendar" : "Open in Google Calendar") { event.openInCalendar() }
             }
             .padding(radius - 16)
         }

@@ -33,6 +33,10 @@ import AppKit
         case .calculator:
             return run(q, [(#"\b(?:sqrt|cbrt|abs|ln|log2|log10|log|exp|sin|cos|tan|asin|acos|atan|round|floor|ceil|min|max|pow|hypot|pi|tau|mod)\b|√|π"#, command, 0),
                            (#"[+\-*/^%×÷−!]"#, op, 0), (#"[()\[\]]"#, note, 0)])
+        case .tasks:
+            // Moneybag's quick-add colours: the due date coral, the note grey, the list purple.
+            let groups = TasksBoard.shared.editing == nil ? GoogleTasks.shared.lists.map(\.title) : []
+            return QuickAdd.parse(q, groups: groups).spans.map { ($0.range, $0.kind == .when ? when : $0.kind == .note ? note : command) }
         case .apps:
             // The normal search bar stays plain; colors are for the modes.
             return []

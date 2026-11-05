@@ -4,6 +4,7 @@ import Observation
 
 // Upcoming calendar events: the next one shows in the notch a little before it starts (with a Join button for
 // Zoom, Meet, Teams and Webex links), and "calendar" in the search bar lists what's left of today.
+// Signed in to Google, the events come from Google Calendar (GoogleCalendar.swift); otherwise from EventKit.
 
 struct CalendarEvent: Identifiable, Equatable {
     var id: String
@@ -18,6 +19,8 @@ struct CalendarEvent: Identifiable, Equatable {
     var notes: String?
     /// The other people invited (names, else addresses).
     var attendees: [String] = []
+    /// The event on the web (Google Calendar).
+    var web: URL?
 
     /// Repeating events share an identifier, so each occurrence is told apart by its start.
     var key: String { "\(id)@\(Int(start.timeIntervalSince1970))" }
@@ -82,7 +85,9 @@ struct CalendarEvent: Identifiable, Equatable {
         return s
     }
 
-    var authorized: Bool { demo || access == .fullAccess }
+    /// Reading Google Calendar instead of EventKit.
+    var google: Bool { !demo && Google.shared.ready }
+    var authorized: Bool { demo || google || access == .fullAccess }
     /// Not asked yet (the system will ask once).
     var undecided: Bool { access == .notDetermined }
 
@@ -141,6 +146,12 @@ struct CalendarEvent: Identifiable, Equatable {
     }
 
     private func start() {
+        if google {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            startTicker()
+            return reload()
+        }
         access = EKEventStore.authorizationStatus(for: .event)
         if access == .notDetermined { return requestAccess() }
         guard access == .fullAccess else { return stop() }
@@ -149,6 +160,11 @@ struct CalendarEvent: Identifiable, Equatable {
                 MainActor.assumeIsolated { CalendarEvents.shared.reload() }
             }
         }
+        startTicker()
+        reload()
+    }
+
+    private func startTicker() {
         if ticker == nil {
             // On the minute (plus a moment), so "Now" shows as the event starts.
             let next = Date(timeIntervalSinceReferenceDate: (Date().timeIntervalSinceReferenceDate / 60).rounded(.up) * 60 + 0.5)
@@ -157,7 +173,6 @@ struct CalendarEvent: Identifiable, Equatable {
             RunLoop.main.add(t, forMode: .common)
             ticker = t
         }
-        reload()
     }
 
     private func stop() {
@@ -173,7 +188,18 @@ struct CalendarEvent: Identifiable, Equatable {
     func reload() {
         now = Date()
         access = EKEventStore.authorizationStatus(for: .event)
-        if !demo, access == .fullAccess {
+        if google {
+            let g = GoogleCalendar.shared
+            let list = g.calendars.map { Info(id: $0.id, title: $0.name, source: "", color: NSColor(hex: $0.color) ?? .systemBlue) }
+            if list != calendars { calendars = list }
+            let today = Calendar.current.startOfDay(for: now)
+            let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today) ?? now
+            // Today and tomorrow in one cached range, refreshed every five minutes.
+            let found = g.events(from: today, to: Calendar.current.date(byAdding: .day, value: 2, to: today) ?? now, maxAge: 300)
+                .filter { !$0.allDay && $0.end > now && $0.start < max(tomorrow, now.addingTimeInterval(3600)) }
+                .sorted { $0.start < $1.start }
+            settle(found)
+        } else if !demo, access == .fullAccess {
             let s = Store.shared.settings
             let all = eventStore.calendars(for: .event)
             let list = all.map { Info(id: $0.calendarIdentifier, title: $0.title, source: $0.source?.title ?? "", color: $0.color) }
@@ -192,13 +218,17 @@ struct CalendarEvent: Identifiable, Equatable {
                     .sorted { $0.startDate < $1.startDate }
                     .map(Self.make)
             }
-            if found != events { events = found }
-            fetched = Date()
-            // Forget dismissals once their events have passed.
-            let live = Set(found.map(\.key))
-            if !dismissed.isSubset(of: live) { dismissed.formIntersection(live) }
+            settle(found)
         }
         onChange?()
+    }
+
+    private func settle(_ found: [CalendarEvent]) {
+        if found != events { events = found }
+        fetched = Date()
+        // Forget dismissals once their events have passed.
+        let live = Set(found.map(\.key))
+        if !dismissed.isSubset(of: live) { dismissed.formIntersection(live) }
     }
 
     private static func make(_ e: EKEvent) -> CalendarEvent {
@@ -221,6 +251,10 @@ struct CalendarEvent: Identifiable, Equatable {
     /// Every event overlapping from..<to (all-day ones too) in the calendars switched on, for the Calendar mode.
     func range(from: Date, to: Date) -> [CalendarEvent] {
         if demo { return Self.demoRange(from: from, to: to) }
+        if google {
+            return GoogleCalendar.shared.events(from: from, to: to, maxAge: 120)
+                .sorted { ($0.start, $0.allDay ? 0 : 1) < ($1.start, $1.allDay ? 0 : 1) }
+        }
         access = EKEventStore.authorizationStatus(for: .event)
         guard access == .fullAccess else { return [] }
         let off = Store.shared.settings.eventCalendarsOff
@@ -298,9 +332,8 @@ struct CalendarEvent: Identifiable, Equatable {
         let header = "Today’s events"
         if !demo { access = EKEventStore.authorizationStatus(for: .event) }
         guard authorized else {
-            return Answer(title: header, subtitle: access == .notDetermined ? "No calendar access yet" : "No calendar access",
-                          symbol: "calendar", color: .systemRed, action: .run(keepOpen: true) { CalendarEvents.shared.requestAccess() },
-                          hint: access == .notDetermined ? "Allow ↩" : "Open Settings ↩")
+            return Answer(title: header, subtitle: "Not signed in to Google", symbol: "calendar", color: .systemRed,
+                          action: .run(keepOpen: true) { Google.shared.signInOrSettings() }, hint: "Sign in ↩")
         }
         let list = remainingToday()
         let lead = Double(Store.shared.settings.notchEventLead) * 60

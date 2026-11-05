@@ -13,7 +13,8 @@ A launcher for macOS that does a lot more than launch. Press ⌘Space and type: 
 - **Ask (Tab in the empty bar)**: a quick AI answer, with web sources and follow-ups. It only opens on Tab with nothing typed.
 - **Dynamic notch**: what's going on (music with synced lyrics on demand, timers, meetings, dictation, your next calendar event) around the notch, with a drag-to-arrange order it remembers. When it's open, everything else sits as tiles beside the first thing, with the battery and a camera mirror beside the notch. Swipe down to open, sideways to skip songs.
 - **Windows**: halves, quarters, thirds, maximize, centre and next display on ⌃⌥ + arrows (editable), or by typing "left half". "quit other apps" and "hide other apps" too.
-- **Also**: calculator, translate, weather for any place, a month/week/day calendar ("cal" + Tab), sticky notes, a per-app volume mixer (up to 200%), an All Apps grid, and your stats.
+- **Google Calendar and Tasks**: a month/week/day calendar ("cal" + Tab) and the notch read every Google calendar you show, with colours, people, places and Meet links (Apple's Calendar when you're signed out). "tasks" + Tab opens Google Tasks: all your lists with subtasks and the recently completed ones; type to add ("call Ben tomorrow 3pm // bring the contract in Work"), ↑↓ to pick, ↩ to tick, ⌘E to edit, ⌘⌫ to delete.
+- **Also**: calculator, translate, weather for any place, sticky notes, a per-app volume mixer (up to 200%), an All Apps grid, and your stats.
 
 ## Requirements
 
@@ -37,6 +38,10 @@ MONEY! asks for what each feature needs: Accessibility (to paste and to read sel
 
 Polishing dictation, meeting notes and translation can use Apple's on-device model, Claude, any OpenAI-compatible service or Ollama, chosen per task in Settings › AI. API keys are kept in the Keychain, never in settings files.
 
+## Google
+
+Calendar and Tasks use your own OAuth client: in Google Cloud, enable the Calendar and Tasks APIs and make an OAuth client of type Desktop app. Paste its ID and secret in Settings › Google (they're filled in from Moneybag when it has them) and sign in; the browser opens, and MONEY! takes the answer on 127.0.0.1. The client and tokens stay in the Keychain. Events and tasks are cached in `~/Library/Application Support/MONEY` so the notch and the views start offline.
+
 ## Privacy
 
-Clipboard history, meetings, notes and stats stay on your Mac (`~/Library/Application Support/MONEY`). Nothing is sent anywhere except to the AI service you pick and the public APIs behind the live answers (Open-Meteo, Frankfurter, CoinGecko, holidays-jp, ipify, Apple's iTunes Search for song credits, and LRCLIB for lyrics of the song playing, only while lyrics are on).
+Clipboard history, meetings, notes and stats stay on your Mac (`~/Library/Application Support/MONEY`). Nothing is sent anywhere except to the AI service you pick, Google when you sign in, and the public APIs behind the live answers (Open-Meteo, Frankfurter, CoinGecko, holidays-jp, ipify, Apple's iTunes Search for song credits, and LRCLIB for lyrics of the song playing, only while lyrics are on).
