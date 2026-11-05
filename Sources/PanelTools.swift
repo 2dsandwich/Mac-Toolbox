@@ -156,6 +156,7 @@ struct MixerView: View {
                                         .frame(width: 34, height: 34)),
                          name: "Output", detail: mixer.problem ?? "",
                          value: Binding(get: { Double(mixer.master) }, set: { mixer.setMaster(Float($0)) }),
+                         top: 1,
                          muted: mixer.masterMuted, toggleMute: { mixer.setMasterMuted(!mixer.masterMuted) })
             }
             .frame(height: Self.rowHeight)
@@ -192,6 +193,7 @@ private struct MixerRow: View {
     let name: String
     let detail: String
     let value: Binding<Double>
+    var top = Double(AudioMixer.maxVolume)
     let muted: Bool
     let toggleMute: () -> Void
 
@@ -203,12 +205,12 @@ private struct MixerRow: View {
                 if !detail.isEmpty { Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
             }
             .frame(width: 150, alignment: .leading)
-            Slider(value: value, in: 0...1)
+            Slider(value: value, in: 0...top)
                 .controlSize(.small)
                 .opacity(muted ? 0.4 : 1)
             Text("\(Int((value.wrappedValue * 100).rounded()))%")
                 .font(.system(size: 12, weight: .medium)).monospacedDigit().foregroundStyle(.secondary)
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
             PillButton(title: nil, symbol: muted ? "speaker.slash.fill" : "speaker.wave.2.fill", tint: muted ? .red : nil, help: muted ? "Unmute" : "Mute", action: toggleMute)
         }
         .padding(.horizontal, cardPadding)

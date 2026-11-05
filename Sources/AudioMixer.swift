@@ -114,7 +114,7 @@ import Observation
         func rank(_ a: App) -> Int { a.playing ? 0 : (volumes[a.id] != nil || muted.contains(a.id)) ? 1 : 2 }
         apps = byApp.values.sorted { (rank($0), $0.name.lowercased()) < (rank($1), $1.name.lowercased()) }
         for a in apps where !a.processes.isEmpty {
-            let wanted = muted.contains(a.id) || volume(a.id) < 0.999
+            let wanted = muted.contains(a.id) || abs(volume(a.id) - 1) > 0.001
             // A new helper joined, or the sound now goes elsewhere (AirPods connected): the tap is made again.
             let output = Self.defaultOutput.flatMap { Self.string($0, kAudioDevicePropertyDeviceUID) }
             let stale = taps[a.id].map { Set($0.processes) != Set(a.processes) || $0.outputUID != output } ?? false
@@ -125,10 +125,13 @@ import Observation
 
     // MARK: Changing
 
+    /// An app can be boosted to twice its own level.
+    static let maxVolume: Float = 2
+
     func volume(_ id: String) -> Float { volumes[id] ?? 1 }
 
     func setVolume(_ v: Float, for id: String) {
-        volumes[id] = min(1, max(0, v))
+        volumes[id] = min(Self.maxVolume, max(0, v))
         apply(id)
         keepApplying()
     }
@@ -153,7 +156,7 @@ import Observation
     private func apply(_ id: String) {
         let gain = muted.contains(id) ? 0 : volume(id)
         guard let app = apps.first(where: { $0.id == id }) else { return }
-        if gain >= 0.999 {
+        if abs(gain - 1) < 0.001 {
             taps.removeValue(forKey: id)?.stop()
             if volumes[id] != nil { volumes[id] = nil }
             return
@@ -310,7 +313,8 @@ final class Gain: @unchecked Sendable {
                 }
                 let n = min(bytes, Int(ins[i].mDataByteSize)) / MemoryLayout<Float>.size
                 let s = src.assumingMemoryBound(to: Float.self), d = dst.assumingMemoryBound(to: Float.self)
-                for k in 0..<n { d[k] = s[k] * g }
+                // Above 100% the boost is held to full scale so it can't wrap into noise.
+                if g > 1 { for k in 0..<n { d[k] = max(-1, min(1, s[k] * g)) } } else { for k in 0..<n { d[k] = s[k] * g } }
                 if n * 4 < bytes { memset(dst + n * 4, 0, bytes - n * 4) }
             }
         }
