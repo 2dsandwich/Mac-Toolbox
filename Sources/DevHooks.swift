@@ -694,10 +694,16 @@ extension AppDelegate {
                 while done.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
             }
             if scope == .meeting {
-                meeting.demo()
-                if args.contains("--done") {
-                    meeting.phase = .done
-                    meeting.summary = "# Sponsor sync\n\n## Summary\n- The venue confirmed the 12th\n- The sponsor deck is due Friday\n\n## Action items\n- [ ] Me — finish the deck (tomorrow)\n- [ ] Others — artist contracts"
+                // Made-up meetings only (--list, --past, --done, else one recording).
+                CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
+                demoMeeting(args)
+                if args.contains("--list") || args.contains("--past") {
+                    meeting.reset()
+                    launcher.model.reloadPastMeetings()
+                    if args.contains("--past"), let first = meeting.pastMeetings().first, let doc = MeetingDoc.load(first.url) {
+                        launcher.model.openedMeeting = doc
+                        launcher.model.pastChat = MeetingCopilot(store: store, source: .doc(doc))
+                    }
                 }
             }
             if scope == .pomodoro || scope == .timer { launcher.model.pomodoro = pomodoro }
@@ -752,6 +758,54 @@ extension AppDelegate {
             exit(0)
         }
 
+        if let i = args.firstIndex(of: "--meeting-window"), i + 1 < args.count {
+            // The floating meeting window, off screen, with a made-up meeting: --state live|writing|done|idle,
+            // --tab transcript|mine, --chat (the chat open with an answer).
+            island.onStage = nil
+            CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
+            demoMeeting(args)
+            let copilot = MeetingCopilot(store: store, source: .live(meeting))
+            if args.contains("--chat") {
+                copilot.exchanges = meeting.isRunning
+                    ? [.init(question: "What did I miss?", answer: "- The venue is confirmed for the 12th\n- They need the sponsor deck by Friday\n- Ben asked who owns the artist contracts")]
+                    : [.init(question: "Follow-up email", answer: "Subject: Sponsor sync, next steps\n\nHi Aiko and Ben,\n\nThanks for today. The venue is confirmed for the 12th, so we can stop looking.\n\n- I'll draft the sponsor deck tomorrow\n- Ben finds the latest artist contracts by Monday\n\nTalk soon")]
+            }
+            let tab = PageTab.allCases.first { args.contains("--tab") && args.contains($0 == .mine ? "mine" : $0.rawValue.lowercased()) } ?? .notes
+            let view = CopilotView(meeting: meeting, copilot: copilot, store: store, hide: {}, window: { nil }, opaque: true, tab: tab, chatOpen: args.contains("--chat"))
+            let hv = NSHostingView(rootView: view.frame(width: 440, height: 620))
+            let w = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 440, height: 620), styleMask: .borderless, backing: .buffered, defer: false)
+            w.backgroundColor = .clear
+            w.isOpaque = false
+            w.contentView = hv
+            w.orderFrontRegardless()
+            RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+            if let rep = hv.bitmapImageRepForCachingDisplay(in: hv.bounds) {
+                hv.cacheDisplay(in: hv.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+            }
+            exit(0)
+        }
+        if args.contains("--meeting-ai-test") {
+            // Two real requests on Haiku with the made-up meeting: its notes, then the follow-up email prompt. Prints both.
+            island.onStage = nil
+            demoMeeting(["--done"])
+            let doc = meeting.doc
+            let (system, user) = doc.notesPrompt
+            Task {
+                do {
+                    let notes = try await Claude.complete(system: system, user: user, model: "claude-haiku-5-5", effort: "low", timeout: 60)
+                    print("=== notes (\(doc.resolvedTemplate.name))\n" + notes)
+                    doc.notes = notes
+                    let chat = MeetingCopilot(store: store, source: .doc(doc))
+                    let r = chat.recipes[0]
+                    let email = try await Claude.complete(system: "You help the user with their meetings. Be complete but brief. No em dashes.",
+                                                          user: doc.markdown + "\n\n---\n\n" + r.prompt, model: "claude-haiku-5-5", effort: "low", timeout: 60)
+                    print("=== \(r.title)\n" + email)
+                } catch { print("failed:", error.localizedDescription) }
+                exit(0)
+            }
+            return true
+        }
         if args.contains("--layout-test") {
             // Window layout math on made-up screens, then a real AX move of a window this test makes (never anyone else's).
             layoutTest()
@@ -790,6 +844,41 @@ extension AppDelegate {
             return true
         }
         return false
+    }
+
+    /// A made-up meeting for the snapshots (never the real folder): recording, or with --state / --done, writing or done.
+    private func demoMeeting(_ args: [String]) {
+        MeetingDoc.folderOverride = MeetingDoc.demoFolder()
+        meeting.demo()
+        let state = args.firstIndex(of: "--state").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? (args.contains("--list") || args.contains("--past") ? "idle" : args.contains("--done") ? "done" : "live")
+        let notes = """
+        ## Summary
+        - Venue confirmed 12th, so the date is locked and load-in starts at 10:00.
+        - Sponsor deck by Friday: I draft it tomorrow and Aiko adds the sponsor logos.
+        - Artist contracts? Still open. Ben thinks Gaku has the latest version.
+
+        ## Decisions
+        - Keep the 12th and stop looking at other venues.
+
+        ## Action items
+        - [ ] Me: draft the sponsor deck (tomorrow)
+        - [ ] Ben: find the latest artist contracts (Monday)
+
+        ## Open questions
+        - Who signs the artist contracts?
+        """
+        switch state {
+        case "idle": meeting.phase = .done; meeting.reset()
+        case "writing":
+            meeting.phase = .summarizing
+            meeting.doc.writing = String(notes.prefix(210))
+        case "done":
+            meeting.phase = .done
+            meeting.doc.duration = 1920
+            meeting.doc.notes = notes
+            meeting.volatileMe = ""
+        default: break
+        }
     }
 
     /// A stand-in album cover for snapshots: a red sky over a dark street.

@@ -186,7 +186,6 @@ struct TextModeView: View {
 struct MeetingActions {
     var new: () -> Void = {}
     var back: () -> Void = {}
-    var rename: (String) -> Void = { _ in }
 }
 
 struct MeetingControls: View {
@@ -198,16 +197,19 @@ struct MeetingControls: View {
     var body: some View {
         if let opened = model.openedMeeting {
             PillButton(title: "All Meetings", symbol: "chevron.left", help: "Back to the list (⌫)") { onBack() }
-            PillButton(title: nil, symbol: "doc.on.doc", help: "Copy notes and transcript") {
-                let pb = NSPasteboard.general
-                pb.clearContents()
-                pb.setString(opened.text, forType: .string)
-            }
-            PillButton(title: nil, symbol: "folder", help: "Show in Finder") { meeting.showInFinder(opened.url) }
+            documentButtons(opened)
         } else if model.meetingListMode {
             PillButton(title: "New Meeting", symbol: "record.circle", tint: .red, help: "Start recording") { onNew() }
         } else {
             live
+        }
+    }
+
+    private func documentButtons(_ doc: MeetingDoc) -> some View {
+        Group {
+            CopyMenu(doc: doc)
+            ShareButton(url: doc.url)
+            PillButton(title: nil, symbol: "folder", help: "Show in Finder") { meeting.showInFinder(doc.url) }
         }
     }
 
@@ -226,19 +228,14 @@ struct MeetingControls: View {
         case .summarizing:
             EmptyView()
         case .done, .failed, .idle:
-            PillButton(title: "Copy Notes", symbol: "doc.on.doc", help: "Copy the notes") {
-                let pb = NSPasteboard.general
-                pb.clearContents()
-                pb.setString(meeting.summary.isEmpty ? meeting.transcript : meeting.summary + "\n\n" + meeting.transcript, forType: .string)
-            }
-            PillButton(title: nil, symbol: "folder", help: "Show the saved file in Finder") { meeting.showInFinder() }
+            documentButtons(meeting.doc)
             PillButton(title: "New", symbol: "record.circle", tint: .red, help: "Start a new meeting") { onNew() }
         }
     }
 }
 
 /// The meeting's language in one small pill: mixed (each language heard by its own recognizer), English or Japanese.
-private struct LanguageToggle: View {
+struct LanguageToggle: View {
     let meeting: MeetingRecorder
 
     private static let options: [(DictationLanguage, String)] = [(.both, "Mixed"), (.english, "EN"), (.japanese, "日本語")]
@@ -268,11 +265,7 @@ private struct LanguageToggle: View {
     }
 }
 
-/// Room under a meeting's text for the chat button, so the text stops above it instead of running under it.
-private func chatRoom(_ chat: MeetingCopilot?, _ s: Settings) -> CGFloat {
-    chat == nil ? 0 : ExpandingChat.buttonSize(outerRadius: s.scopedCornerRadius, inset: Metrics.listInset) + PanelLayout.gap
-}
-
+/// ⌘4 while a meeting records or just ended: the meeting as a document (as in the floating window).
 struct MeetingView: View {
     let meeting: MeetingRecorder
     let query: String
@@ -281,99 +274,44 @@ struct MeetingView: View {
 
     var body: some View {
         Group {
-            switch meeting.phase {
-            case .summarizing:
-                VStack(spacing: 10) {
-                    ThinkingDots().foregroundStyle(.secondary)
-                    Text("Writing notes…").font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .done:
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if !meeting.summary.isEmpty { NotesView(markdown: meeting.summary) }
-                        if !meeting.lines.isEmpty {
-                            // Styled like the notes' own headings (Summary, Action items).
-                            Text("Transcript").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 8)
-                            VStack(alignment: .leading, spacing: 12) { transcript }
-                        }
-                    }
-                    .padding(.leading, textLeft) // the bar's text starts here
-                    .padding(.trailing, Metrics.listInset) // the bar's buttons end here too
-                    .padding(.vertical, 8)
-                }
-                .scrollIndicators(.automatic)
-                .padding(.bottom, chatRoom(chat, s))
-                .overlay(alignment: .bottomTrailing) {
-                        if let chat { ExpandingChat(copilot: chat, title: "Ask about this meeting", outerRadius: s.scopedCornerRadius, inset: Metrics.listInset).padding(.bottom, -Metrics.listInset) }
-                }
-            case .failed(let msg):
-                Text(msg).font(.system(size: 13)).foregroundStyle(.secondary).padding(26)
+            if case .failed(let msg) = meeting.phase {
+                Text(msg).font(.system(size: 13)).foregroundStyle(.secondary).padding(PanelLayout.inset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            default:
-                live
+            } else {
+                MeetingPage(doc: meeting.doc, recorder: meeting, chat: chat, query: query, outerRadius: s.scopedCornerRadius)
+                    .id(meeting.doc.id)
             }
         }
-        .frame(height: Metrics.clipboardList(s) - Metrics.listInset)
-        .padding(.bottom, Metrics.listInset)
-    }
-
-    private var live: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if let note = meeting.note {
-                        Label(note, systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                    if meeting.lines.isEmpty && meeting.volatileMe.isEmpty && meeting.volatileOthers.isEmpty {
-                        Text(meeting.phase == .paused ? "Paused" : "Listening")
-                            .font(.system(size: 13)).foregroundStyle(.secondary)
-                    }
-                    transcript
-                    if !meeting.volatileMe.isEmpty { LineRow(me: true, text: meeting.volatileMe, time: nil, live: true) }
-                    if !meeting.volatileOthers.isEmpty { LineRow(me: false, text: meeting.volatileOthers, time: nil, live: true) }
-                    Color.clear.frame(height: 1).id("end")
-                }
-                .padding(.leading, textLeft)
-                .padding(.trailing, Metrics.listInset)
-                .padding(.vertical, 8)
-            }
-            .scrollIndicators(.automatic)
-            .onChange(of: meeting.lines.count) { _, _ in withAnimation(.smooth(duration: 0.25)) { proxy.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: meeting.volatileMe + meeting.volatileOthers) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-        }
-    }
-
-    private var transcript: some View {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        return ForEach(meeting.lines.filter { q.isEmpty || $0.text.localizedCaseInsensitiveContains(q) }) { l in
-            LineRow(me: l.me, text: l.text, time: l.at, live: false)
-        }
+        .padding(.top, PanelLayout.gap)
+        .frame(height: Metrics.clipboardList(s))
     }
 }
 
-private struct LineRow: View {
-    let me: Bool
-    let text: String
-    let time: TimeInterval?
-    let live: Bool
+/// ⌘4 with nothing recording: past meetings (and today's events to record) with a chat across all of them.
+struct MeetingHome: View {
+    let model: LauncherModel
+    let s: Settings
+    let radius: CGFloat
+    let onActivate: (Int) -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(me ? "Me" : "Others")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(me ? Color.accentColor : .secondary)
-                .frame(width: 46, alignment: .leading)
-            Text(text)
-                .font(.system(size: 13.5))
-                .foregroundStyle(live ? .secondary : .primary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if let time {
-                Text(String(format: "%02d:%02d", Int(time) / 60, Int(time) % 60))
-                    .font(.system(size: 10.5).monospacedDigit()).foregroundStyle(.tertiary)
+        let room = ExpandingChat.buttonSize(outerRadius: s.scopedCornerRadius, inset: PanelLayout.inset) + PanelLayout.inset
+        ZStack(alignment: .topLeading) {
+            if model.items.isEmpty {
+                Text(model.query.isEmpty ? "No meetings yet" : "No meetings match")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 26)
+                    .frame(height: Metrics.slot(s))
+            } else {
+                ResultList(model: model, s: s, radius: radius, onActivate: onActivate)
+                    .padding(.bottom, room)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .bottomTrailing) {
+            if let chat = model.allChat { ExpandingChat(copilot: chat, title: chat.title, outerRadius: s.scopedCornerRadius, inset: PanelLayout.inset) }
+        }
+        .frame(height: Metrics.clipboardList(s))
     }
 }
 
@@ -382,6 +320,10 @@ private struct LineRow: View {
 /// `FadeIn.ramp` characters before it fade in. Animating `shown` makes new text dissolve in instead of popping.
 struct NotesView: View, Animatable {
     let markdown: String
+    /// Your own notes: where the AI notes kept your words, they show bright and the rest dimmer.
+    var mine: [String] = []
+    /// Room above headings and where the text has a blank line (meeting notes, emails).
+    var spaced = false
     var shown = Double.infinity
 
     var animatableData: Double {
@@ -391,7 +333,7 @@ struct NotesView: View, Animatable {
 
     var body: some View {
         // One text for the whole thing, so a selection can run across every line.
-        Text(Self.attributed(markdown))
+        Text(Self.attributed(markdown, mine: mine, spaced: spaced))
             .font(.system(size: 13.5))
             .lineSpacing(5)
             .textRenderer(FadeIn(shown: shown))
@@ -400,17 +342,35 @@ struct NotesView: View, Animatable {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    static func attributed(_ markdown: String) -> AttributedString {
+    static func attributed(_ markdown: String, mine: [String] = [], spaced: Bool = false) -> AttributedString {
         var out = AttributedString()
-        let lines = markdown.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let all = markdown.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = all.filter { !$0.isEmpty }
+        // Each of your lines brightens once, where it first shows up.
+        var cues = mine.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "-*•・#[]xX ").union(.whitespaces)) }.filter { $0.count >= 3 }
+        let dim = !cues.isEmpty
+        let inline = { (raw: String) in dim ? Self.marked(Self.inline(raw), &cues) : Self.inline(raw) }
+        var blankBefore = Set<Int>()
+        var k = 0
+        for (i, t) in all.enumerated() where !t.isEmpty {
+            if i > 0, all[i - 1].isEmpty { blankBefore.insert(k) }
+            k += 1
+        }
         for (n, t) in lines.enumerated() {
-            if n > 0 { out += AttributedString("\n") }
+            if n > 0 {
+                out += AttributedString("\n")
+                if spaced, t.hasPrefix("#") || blankBefore.contains(n) {
+                    var gap = AttributedString("\n")
+                    gap.font = .system(size: t.hasPrefix("#") ? 9 : 5)
+                    out += gap
+                }
+            }
             if t.hasPrefix("# ") {
-                var h = inline(String(t.dropFirst(2)))
+                var h = Self.inline(String(t.dropFirst(2)))
                 h.font = .system(size: 18, weight: .semibold)
                 out += h
             } else if t.hasPrefix("## ") || t.hasPrefix("### ") {
-                var h = inline(String(t.drop { $0 == "#" }.dropFirst()))
+                var h = Self.inline(String(t.drop { $0 == "#" }.dropFirst()))
                 h.font = .system(size: 12, weight: .semibold)
                 h.foregroundColor = .secondary
                 out += h
@@ -427,6 +387,25 @@ struct NotesView: View, Animatable {
             }
         }
         return out
+    }
+
+    /// Dims a line the AI wrote, keeping your own words in it bright (exactly, or most of a line's words).
+    private static func marked(_ line: AttributedString, _ cues: inout [String]) -> AttributedString {
+        var a = line
+        a.foregroundColor = Color.primary.opacity(0.6)
+        let words = { (s: String) in Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { $0.count > 1 }) }
+        let have = words(String(a.characters))
+        cues.removeAll { c in
+            if let r = a.range(of: c, options: .caseInsensitive) {
+                a[r].foregroundColor = Color.primary
+                return true
+            }
+            let w = words(c)
+            guard w.count >= 3, Double(w.intersection(have).count) / Double(w.count) >= 0.75 else { return false }
+            a.foregroundColor = Color.primary
+            return true
+        }
+        return a
     }
 
     private static func inline(_ raw: String) -> AttributedString {
@@ -524,53 +503,5 @@ struct PomodoroView: View {
             }
         }
         .padding(16)
-    }
-}
-
-/// A saved meeting, read back inside the popup: its name (editable), the notes, and a chat about it.
-struct PastMeetingView: View {
-    let past: MeetingRecorder.Past
-    let query: String
-    let s: Settings
-    let chat: MeetingCopilot?
-    let rename: (String) -> Void
-    @State private var name = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                TextField("Name this meeting", text: $name)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 17, weight: .semibold))
-                    .onSubmit { rename(name) }
-                Text(past.date.formatted(date: .complete, time: .shortened)).font(.system(size: 11.5)).foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 26)
-            .padding(.bottom, 8)
-            ScrollView {
-                NotesView(markdown: filtered)
-                    .padding(.horizontal, 26)
-                    .padding(.bottom, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxHeight: .infinity)
-            .padding(.bottom, chatRoom(chat, s))
-            .overlay(alignment: .bottomTrailing) {
-                if let chat { ExpandingChat(copilot: chat, title: "Ask about this meeting", outerRadius: s.scopedCornerRadius, inset: Metrics.listInset).padding(.bottom, -Metrics.listInset) }
-            }
-        }
-        .frame(height: Metrics.clipboardList(s) - Metrics.listInset)
-        .padding(.bottom, Metrics.listInset)
-        .onAppear { name = past.title }
-        .onChange(of: past.url) { _, _ in name = past.title }
-    }
-
-    /// Typing in the bar keeps only the lines that mention it; the title line isn't repeated (it's the name above).
-    private var filtered: String {
-        let body = past.text.components(separatedBy: "\n").drop { !$0.hasPrefix("# ") }.dropFirst()
-        let lines = past.text.contains("\n# ") || past.text.hasPrefix("# ") ? Array(body) : past.text.components(separatedBy: "\n")
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return lines.joined(separator: "\n") }
-        return lines.filter { $0.hasPrefix("#") || $0.localizedCaseInsensitiveContains(q) }.joined(separator: "\n")
     }
 }

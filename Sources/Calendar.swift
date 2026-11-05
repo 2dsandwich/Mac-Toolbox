@@ -16,6 +16,8 @@ struct CalendarEvent: Identifiable, Equatable {
     var calendar = ""
     var location: String?
     var notes: String?
+    /// The other people invited (names, else addresses).
+    var attendees: [String] = []
 
     /// Repeating events share an identifier, so each occurrence is told apart by its start.
     var key: String { "\(id)@\(Int(start.timeIntervalSince1970))" }
@@ -204,7 +206,16 @@ struct CalendarEvent: Identifiable, Equatable {
                       start: e.startDate, end: e.endDate, color: e.calendar?.color ?? .systemRed,
                       link: CalendarEvent.meetingLink([e.url?.absoluteString, e.location, e.notes]),
                       allDay: e.isAllDay, calendar: e.calendar?.title ?? "", location: e.location?.isEmpty == false ? e.location : nil,
-                      notes: e.notes?.isEmpty == false ? e.notes : nil)
+                      notes: e.notes?.isEmpty == false ? e.notes : nil,
+                      attendees: (e.attendees ?? []).filter { !$0.isCurrentUser }.map { $0.name ?? $0.url.absoluteString.replacingOccurrences(of: "mailto:", with: "") })
+    }
+
+    /// The event a meeting starting now belongs to: under way or starting within ten minutes, a call before anything else.
+    func current() -> CalendarEvent? {
+        if !demo, authorized, Date().timeIntervalSince(fetched) > 20 { reload() }
+        let now = Date()
+        let on = events.filter { !$0.allDay && $0.start.timeIntervalSince(now) < 600 && $0.end > now }
+        return on.first { $0.link != nil } ?? on.first
     }
 
     /// Every event overlapping from..<to (all-day ones too) in the calendars switched on, for the Calendar mode.
@@ -274,7 +285,7 @@ struct CalendarEvent: Identifiable, Equatable {
         let at = { (min: Double) in Date(timeIntervalSinceReferenceDate: base + min * m) }
         return [
             CalendarEvent(id: "demo-1", title: "Design review", start: at(12), end: at(42), color: .systemBlue,
-                          link: URL(string: "https://meet.google.com/abc-defg-hij")),
+                          link: URL(string: "https://meet.google.com/abc-defg-hij"), attendees: ["Fumi Kato", "Gaku Ono"]),
             CalendarEvent(id: "demo-2", title: "Sponsor sync", start: at(90), end: at(120), color: .systemOrange,
                           link: URL(string: "https://us02web.zoom.us/j/81234567890")),
             CalendarEvent(id: "demo-3", title: "Venue walkthrough", start: at(180), end: at(240), color: .systemGreen, link: nil),

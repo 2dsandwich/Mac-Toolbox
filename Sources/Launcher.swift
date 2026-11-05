@@ -139,6 +139,8 @@ struct ResultItem: Identifiable {
         case site(SiteHome)
         case setting(SettingsPane)
         case meetingFile(MeetingRecorder.Past)
+        /// Today's calendar event, to record (⌘4's list).
+        case meetingEvent(CalendarEvent)
         /// An instant answer (calculator, weather, units…).
         case answer(Answer)
     }
@@ -212,9 +214,11 @@ enum Metrics {
     @ObservationIgnored var meetingCopilot: MeetingCopilot?
     @ObservationIgnored var pomodoro: Pomodoro?
     /// ⌘4 with no meeting running: the saved meeting being read (nil = the list).
-    var openedMeeting: MeetingRecorder.Past?
+    var openedMeeting: MeetingDoc?
     /// Chat about the saved meeting being read.
     var pastChat: MeetingCopilot?
+    /// Chat across every saved meeting (the list).
+    var allChat: MeetingCopilot?
     @ObservationIgnored private var pastCache: [MeetingRecorder.Past] = []
 
     /// The meeting view shows the list of saved meetings unless one is recording or just ended.
@@ -223,7 +227,10 @@ enum Metrics {
         return !m.isRunning && m.phase != .summarizing && m.phase != .done
     }
 
-    func reloadPastMeetings() { pastCache = meeting?.pastMeetings() ?? [] }
+    func reloadPastMeetings() {
+        pastCache = meeting?.pastMeetings() ?? []
+        allChat = MeetingCopilot(store: store, source: .all(pastCache))
+    }
     @ObservationIgnored let store: Store
     @ObservationIgnored let index: AppIndex
     @ObservationIgnored let switcher: Switcher
@@ -281,10 +288,6 @@ enum Metrics {
     }
 
     func listHeight(_ s: Settings) -> CGFloat {
-        if scope == .meeting, meetingListMode, openedMeeting == nil {
-            let rows = max(1, min(items.count, s.maxRows))
-            return CGFloat(rows) * Metrics.slot(s) + Metrics.listInset - Metrics.rowGap
-        }
         if scope == .clipboard || scope == .meeting { return Metrics.clipboardList(s) }
         if scope == .pomodoro { return ClockHub.height(self) }
         if scope == .calculator { return CalculatorView.height }
@@ -327,7 +330,7 @@ enum Metrics {
         case .switcher: "Switch to…"
         case .clipboard: "Search clipboard"
         case .text: screenText == nil ? "Text from the screen" : "Find in text"
-        case .meeting: meetingListMode ? (openedMeeting == nil ? "Search past meetings" : "Search this meeting") : "Search transcript"
+        case .meeting: meetingListMode && openedMeeting == nil ? "Search past meetings" : "Search this meeting"
         case .web: "Search or type a site"
         case .pomodoro:
             switch clockMode {
@@ -515,12 +518,21 @@ enum Metrics {
         case .clipboard:
             items = clipboard.search(q).map(clipItem)
         case .meeting where meetingListMode && openedMeeting == nil:
-            items = pastCache.filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.text.localizedCaseInsensitiveContains(q) }
+            // Today's events still to come (to record) above the saved meetings.
+            let events: [ResultItem] = q.isEmpty ? CalendarEvents.shared.remainingToday().filter { !$0.allDay }.prefix(2).map { e in
+                let people = e.attendees.isEmpty ? "" : " · " + e.attendees.joined(separator: ", ")
+                return ResultItem(id: "event-" + e.key, title: e.title, subtitle: e.timeRange + people, kind: .meetingEvent(e))
+            } : []
+            let day = { (d: Date) in
+                Calendar.current.isDateInToday(d) ? "Today" : Calendar.current.isDateInYesterday(d) ? "Yesterday"
+                    : d.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+            }
+            items = events + pastCache.filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.text.localizedCaseInsensitiveContains(q) }
                 .map { p in
-                    let f = DateFormatter()
-                    f.dateFormat = "MMM d, HH:mm"
-                    return ResultItem(id: p.url.path, title: p.title, subtitle: f.string(from: p.date) + (p.snippet.isEmpty ? "" : " · " + p.snippet),
-                                      kind: .meetingFile(p))
+                    var parts = [day(p.date) + " " + p.date.formatted(date: .omitted, time: .shortened)]
+                    if p.duration >= 60 { parts.append("\(Int((p.duration / 60).rounded())) min") }
+                    parts.append(p.attendees.isEmpty ? p.snippet : p.attendees.joined(separator: ", "))
+                    return ResultItem(id: p.url.path, title: p.title, subtitle: parts.filter { !$0.isEmpty }.joined(separator: " · "), kind: .meetingFile(p))
                 }
         case .pomodoro:
             items = []
@@ -766,8 +778,7 @@ enum Metrics {
                                                        onAnswerAction: { [weak self] action in self?.runAnswer(Answer(title: "", action: action), flags: []) },
                                                        onTimerStart: { [weak self] in self?.startTimer() },
                                                        meetingActions: MeetingActions(new: { [weak self] in self?.newMeeting() },
-                                                                                      back: { [weak self] in self?.closeOpenedMeeting() },
-                                                                                      rename: { [weak self] name in self?.renameOpenedMeeting(name) })))
+                                                                                      back: { [weak self] in self?.closeOpenedMeeting() })))
         hosting.sizingOptions = []
         panel.contentView = hosting
         index.onUpdate = { [weak self] in
@@ -1377,13 +1388,9 @@ enum Metrics {
         }
     }
 
-    func renameOpenedMeeting(_ name: String) {
-        guard let past = model.openedMeeting, let renamed = model.meeting?.rename(past, to: name) else { return }
-        model.openedMeeting = renamed
-        model.reloadPastMeetings()
-    }
-
     func closeOpenedMeeting() {
+        model.openedMeeting?.saveIfChanged() // a new name renames the file
+        model.reloadPastMeetings()
         withAnimation(.smooth(duration: 0.28)) {
             model.openedMeeting = nil
             model.setQuery("")
@@ -1481,9 +1488,17 @@ enum Metrics {
             hide()
             if let url = pane.url { NSWorkspace.shared.open(url) }
         case .meetingFile(let past):
+            guard let doc = MeetingDoc.load(past.url) else { return }
             withAnimation(.smooth(duration: 0.3)) {
-                model.openedMeeting = past
-                model.pastChat = MeetingCopilot(store: store, savedMeeting: past.text)
+                model.openedMeeting = doc
+                model.pastChat = MeetingCopilot(store: store, source: .doc(doc))
+                model.setQuery("")
+            }
+        case .meetingEvent(let e):
+            guard let meeting = model.meeting else { return }
+            withAnimation(.smooth(duration: 0.3)) {
+                meeting.reset()
+                meeting.start(event: e)
                 model.setQuery("")
             }
         case .clip(let c):

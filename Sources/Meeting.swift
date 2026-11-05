@@ -17,17 +17,22 @@ import ScreenCaptureKit
     }
 
     var phase = Phase.idle
-    var lines: [Line] = []
+    /// The meeting being recorded, or the one that just ended (its notes, your notes, the transcript).
+    var doc: MeetingDoc
     var volatileMe = ""
     var volatileOthers = ""
     var elapsed: TimeInterval = 0
-    var summary = ""
     var note: String?
     var language = DictationLanguage.both
+    var lines: [Line] {
+        get { doc.lines }
+        set { doc.lines = newValue }
+    }
     /// The meeting's name (editable in the meeting window); it names the saved file too.
-    var name = ""
-    private(set) var fileURL: URL?
-    @ObservationIgnored private var stamp = ""
+    var name: String {
+        get { doc.title }
+        set { doc.title = newValue }
+    }
 
     @ObservationIgnored private let store: Store
     @ObservationIgnored private var mic: MicCapture?
@@ -48,42 +53,32 @@ import ScreenCaptureKit
     init(store: Store) {
         self.store = store
         language = store.settings.meetingLanguage
+        doc = MeetingDoc(url: MeetingDoc.folder.appendingPathComponent("Meeting.md"))
     }
 
     var isRunning: Bool { phase == .recording || phase == .paused }
 
-    var clock: String {
-        let t = Int(elapsed)
-        return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%02d:%02d", t / 60, t % 60)
-    }
+    var clock: String { MeetingDoc.clock(elapsed) }
 
     // MARK: Control
 
-    func start() {
+    /// Starts recording. Named after `event`, or the calendar event on now (its title and attendees).
+    func start(event: CalendarEvent? = nil) {
         guard !isRunning, phase != .summarizing else { return }
         micOn = true
-        lines = []
         volatileMe = ""
         volatileOthers = ""
-        summary = ""
         note = nil
         elapsed = 0
         paused = false
         meRoute.paused = false
         othersRoute.paused = false
         startedAt = Date()
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH.mm"
-        stamp = f.string(from: startedAt)
-        name = ""
-        let folder = URL(fileURLWithPath: (store.settings.meetingFolder as NSString).expandingTildeInPath)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        // Two meetings in the same minute get their own files.
-        if (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.contains(where: { $0.hasPrefix(stamp + " ") }) == true {
-            f.dateFormat = "yyyy-MM-dd HH.mm.ss"
-            stamp = f.string(from: startedAt)
+        doc = MeetingDoc(url: MeetingDoc.newFile(startedAt), date: startedAt)
+        if let e = event ?? CalendarEvents.shared.current() {
+            doc.title = e.title
+            doc.attendees = e.attendees
         }
-        fileURL = folder.appendingPathComponent("\(stamp) Meeting.md")
         phase = .recording
         changed()
         session = UUID()
@@ -135,16 +130,15 @@ import ScreenCaptureKit
         Task {
             await sys?.stop()
             await stopTranscribers()
-            save()
-            await summarize()
+            self.save()
+            await self.summarize()
         }
     }
 
     func reset() {
-        guard !isRunning else { return }
+        guard !isRunning, phase != .summarizing else { return }
         phase = .idle
-        lines = []
-        summary = ""
+        doc = MeetingDoc(url: MeetingDoc.folder.appendingPathComponent("Meeting.md"))
         changed()
     }
 
@@ -298,86 +292,27 @@ import ScreenCaptureKit
 
     // MARK: Notes
 
-    var transcript: String {
-        lines.map { l in
-            let t = Int(l.at)
-            return "**\(l.me ? "Me" : "Others")** (\(String(format: "%02d:%02d", t / 60, t % 60))): \(l.text)"
-        }.joined(separator: "\n\n")
-    }
+    var transcript: String { doc.transcript }
 
     private func save() {
-        guard var url = fileURL else { return }
-        let title = name.trimmingCharacters(in: .whitespaces)
-        // A name you typed wins over the title Claude wrote; the file follows the name.
-        let wanted = url.deletingLastPathComponent().appendingPathComponent("\(stamp) \(title.isEmpty ? "Meeting" : Self.safe(title)).md")
-        if wanted != url {
-            if FileManager.default.fileExists(atPath: url.path) { try? FileManager.default.moveItem(at: url, to: wanted) }
-            url = wanted
-            fileURL = wanted
-        }
-        var notes = summary
-        if !title.isEmpty {
-            var lines = notes.components(separatedBy: "\n")
-            if let i = lines.firstIndex(where: { $0.hasPrefix("# ") }) { lines[i] = "# \(title)" } else { lines.insert("# \(title)\n", at: 0) }
-            notes = lines.joined(separator: "\n")
-        }
-        var doc = notes.isEmpty ? "# \(title.isEmpty ? "Meeting" : title)\n\n" : notes + "\n\n---\n\n"
-        doc += "## Transcript\n\n" + transcript + "\n"
-        try? doc.write(to: url, atomically: true, encoding: .utf8)
-    }
-
-    static func safe(_ name: String) -> String {
-        String(name.map { "/:\\".contains($0) ? "-" : $0 }.prefix(80))
-    }
-
-    /// Renames a saved meeting: its title line and its file.
-    func rename(_ past: Past, to newName: String) -> Past? {
-        let title = newName.trimmingCharacters(in: .whitespaces)
-        guard !title.isEmpty, var text = try? String(contentsOf: past.url, encoding: .utf8) else { return nil }
-        var lines = text.components(separatedBy: "\n")
-        if let i = lines.firstIndex(where: { $0.hasPrefix("# ") }) { lines[i] = "# \(title)" } else { lines.insert("# \(title)\n", at: 0) }
-        text = lines.joined(separator: "\n")
-        let file = past.url.deletingPathExtension().lastPathComponent
-        let prefix = file.range(of: #"^\d{4}-\d{2}-\d{2} \d{2}\.\d{2}"#, options: .regularExpression).map { String(file[$0]) + " " } ?? ""
-        let url = past.url.deletingLastPathComponent().appendingPathComponent(prefix + Self.safe(title) + ".md")
-        try? text.write(to: past.url, atomically: true, encoding: .utf8)
-        if url != past.url { try? FileManager.default.moveItem(at: past.url, to: url) }
-        return Past(url: url, date: past.date, title: title, snippet: past.snippet, text: text)
+        doc.duration = elapsed
+        doc.save()
     }
 
     private func summarize() async {
-        guard !lines.isEmpty else {
-            phase = .done
-            summary = "# Meeting\n\nNothing was transcribed."
-            return changed()
-        }
-        let problem = AI.problem(.meetingNotes, store.settings)
-        guard store.settings.meetingSummary, problem == nil else {
-            phase = .done
-            summary = store.settings.meetingSummary ? "\(problem ?? ""). The transcript is saved." : ""
-            save()
-            return changed()
-        }
-        let system = """
-        You write meeting notes from a raw speech-to-text transcript. "Me" is the person who recorded; "Others" is everyone else on the call, \
-        mixed into one voice. The transcript has recognition errors: infer the intended words from context, but never invent facts. \
-        Write in the meeting's main language (Japanese meeting, Japanese notes). Use Markdown: a title line "# …", then "## Summary" \
-        (3–6 bullets), "## Decisions", "## Action items" (as "- [ ] who — what (when)" where known) and "## Open questions". Leave out empty sections.
-        """
-        do {
-            summary = try await AI.completeLong(.meetingNotes, system: system, prefix: "Transcript:\n\n", text: transcript)
-        } catch {
-            summary = "Couldn't write notes: \(error.localizedDescription). The transcript is saved."
-        }
-        save()
+        if store.settings.meetingSummary { await doc.enhance() } else { save() }
         phase = .done
         changed()
     }
 
-    /// Sample content for the off-screen layout check (`--snapshot --scope meeting`).
+    /// Sample content for the off-screen layout checks (made up).
     func demo() {
         phase = .recording
         elapsed = 754
+        doc = MeetingDoc(url: MeetingDoc.folder.appendingPathComponent("demo.md"), date: Date().addingTimeInterval(-754))
+        doc.title = "Sponsor sync"
+        doc.attendees = ["Aiko Tanaka", "Ben Ito"]
+        doc.myNotes = "venue confirmed 12th\nsponsor deck by friday\nartist contracts?"
         lines = [Line(me: false, text: "Okay, so the venue confirmed the 12th. We still need the sponsor deck by Friday.", at: 610, updated: Date()),
                  Line(me: true, text: "I can finish the deck tomorrow. 来週の月曜日にもう一回確認しましょう。", at: 642, updated: Date()),
                  Line(me: false, text: "Sounds good. Who's handling the artist contracts?", at: 701, updated: Date())]
@@ -390,31 +325,26 @@ import ScreenCaptureKit
         let title: String
         let snippet: String
         let text: String
+        var attendees: [String] = []
+        var duration: TimeInterval = 0
         var id: URL { url }
     }
 
     /// Saved meetings, newest first (the Markdown files in the meetings folder).
     func pastMeetings() -> [Past] {
-        let folder = URL(fileURLWithPath: (store.settings.meetingFolder as NSString).expandingTildeInPath)
-        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let files = (try? FileManager.default.contentsOfDirectory(at: MeetingDoc.folder, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.pathExtension == "md" }.compactMap { url -> Past? in
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-            let lines = text.components(separatedBy: "\n")
-            let heading = lines.first { $0.hasPrefix("# ") }.map { String($0.dropFirst(2)).trimmingCharacters(in: .whitespaces) }
-            let title = heading.flatMap { $0 == "Meeting" ? nil : $0 } ?? url.deletingPathExtension().lastPathComponent
-            let snippet = lines.first { $0.hasPrefix("- ") || $0.hasPrefix("**Me**") || $0.hasPrefix("**Others**") }
-                .map { $0.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "- [ ] ", with: "").replacingOccurrences(of: "- ", with: "") } ?? ""
-            return Past(url: url, date: date, title: title, snippet: snippet, text: text)
+            guard let d = MeetingDoc.load(url), let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            let snippet = (d.notes + "\n" + d.myNotes).components(separatedBy: "\n").first { $0.hasPrefix("- ") }
+                .map { $0.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "- [ ] ", with: "").replacingOccurrences(of: "- ", with: "") }
+                ?? d.lines.first?.text ?? ""
+            return Past(url: url, date: d.date, title: d.title.isEmpty ? url.deletingPathExtension().lastPathComponent : d.title,
+                        snippet: snippet, text: text, attendees: d.attendees, duration: d.duration)
         }
         .sorted { $0.date > $1.date }
     }
 
     func showInFinder(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-
-    func showInFinder() {
-        if let fileURL { NSWorkspace.shared.activateFileViewerSelecting([fileURL]) }
-    }
 
     private func changed() { onChange?() }
 }

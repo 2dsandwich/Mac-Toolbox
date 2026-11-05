@@ -3,8 +3,8 @@ import Observation
 import ScreenCaptureKit
 import SwiftUI
 
-/// Live help during a meeting (in the spirit of Cluely): what to say next, a recap, follow-up questions,
-/// explanations of terms, and free questions about the meeting, optionally looking at the screen too.
+/// Chat about meetings: live help during one (what did I miss, what to say), prompts for one that ended
+/// (follow-up email, action items), and questions across every saved meeting.
 @MainActor @Observable final class MeetingCopilot {
     struct Exchange: Identifiable {
         let id = UUID()
@@ -13,33 +13,17 @@ import SwiftUI
         var failed = false
     }
 
-    enum Quick: String, CaseIterable, Identifiable {
-        case say, recap, followUps, explain
-        var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .say: "What should I say?"
-            case .recap: "Recap"
-            case .followUps: "Follow-ups"
-            case .explain: "Explain terms"
-            }
-        }
-        var symbol: String {
-            switch self {
-            case .say: "bubble.left.and.text.bubble.right"
-            case .recap: "list.bullet.rectangle"
-            case .followUps: "questionmark.bubble"
-            case .explain: "book"
-            }
-        }
-        var prompt: String {
-            switch self {
-            case .say: "What should I say next? If Others just asked me something, give one direct answer I can say out loud, in a sentence or two."
-            case .recap: "Recap the meeting so far in at most three short bullets."
-            case .followUps: "Give two sharp follow-up questions I could ask right now, one line each."
-            case .explain: "Explain the one or two terms or names from the last few minutes I'm most likely not to know, one line each."
-            }
-        }
+    /// A prebuilt prompt: its chip's title and what it asks.
+    struct Recipe: Identifiable {
+        let title: String
+        let prompt: String
+        var id: String { title }
+    }
+
+    enum Source {
+        case live(MeetingRecorder)
+        case doc(MeetingDoc)
+        case all([MeetingRecorder.Past])
     }
 
     var exchanges: [Exchange] = []
@@ -47,28 +31,51 @@ import SwiftUI
     var busy = false
 
     @ObservationIgnored private let store: Store
-    @ObservationIgnored private let meeting: MeetingRecorder?
-    /// A saved meeting's notes and transcript, when chatting about one after the fact.
-    @ObservationIgnored private let saved: String?
+    @ObservationIgnored let source: Source
 
-    /// A meeting that's still going ("What should I say?" only makes sense then).
-    var isLive: Bool { meeting?.isRunning ?? false }
-
-    init(store: Store, meeting: MeetingRecorder) {
+    init(store: Store, source: Source) {
         self.store = store
-        self.meeting = meeting
-        saved = nil
+        self.source = source
     }
 
-    init(store: Store, savedMeeting text: String) {
-        self.store = store
-        meeting = nil
-        saved = text
+    /// A meeting that's still going ("What should I say?" only makes sense then).
+    var isLive: Bool {
+        if case .live(let m) = source { return m.isRunning }
+        return false
+    }
+
+    var title: String {
+        if case .all = source { return "Ask about all meetings" }
+        return "Ask about this meeting"
+    }
+
+    var recipes: [Recipe] {
+        if isLive {
+            return [Recipe(title: "What did I miss?", prompt: "What did I miss in the last few minutes? At most three short bullets."),
+                    Recipe(title: "What should I say?", prompt: "What should I say next? If Others just asked me something, give one direct answer I can say out loud, in a sentence or two."),
+                    Recipe(title: "Follow-up questions", prompt: "Give two sharp follow-up questions I could ask right now, one line each."),
+                    Recipe(title: "Explain terms", prompt: "Explain the one or two terms or names from the last few minutes I'm most likely not to know, one line each.")]
+        }
+        if case .all = source {
+            var next = "my next meeting"
+            if let e = CalendarEvents.shared.events.first(where: { $0.start > Date() }) {
+                next = "\"\(e.title)\" at \(e.start.formatted(date: .omitted, time: .shortened))" + (e.attendees.isEmpty ? "" : " with \(e.attendees.joined(separator: ", "))")
+            }
+            return [Recipe(title: "What did I promise?", prompt: "What did I (Me) promise to do in these meetings? A checklist, newest first, each with the meeting's name and date."),
+                    Recipe(title: "Open action items", prompt: "List the action items that are still open, grouped by owner, each with the meeting's name and date."),
+                    Recipe(title: "Recurring topics", prompt: "Which topics, problems or objections keep coming up across meetings? Short bullets with the meetings they came up in."),
+                    Recipe(title: "Prep my next meeting", prompt: "Brief me for \(next): what we discussed last time with these people or on this topic, what was promised, and what is still open. Three to six bullets.")]
+        }
+        return [Recipe(title: "Follow-up email", prompt: "Write the follow-up email I should send after this meeting: a subject line, a short thank-you, the decisions, who does what by when, and the next step. Plain and friendly, ready to send, in the meeting's language. No placeholders such as [Your name]; end with a short sign-off and no name."),
+                Recipe(title: "Action items", prompt: "List every action item as a checklist: \"- [ ] Owner: task (when)\". Use Me for me, names where the transcript gives them."),
+                Recipe(title: "Decisions", prompt: "List the decisions that were made, one bullet each, with the reason when it was said."),
+                Recipe(title: "Open questions", prompt: "List the questions that were left open or need an answer later."),
+                Recipe(title: "Client update", prompt: "Rewrite this meeting as a short update for someone who wasn't there: three to five bullets, then next steps.")]
     }
 
     func reset() { exchanges = [] }
 
-    func run(_ q: Quick) { ask(q.title, instruction: q.prompt) }
+    func run(_ r: Recipe) { ask(r.title, instruction: r.prompt) }
 
     func ask(_ question: String, instruction: String? = nil) {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,26 +87,48 @@ import SwiftUI
         exchanges.append(Exchange(question: q))
         let index = exchanges.count - 1
         busy = true
-        let transcript = String((meeting?.transcript ?? saved ?? "").suffix(min(60_000, AI.budget(.meetingChat, store.settings))))
-        let live = meeting.map { m in
-            [m.volatileOthers.isEmpty ? nil : "**Others** (still speaking): \(m.volatileOthers)",
-             m.volatileMe.isEmpty ? nil : "**Me** (still speaking): \(m.volatileMe)"].compactMap { $0 }.joined(separator: "\n")
-        } ?? ""
-        let savedNote = saved == nil ? "" : "This meeting is over; you are answering questions about it afterwards from its saved notes and transcript. "
-        let withScreen = useScreen
+        let budget = min(120_000, AI.budget(.meetingChat, store.settings))
+        let context: String
+        var about = ""
+        switch source {
+        case .live(let m) where !m.isRunning:
+            about = "This meeting just ended; you answer from its notes and transcript."
+            context = String(m.doc.markdown.prefix(budget))
+        case .live(let m):
+            about = "The meeting is still going."
+            var t = "Meeting: \(m.doc.displayTitle)\n\nMy notes so far:\n\(m.doc.myNotes.isEmpty ? "(none)" : m.doc.myNotes)\n\nTranscript:\n\n"
+            t += String(m.transcript.suffix(budget))
+            let live = [m.volatileOthers.isEmpty ? nil : "**Others** (still speaking): \(m.volatileOthers)",
+                        m.volatileMe.isEmpty ? nil : "**Me** (still speaking): \(m.volatileMe)"].compactMap { $0 }.joined(separator: "\n")
+            context = live.isEmpty ? t : t + "\n" + live
+        case .doc(let d):
+            about = "This meeting is over; you answer from its saved notes and transcript."
+            context = String(d.markdown.prefix(budget))
+        case .all(let list):
+            about = "You answer from the user's saved meetings (newest first). Name the meeting and date for each point you use."
+            var t = ""
+            for p in list {
+                let block = "=== \(p.title) (\(p.date.formatted(date: .abbreviated, time: .shortened)))\n\(p.text)\n\n"
+                if t.count + block.count > budget { break }
+                t += block
+            }
+            context = t.isEmpty ? "(no saved meetings)" : t
+        }
+        let live = isLive
+        let withScreen = useScreen && live
+        let length = live
+            ? "Keep every answer short enough to glance at mid-conversation: one to three sentences, or at most three short bullets."
+            : "Be complete but brief. Use Markdown bullets or checkboxes where they help."
         Task {
             let shot = withScreen ? await Self.screenshot() : nil
             let system = """
-            You are a meeting copilot for the user ("Me"). "Others" is everyone else on the call, mixed into one voice. \(savedNote)\
-            The transcript comes from speech recognition and has errors: infer what was meant, never invent facts. \
-            Keep every answer short enough to glance at mid-conversation: one to three sentences, or at most three short bullets. \
-            No headings, no preamble, no restating the question. \
+            You help the user ("Me") with their meetings. "Others" is everyone else on a call, mixed into one voice. \(about) \
+            Transcripts come from speech recognition and have errors: infer what was meant, never invent facts. \
+            \(length) No headings, no preamble, no restating the question, no em dashes. \
             Answer in the language the user asks in (Japanese question, Japanese answer). \
             \(shot != nil ? "A screenshot of the user's screen is attached; use it when it helps." : "")
             """
-            var user = (saved == nil ? "Meeting transcript so far:\n\n" : "Saved meeting:\n\n") + (transcript.isEmpty ? "(nothing transcribed yet)" : transcript)
-            if !live.isEmpty { user += "\n\n" + live }
-            user += "\n\n---\n\n" + (instruction ?? "My question: \(q)")
+            let user = context + "\n\n---\n\n" + (instruction ?? "My question: \(q)")
             do {
                 let answer = try await AI.complete(.meetingChat, system: system, user: user, imageJPEG: shot)
                 if exchanges.indices.contains(index) { exchanges[index].answer = answer }
@@ -142,7 +171,7 @@ import SwiftUI
 
     init(store: Store, meeting: MeetingRecorder, copilot: MeetingCopilot) {
         self.store = store
-        panel = CopilotPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 560), styleMask: [.borderless, .nonactivatingPanel, .resizable],
+        panel = CopilotPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 620), styleMask: [.borderless, .nonactivatingPanel, .resizable],
                              backing: .buffered, defer: false)
         panel.level = .floating
         panel.isFloatingPanel = true
@@ -152,7 +181,7 @@ import SwiftUI
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
-        panel.minSize = NSSize(width: 340, height: 320)
+        panel.minSize = NSSize(width: 380, height: 420)
         panel.setFrameAutosaveName("MoneyMeetingCopilot")
         let panelRef = panel
         let view = FirstMouseHostingView(rootView: CopilotView(meeting: meeting, copilot: copilot, store: store, hide: { [weak self] in self?.hide() },
@@ -160,7 +189,7 @@ import SwiftUI
         view.sizingOptions = []
         panel.contentView = view
         if panel.frame.origin == .zero, let vf = NSScreen.main?.visibleFrame {
-            panel.setFrameOrigin(NSPoint(x: vf.maxX - 420, y: vf.maxY - 600))
+            panel.setFrameOrigin(NSPoint(x: vf.maxX - 460, y: vf.maxY - 660))
         }
         applyPrivacy()
     }
@@ -188,70 +217,96 @@ private final class CopilotPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-private struct CopilotView: View {
+/// The floating meeting window: a bar (recording state and controls), then the meeting as a document.
+struct CopilotView: View {
     let meeting: MeetingRecorder
     let copilot: MeetingCopilot
     let store: Store
     let hide: () -> Void
     let window: () -> NSWindow?
+    /// Off-screen snapshots: a solid background instead of glass, and where to start.
+    var opaque = false
+    var tab = PageTab.notes
+    var chatOpen = false
 
-    @AppStorage("copilotSplit") private var split = 0.45
+    private let inset = PanelLayout.inset
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: ChatLayout.windowRadius, style: .continuous)
         VStack(spacing: 0) {
             header
-            if meeting.phase == .done {
-                transcript
-                    .frame(maxHeight: .infinity)
-                    .overlay(alignment: .bottomTrailing) { ExpandingChat(copilot: copilot, title: "Ask about this meeting") }
-            } else {
-                GeometryReader { geo in
-                    let h = geo.size.height
-                    VStack(spacing: 0) {
-                        transcript.frame(height: max(60, (h - 10) * split))
-                        SplitHandle(fraction: $split, total: h)
-                        assistant.frame(maxHeight: .infinity)
-                    }
-                }
+            switch meeting.phase {
+            case .idle, .failed:
+                idle
+            default:
+                MeetingPage(doc: meeting.doc, recorder: meeting, chat: copilot, outerRadius: ChatLayout.windowRadius, tab: tab, chatOpen: chatOpen)
+                    .id(meeting.doc.id)
             }
         }
         .background {
-            RoundedRectangle(cornerRadius: ChatLayout.windowRadius, style: .continuous).fill(.clear)
-                .glassEffect(.regular.tint(Color.black.opacity(0.35)), in: RoundedRectangle(cornerRadius: ChatLayout.windowRadius, style: .continuous))
-            RoundedRectangle(cornerRadius: ChatLayout.windowRadius, style: .continuous).fill(Color.black.opacity(store.settings.darkness * 0.8))
+            if opaque {
+                shape.fill(Color(white: 0.11))
+            } else {
+                shape.fill(.clear).glassEffect(.regular.tint(Color.black.opacity(0.35)), in: shape)
+                shape.fill(Color.black.opacity(store.settings.darkness * 0.8))
+            }
         }
-        .clipShape(RoundedRectangle(cornerRadius: ChatLayout.windowRadius, style: .continuous))
+        .clipShape(shape)
         .overlay { ResizeEdges(window: window) }
         .environment(\.colorScheme, .dark)
     }
 
+    /// Recording: the clock, language, sound, pause and stop. Ended: copy, share, a new meeting. Always: hide.
     private var header: some View {
-        HStack(spacing: 8) {
-            PulsingDot(active: meeting.phase == .recording)
-            TextField(title, text: Binding(get: { meeting.name }, set: { meeting.name = $0 }), prompt: Text("Name this meeting"))
-                .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .semibold))
-                .frame(maxWidth: 170)
-            Text(meeting.clock).font(.system(size: 13, weight: .medium).monospacedDigit()).foregroundStyle(.secondary)
-            Spacer()
-            audioMenu
-            if meeting.isRunning {
-                small(meeting.phase == .paused ? "play.fill" : "pause.fill", meeting.phase == .paused ? "Resume" : "Pause") { meeting.togglePause() }
-                small("stop.fill", "Stop and write notes", tint: .red) { meeting.stop() }
-            } else if meeting.phase != .summarizing {
-                small("record.circle", "New meeting", tint: .red) {
-                    copilot.reset()
-                    meeting.reset()
-                    meeting.start()
-                }
+        HStack(spacing: PanelLayout.gap) {
+            switch meeting.phase {
+            case .recording, .paused:
+                PulsingDot(active: meeting.phase == .recording)
+                Text(meeting.clock).font(.system(size: 13, weight: .semibold).monospacedDigit())
+                Spacer(minLength: 0)
+                LanguageToggle(meeting: meeting)
+                audioMenu
+                button(meeting.phase == .paused ? "play.fill" : "pause.fill", meeting.phase == .paused ? "Resume" : "Pause") { meeting.togglePause() }
+                button("stop.fill", "Stop and write notes", tint: .red) { meeting.stop() }
+            case .summarizing:
+                Text("Writing notes").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                ThinkingDots().foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            case .done:
+                Spacer(minLength: 0)
+                CopyMenu(doc: meeting.doc)
+                ShareButton(url: meeting.doc.url)
+                button("folder", "Show in Finder") { meeting.showInFinder(meeting.doc.url) }
+                button("record.circle", "New meeting", tint: .red) { newMeeting() }
+            case .idle, .failed:
+                Spacer(minLength: 0)
             }
-            small("minus", "Hide (⌘\\)") { hide() }
+            button("minus", "Hide (⌘\\)") { hide() }
         }
-        .padding(.horizontal, ChatLayout.inset + 4)
-        .frame(height: 48)
+        .padding(inset)
         .contentShape(Rectangle())
         .modifier(WindowMove(window: window))
-        .help("Drag to move")
+    }
+
+    /// Nothing recording: start one (named after the calendar event on now, if there is one).
+    private var idle: some View {
+        VStack(spacing: 12) {
+            if case .failed(let why) = meeting.phase {
+                Text(why).font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            if let e = CalendarEvents.shared.current() {
+                Text(e.title).font(.system(size: 17, weight: .semibold)).lineLimit(2).multilineTextAlignment(.center)
+            }
+            PillButton(title: "Start Recording", symbol: "record.circle", tint: .red) { newMeeting() }
+        }
+        .padding(inset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func newMeeting() {
+        copilot.reset()
+        meeting.reset()
+        meeting.start()
     }
 
     /// Which microphone, and whether each side is transcribed.
@@ -270,14 +325,11 @@ private struct CopilotView: View {
             }
         } label: {
             ZStack(alignment: .bottom) {
-                Image(systemName: meeting.micOn ? "mic.fill" : "mic.slash.fill").font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(meeting.micOn ? Color.primary : Color.red)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.white.opacity(0.1)))
+                MeetingIcon(symbol: meeting.micOn ? "mic.fill" : "mic.slash.fill", tint: meeting.micOn ? nil : .red)
                 // Live input level, so you can see the mic is picking you up.
-                Capsule().fill(Color.green.opacity(0.8))
+                Capsule().fill(ChatLayout.tint)
                     .frame(width: 16 * CGFloat(meeting.micOn && meeting.isRunning ? meeting.micLevel : 0), height: 2)
-                    .padding(.bottom, 5)
+                    .padding(.bottom, 6)
                     .animation(.linear(duration: 0.08), value: meeting.micLevel)
             }
         }
@@ -288,59 +340,10 @@ private struct CopilotView: View {
         .help("Microphone and sound")
     }
 
-    private var title: String {
-        switch meeting.phase {
-        case .recording: "Meeting"
-        case .paused: "Paused"
-        case .summarizing: "Writing notes…"
-        case .done: "Meeting notes"
-        default: "Meeting"
-        }
-    }
-
-    private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    if meeting.phase == .done, !meeting.summary.isEmpty {
-                        NotesView(markdown: meeting.summary)
-                    } else {
-                        if meeting.lines.isEmpty, meeting.volatileMe.isEmpty, meeting.volatileOthers.isEmpty {
-                            Text(meeting.isRunning ? "Listening…" : "No meeting running.").font(.system(size: 12.5)).foregroundStyle(.secondary)
-                        }
-                        ForEach(meeting.lines.suffix(80)) { l in line(l.me, l.text, live: false) }
-                        if !meeting.volatileOthers.isEmpty { line(false, meeting.volatileOthers, live: true) }
-                        if !meeting.volatileMe.isEmpty { line(true, meeting.volatileMe, live: true) }
-                    }
-                    Color.clear.frame(height: 1).id("end")
-                }
-                .padding(ChatLayout.inset)
-            }
-            .onChange(of: meeting.lines.count) { _, _ in withAnimation(.smooth(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: meeting.volatileOthers + meeting.volatileMe) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-        }
-    }
-
-    private func line(_ me: Bool, _ text: String, live: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(me ? "Me" : "Others").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(me ? ChatLayout.tint : .secondary)
-                .frame(width: 40, alignment: .leading)
-            Text(text).font(.system(size: 12.5)).foregroundStyle(live ? .secondary : .primary).textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var assistant: some View { MeetingChat(copilot: copilot) }
-
-    private func small(_ symbol: String, _ help: String, tint: Color = .primary, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(tint)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.white.opacity(0.1)))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help(help)
+    private func button(_ symbol: String, _ help: String, tint: Color? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) { MeetingIcon(symbol: symbol, tint: tint) }
+            .buttonStyle(.plain)
+            .help(help)
     }
 }
 
@@ -371,8 +374,8 @@ private struct ResizeEdges: View {
 
     var body: some View {
         ZStack {
-            grip(.left).frame(width: t).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.top, 48)
-            grip(.right).frame(width: t).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing).padding(.top, 48)
+            grip(.left).frame(width: t).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.top, 64)
+            grip(.right).frame(width: t).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing).padding(.top, 64)
             grip(.bottom).frame(height: t).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             grip(.bottomLeft).frame(width: 16, height: 16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             grip(.bottomRight).frame(width: 16, height: 16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -431,42 +434,12 @@ private struct ResizeGrip: View {
 /// One inset inside the meeting window; the message box is a capsule, and the window's corners are its radius plus
 /// the inset, so the curves are concentric.
 enum ChatLayout {
-    static let inset: CGFloat = 12
+    static let inset: CGFloat = PanelLayout.inset
     static let fieldHeight: CGFloat = 40
-    static var windowRadius: CGFloat { fieldHeight / 2 + inset }
+    /// Concentric with the bar's 32 pt round buttons, one inset in.
+    static var windowRadius: CGFloat { 16 + inset }
     /// The chat's colour (MONEY! green rather than the system blue).
     static let tint = Color(red: 0.18, green: 0.72, blue: 0.45)
-}
-
-/// The bar between the transcript and the chat: drag it to give either more room.
-private struct SplitHandle: View {
-    @Binding var fraction: Double
-    let total: CGFloat
-    @State private var start: (fraction: Double, mouse: CGFloat)?
-
-    var body: some View {
-        ZStack {
-            Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
-            Capsule().fill(Color.white.opacity(0.25)).frame(width: 36, height: 4)
-        }
-        .frame(height: 10)
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-        .onHover { $0 ? NSCursor.resizeUpDown.set() : NSCursor.arrow.set() }
-        .gesture(
-            // Screen coordinates: the handle itself moves while dragging, so measuring from it made the split shake.
-            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .onChanged { _ in
-                    let y = NSEvent.mouseLocation.y
-                    if start == nil { start = (fraction, y) }
-                    guard let s = start, total > 20 else { return }
-                    var t = Transaction()
-                    t.disablesAnimations = true
-                    withTransaction(t) { fraction = min(0.85, max(0.12, s.fraction + (s.mouse - y) / total)) }
-                }
-                .onEnded { _ in start = nil }
-        )
-    }
 }
 
 /// Chat about a meeting (live in the floating window, or a saved one in the popup).
@@ -490,18 +463,15 @@ struct MeetingChat: View {
                                         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(ChatLayout.tint.opacity(0.9)))
                                         .foregroundStyle(.white)
                                 }
-                                HStack {
-                                    Group {
-                                        if let a = ex.answer {
-                                            NotesView(markdown: a).foregroundStyle(ex.failed ? Color.orange : .primary)
-                                        } else {
-                                            ThinkingDots().foregroundStyle(.secondary).frame(height: 18)
-                                        }
+                                // The answer sits on the panel itself, like a page (no bubble behind it).
+                                Group {
+                                    if let a = ex.answer {
+                                        NotesView(markdown: a, spaced: true).foregroundStyle(ex.failed ? Color.orange : .primary)
+                                    } else {
+                                        ThinkingDots().foregroundStyle(.secondary).frame(height: 18)
                                     }
-                                    .padding(.horizontal, 12).padding(.vertical, 9)
-                                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.09)))
-                                    Spacer(minLength: 40)
                                 }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .id(ex.id)
                         }
@@ -516,8 +486,8 @@ struct MeetingChat: View {
             // Suggestions sit above the message box.
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
-                    ForEach(MeetingCopilot.Quick.allCases.filter { copilot.isLive || $0 != .say }) { q in
-                        SuggestionChip(title: q.title, on: false) { copilot.run(q) }
+                    ForEach(copilot.recipes) { r in
+                        SuggestionChip(title: r.title, on: false) { copilot.run(r) }
                     }
                     if copilot.isLive {
                         SuggestionChip(title: "Screen", on: copilot.useScreen) { copilot.useScreen.toggle() }
@@ -558,10 +528,10 @@ struct MeetingChat: View {
         }
     }
 
-    /// Return (or ⌘↩) sends the question; ⌘↩ with nothing typed asks what to say next.
+    /// Return (or ⌘↩) sends the question; ⌘↩ with nothing typed runs the first prompt.
     private func send() {
         let q = question.trimmingCharacters(in: .whitespaces)
-        if q.isEmpty { copilot.run(copilot.isLive ? .say : .recap) } else { copilot.ask(q) }
+        if q.isEmpty { if let r = copilot.recipes.first { copilot.run(r) } } else { copilot.ask(q) }
         question = ""
     }
 
@@ -597,6 +567,7 @@ struct ExpandingChat: View {
     /// Radius of the corner it sits in, and its distance from that corner's edges.
     var outerRadius: CGFloat = ChatLayout.windowRadius
     var inset: CGFloat = ChatLayout.inset
+    var startOpen = false
     @State private var open = false
     @AppStorage("meetingChatWidth") private var width = 360.0
     @AppStorage("meetingChatHeight") private var height = 400.0
@@ -653,13 +624,14 @@ struct ExpandingChat: View {
         .background {
             ZStack {
                 Color.clear.glassEffect(open ? .regular : .regular.tint(ChatLayout.tint.opacity(0.6)).interactive(), in: shape)
-                shape.fill(Color.black.opacity(open ? 0.45 : 0))
+                shape.fill(Color(white: 0.08).opacity(open ? 0.94 : 0))
             }
         }
         .clipShape(shape)
         .shadow(color: .black.opacity(open ? 0.35 : 0.25), radius: open ? 24 : 12, y: open ? 10 : 5)
         .padding(inset)
         .animation(.spring(duration: 0.45, bounce: 0.18), value: open)
+        .onAppear { if startOpen { open = true } }
     }
 
     /// Top-left corner: the chat is pinned bottom-right, so it grows up and to the left.

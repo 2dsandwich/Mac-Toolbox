@@ -34,7 +34,7 @@ import SwiftUI
         launcher.model.pomodoro = pomodoro
         island = IslandModel(pomodoro: pomodoro, dictation: dictation, meeting: meeting)
         island.isLauncherShowing = { [weak self] in self?.launcher.isShown ?? false }
-        copilot = MeetingCopilot(store: store, meeting: meeting)
+        copilot = MeetingCopilot(store: store, source: .live(meeting))
         copilotWindow = CopilotWindow(store: store, meeting: meeting, copilot: copilot)
         launcher.model.meetingCopilot = copilot
         islandController = IslandController(model: island, openMeeting: { [weak self] in self?.showMeetingWindow() })

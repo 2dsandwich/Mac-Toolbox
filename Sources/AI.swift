@@ -170,7 +170,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .dictation: 2048
         case .voiceEdit: 4096
-        case .meetingChat: 800
+        case .meetingChat: 1500
         case .assistant: 1024
         case .meetingNotes: 4096
         case .translate: 2048
@@ -423,6 +423,26 @@ enum AIError: LocalizedError {
         var joined = notes.enumerated().map { "Part \($0.offset + 1):\n\($0.element)" }.joined(separator: "\n\n")
         if joined.count > budget { joined = String(joined.prefix(budget)) }
         return try await complete(task, system: system, user: "Notes from each part of the meeting, in order:\n\n" + joined)
+    }
+
+    /// Like `complete`, but hands over the text as it arrives (Claude streams; other services answer all at once).
+    static func stream(_ task: AITask, system: String, user: String, onText: @escaping @MainActor (String) -> Void) async throws -> String {
+        let s = Store.shared.settings
+        let c = choice(task, s)
+        guard c.provider == .anthropic, user.count <= budget(task, s) else {
+            let out = try await completeLong(task, system: system, prefix: "", text: user)
+            onText(out)
+            return out
+        }
+        let o = options(.anthropic, s)
+        let r = try await Claude.stream(system: system, messages: [["role": "user", "content": user]], model: c.model,
+                                        effort: o.effort == "auto" ? task.effort : o.effort, maxTokens: c.maxTokens ?? task.maxTokens,
+                                        tools: [], timeout: task.timeout, fallback: o.fallback) { blocks in
+            onText(blocks.compactMap { $0["text"] as? String }.joined())
+        }
+        let out = stripThinking(r.blocks.compactMap { $0["text"] as? String }.joined())
+        guard !out.isEmpty else { throw AIError.empty }
+        return out
     }
 
     private static func stripThinking(_ s: String) -> String {

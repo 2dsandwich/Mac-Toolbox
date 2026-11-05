@@ -383,6 +383,8 @@ struct Settings: Codable, Equatable {
     /// The microphone meetings record ("" = the system's default).
     var meetingMicUID = ""
     var meetingSummary = true
+    /// The notes' template ("" = picked from the meeting's title and attendees).
+    var meetingTemplate = ""
     /// The floating meeting window with live help (opens when a meeting starts).
     var meetingOverlay = true
     var copilotHotKey = HotKey(keyCode: UInt32(kVK_ANSI_Backslash), modifiers: UInt32(cmdKey))

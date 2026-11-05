@@ -87,19 +87,14 @@ struct LauncherRoot: View {
                     MixerView(mixer: AudioMixer.shared, radius: radius, query: model.query)
                         .transition(.opacity)
                 } else if model.scope == .meeting, let opened = model.openedMeeting {
-                    PastMeetingView(past: opened, query: model.query, s: s, chat: model.pastChat, rename: meetingActions.rename)
+                    MeetingPage(doc: opened, chat: model.pastChat, query: model.query, outerRadius: s.scopedCornerRadius)
+                        .id(opened.id)
+                        .padding(.top, PanelLayout.gap)
+                        .frame(height: Metrics.clipboardList(s))
                         .transition(.opacity)
                 } else if model.scope == .meeting, model.meetingListMode {
-                    if model.items.isEmpty {
-                        Text(model.query.isEmpty ? "No meetings yet" : "No meetings match.")
-                            .font(.system(size: 13)).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 26)
-                            .frame(height: Metrics.slot(s), alignment: .top)
-                            .transition(.opacity)
-                    } else {
-                        ResultList(model: model, s: s, radius: max(4, min(radius - listInset, s.rowHeight / 2)), onActivate: onActivate)
-                            .transition(.opacity)
-                    }
+                    MeetingHome(model: model, s: s, radius: max(4, min(radius - listInset, s.rowHeight / 2)), onActivate: onActivate)
+                        .transition(.opacity)
                 } else if model.scope == .meeting, let meeting = model.meeting {
                     MeetingView(meeting: meeting, query: model.query, s: s, chat: model.meetingCopilot)
                         .transition(.opacity)
@@ -425,7 +420,7 @@ struct SearchField: NSViewRepresentable {
 
 // MARK: Results
 
-private struct ResultList: View {
+struct ResultList: View {
     let model: LauncherModel
     let s: Settings
     let radius: CGFloat
@@ -516,6 +511,7 @@ private struct ResultRow: View {
         case .clip: "Paste ↩"
         case .site: "Open ↩"
         case .meetingFile: "Read ↩"
+        case .meetingEvent: "Record ↩"
         case .setting: "Open ↩"
         case .answer(let a): a.hintText
         }
@@ -555,6 +551,10 @@ private struct ItemIcon: View {
                 RoundedRectangle(cornerRadius: tile, style: .continuous)
                     .fill(Color.red.opacity(0.85).gradient)
                     .overlay(Image(systemName: "waveform").font(.system(size: size * 0.45, weight: .semibold)).foregroundStyle(.white))
+            case .meetingEvent(let e):
+                RoundedRectangle(cornerRadius: tile, style: .continuous)
+                    .fill(Color(nsColor: e.color).gradient)
+                    .overlay(Image(systemName: e.link != nil ? "video.fill" : "calendar").font(.system(size: size * 0.4, weight: .semibold)).foregroundStyle(.white))
             case .setting(let pane):
                 RoundedRectangle(cornerRadius: tile, style: .continuous)
                     .fill(Color(nsColor: pane.color).gradient)

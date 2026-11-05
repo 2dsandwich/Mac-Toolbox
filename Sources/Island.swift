@@ -1940,6 +1940,14 @@ struct IslandView: View {
                 }
                 Spacer(minLength: 0)
                 if e.link != nil { RoundButton(symbol: "video.fill", tint: .green) { c.join(e) }.help("Join") }
+                // Offered, never automatic: notes for this event (its title and attendees).
+                if !model.meeting.isRunning, model.meeting.phase != .summarizing {
+                    RoundButton(symbol: "record.circle", tint: .red) {
+                        model.meeting.reset()
+                        model.meeting.start(event: e)
+                    }
+                    .help("Take notes")
+                }
                 RoundButton(symbol: "xmark", tint: nil) { c.dismiss(e) }.help("Dismiss")
             }
         }

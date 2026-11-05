@@ -790,6 +790,13 @@ private struct MeetingsPane: View {
                     }
                 }
                 Toggle("Write notes with AI when it ends", isOn: $store.settings.meetingSummary)
+                Picker("Notes template", selection: $store.settings.meetingTemplate) {
+                    Text("Auto (from the title and attendees)").tag("")
+                    ForEach(MeetingTemplate.all) { t in Text(t.name).tag(t.name) }
+                }
+                LabeledContent("Your own templates") {
+                    Button("Open Folder") { NSWorkspace.shared.open(MeetingTemplate.openFolder()) }
+                }
                 Toggle("Floating meeting window with live help", isOn: $store.settings.meetingOverlay)
                 LabeledContent("Show / hide it") { HotKeyField(hotKey: $store.settings.copilotHotKey).frame(width: 150, height: 26) }
                 Toggle("Hide MONEY! from screen sharing and recordings", isOn: $store.settings.hideFromScreenShare)
