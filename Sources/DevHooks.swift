@@ -501,16 +501,15 @@ extension AppDelegate {
         }
         if args.contains("--lyrics-timing-test") {
             // Made-up song: when each line's words finish filling against its time on screen (short gaps, long rests, a
-            // break, a long line in a short gap, Japanese), and the pace taken from the song.
-            let lrc = "[00:10.00]Short line here\n[00:12.50]Another short one\n[00:15.00]Then a much longer line that keeps on going for a while\n[00:18.00]Quick\n[00:20.00]A line before a long rest\n[00:34.00]Back after the rest\n[00:37.00]\n[00:52.00]After the instrumental break\n[00:55.50]これは日本語の歌詞の行です\n[00:59.00]Last line of the song"
-            let lines = [(10.0, "Short line here"), (12.5, "Another short one"), (15.0, "Then a much longer line that keeps on going for a while"), (18.0, "Quick"), (20.0, "A line before a long rest"), (34.0, "Back after the rest"), (37.0, ""), (52.0, "After the instrumental break"), (55.5, "これは日本語の歌詞の行です"), (59.0, "Last line of the song")]
-            print(String(format: "pace: %.2f syllables a second", Lyrics.singingRate(lines.map { (time: $0.0, text: $0.1) }, songEnd: 65)))
+            // break, a long line in a short gap, Japanese), and each word's start.
+            let lrc = "[00:10.00]Short line here\n[00:12.50]Another short one\n[00:15.00]Then a much longer line, that keeps on going for a while\n[00:18.00]Quick\n[00:20.00]A line before a long rest\n[00:34.00]Back after the rest\n[00:37.00]\n[00:52.00]After the instrumental break\n[00:55.50]これは日本語の歌詞の行です\n[00:59.00]Last line of the song"
             let cues = Lyrics.parse(lrc, duration: 65)
             for (k, c) in cues.enumerated() {
                 let next = k + 1 < cues.count ? cues[k + 1].time : 65
                 if let t = c.text {
                     print(String(format: "%5.2f–%5.2f (%4.1f s) fill ends %5.2f (%4.1f s, %3.0f%% of the window), %4.1f syllables", c.time, next, next - c.time,
                                  c.end, c.end - c.time, (c.end - c.time) / (next - c.time) * 100, Lyrics.syllables(t)), "|", t.count, "chars")
+                    print("       words:", c.words.map { String(format: "%@ %.2f–%.2f", $0.text.trimmingCharacters(in: .whitespaces), $0.start, $0.end) }.joined(separator: " · "))
                 } else {
                     print(String(format: "%5.2f–%5.2f dots", c.time, c.end))
                 }

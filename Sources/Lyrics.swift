@@ -231,7 +231,7 @@ import SwiftUI
         lines.sort { $0.time < $1.time }
         let songEnd = duration > 0 ? duration : (lines.last?.time ?? 0) + 8
         guard lines.contains(where: { !wordless($0.text) }) else { return [] }
-        let rate = singingRate(lines, songEnd: songEnd)
+        let sung = sungLengths(lines, songEnd: songEnd)
         var out: [Cue] = []
         if let first = lines.first(where: { !wordless($0.text) }), first.time >= gapMin { out.append(Cue(time: 0, text: nil, end: first.time)) }
         for (k, l) in lines.enumerated() {
@@ -240,7 +240,7 @@ import SwiftUI
                 guard next - l.time >= gapMin, !out.isEmpty, out.last?.text != nil else { continue }
                 out.append(Cue(time: l.time, text: nil, end: next))
             } else {
-                let cue = timed(l.text, at: l.time, until: next, rate: rate)
+                let cue = timed(l.text, at: l.time, until: next, sung: sung[k])
                 out.append(cue)
                 // Sung well before the next line (and no blank line says so): dots for the rest.
                 if k + 1 < lines.count, next - cue.end > 9 { out.append(Cue(time: cue.end + 1.5, text: nil, end: next)) }
@@ -261,19 +261,30 @@ import SwiftUI
         text.replacingOccurrences(of: #"<\d+:\d+(?:[.:]\d+)?>"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// How fast this song is sung, in syllables a second: the middle of its lines' own pace (a line's syllables over the
-    /// time to the next line, leaving out lines followed by a long rest), a little faster since lines rarely fill their
-    /// time; 3 to 6, and 4.5 when the song has too few lines to tell.
-    static func singingRate(_ lines: [(time: Double, text: String)], songEnd: Double) -> Double {
+    /// About how long each line is sung. Lines follow the music's bars more than their syllables: over 163 songs (6,198
+    /// lines) a line's time hardly grows with its syllables (half the syllables still take about 80% of the time; relative
+    /// time ≈ 0.69 + 0.26 × relative syllables), and the lines around it tell its length better than the song's pace.
+    /// So a line the next one follows at once is sung across its time, less a breath; one before a rest (a gap well past
+    /// its neighbours') takes about what they take, a little more or less with its syllables. No syllable is drawn out
+    /// much past a second.
+    static func sungLengths(_ lines: [(time: Double, text: String)], songEnd: Double) -> [Double] {
         func median(_ v: [Double]) -> Double? { v.isEmpty ? nil : v.sorted()[v.count / 2] }
-        let sung = lines.indices.compactMap { k -> (syl: Double, gap: Double)? in
-            guard !wordless(lines[k].text) else { return nil }
-            let gap = (k + 1 < lines.count ? lines[k + 1].time : songEnd) - lines[k].time
-            let syl = syllables(lines[k].text.replacingOccurrences(of: #"<\d+:\d+(?:[.:]\d+)?>"#, with: "", options: .regularExpression))
-            return gap > 0.5 && syl > 0 ? (syl, gap) : nil
+        let gaps = lines.indices.map { k in (k + 1 < lines.count ? lines[k + 1].time : songEnd) - lines[k].time }
+        let syl = lines.map { wordless($0.text) ? 0 : syllables($0.text.replacingOccurrences(of: #"<\d+:\d+(?:[.:]\d+)?>"#, with: "", options: .regularExpression)) }
+        let sung = lines.indices.filter { syl[$0] > 0 && gaps[$0] > 0.5 }
+        let typical = median(sung.map { gaps[$0] }) ?? 3
+        let ordinary = sung.filter { gaps[$0] <= typical * 1.6 }
+        return lines.indices.map { k in
+            guard syl[k] > 0 else { return 0 }
+            // The lines around it (four each way): the tempo of this part of the song.
+            let near = ordinary.filter { $0 != k && abs($0 - k) <= 4 }
+            let usual = median(near.map { gaps[$0] }) ?? typical
+            let usualSyl = median(near.map { syl[$0] }) ?? syl[k]
+            let own = gaps[k]
+            let likely = own <= usual * 1.6 ? own : usual * min(1.6, max(0.5, 0.69 + 0.26 * syl[k] / max(1, usualSyl)))
+            let breath = min(0.6, max(0.25, own * 0.1))
+            return max(min(0.5, own * 0.9), min(likely, syl[k] + 0.8, own - breath))
         }
-        guard let typical = median(sung.map(\.gap)), let pace = median(sung.filter { $0.gap <= typical * 1.6 }.map { $0.syl / $0.gap }) else { return 4.5 }
-        return min(6, max(3, pace * 1.15))
     }
 
     /// About how many syllables a bit of a line takes to sing: vowel groups in a word written in letters (a final silent
@@ -313,9 +324,10 @@ import SwiftUI
         return n
     }
 
-    /// One line with each word's time: from its own stamps, else spread over the time it likely takes to sing at the
-    /// song's pace (each word's share by its syllables), never past the next line; the rest of the time it stays lit.
-    static func timed(_ raw: String, at time: Double, until next: Double, rate: Double = 4.5) -> Cue {
+    /// One line with each word's time: from its own stamps, else spread over the time it's likely sung (`sungLengths`):
+    /// each word's share by its syllables, the last word held, and a word before a comma (or 、, or a space between
+    /// Japanese phrases) drawn out a little before the next comes in. After that it stays lit.
+    static func timed(_ raw: String, at time: Double, until next: Double, sung: Double) -> Cue {
         let marks = raw.matches(of: #/<(\d+:\d+(?:[.:]\d+)?)>/#)
         if !marks.isEmpty {
             var words: [Word] = []
@@ -336,11 +348,20 @@ import SwiftUI
         let parts = tokens(text)
         let weights = parts.map { 0.25 + syllables($0) }
         let total = weights.reduce(0, +)
-        let sung = min(max(0.6, (total - 0.25 * Double(parts.count)) / rate), max(0.5, (next - time) * 0.95))
+        let japanese = text.unicodeScalars.contains { (0x3040...0x30FF).contains($0.value) || (0x4E00...0x9FFF).contains($0.value) }
+        // Time not spread by syllables: the last word's hold, and a short hold at each comma inside the line.
+        var extra = parts.indices.map { k -> Double in
+            guard k < parts.count - 1 else { return min(1.2, max(0.2, sung * 0.18)) }
+            let pause = parts[k].range(of: #"[,、，;；:：…—!?！？]|　"#, options: .regularExpression) != nil || (japanese && parts[k].hasSuffix(" "))
+            return pause ? min(0.35, max(0.12, sung * 0.06)) : 0
+        }
+        let held = extra.reduce(0, +)
+        if held > sung * 0.4 { extra = extra.map { $0 * sung * 0.4 / held } }
+        let spread = sung - extra.reduce(0, +)
         var words: [Word] = []
         var t = time
-        for (p, w) in zip(parts, weights) {
-            let d = sung * w / total
+        for (k, p) in parts.enumerated() {
+            let d = spread * weights[k] / total + extra[k]
             words.append(Word(start: t, end: t + d, text: p))
             t += d
         }
@@ -483,6 +504,7 @@ struct LyricLines: View {
     /// Extra lines of turn, wound up as the face opens and let go so the reel spins down onto the line being sung.
     @State private var spin: Double = 0
     @State private var height: CGFloat = 200
+    @State private var width: CGFloat = 0
 
     /// The line being sung, and the rest.
     static let size: CGFloat = 21
@@ -505,7 +527,7 @@ struct LyricLines: View {
         .clipped()
         // Blurred while the reel spins in, sharpening as it slows.
         .blur(radius: min(2.5, spin * 0.2))
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { height = $0.height; width = $0.width }
         .task(id: lyricClock(lyrics)) {
             await lyrics.track { i in
                 if index == nil { index = i } else if i != index { withAnimation(reelStop) { index = i } }
@@ -522,6 +544,7 @@ struct LyricLines: View {
     }
 
     private func line(_ cue: Lyrics.Cue, k: Int, i: Int, focus: Double) -> some View {
+        let cue = Self.rows(cue, width: width)
         let now = k == i, far = abs(Double(k) - focus)
         return Group {
             if cue.text == nil { GapDots(cue: cue, active: now && live).scaleEffect(now ? 1 : 0.7, anchor: .leading) }
@@ -539,6 +562,47 @@ struct LyricLines: View {
             lyrics.stopBrowsing()
             withAnimation(reelStop) { index = k }
         }
+    }
+}
+
+extension LyricLines {
+    /// Where each line breaks when it's the one being sung (full size, full width), by line text and width.
+    nonisolated(unsafe) private static var breaks: [String: [Int]] = [:]
+
+    /// The line with those breaks written into it, so it keeps the same rows big or small (smaller, every row still
+    /// fits): becoming the line being sung never re-wraps it.
+    static func rows(_ cue: Lyrics.Cue, width: CGFloat) -> Lyrics.Cue {
+        guard let text = cue.text, width > 0 else { return cue }
+        var parts = cue.words.isEmpty ? [text] : cue.words.map(\.text)
+        let joined = parts.joined()
+        let key = "\(Int(width))|\(joined)"
+        let found = breaks[key] ?? {
+            let s = NSAttributedString(string: joined, attributes: [.font: NSFont.systemFont(ofSize: size, weight: .bold)])
+            let frame = CTFramesetterCreateFrame(CTFramesetterCreateWithAttributedString(s), CFRange(location: 0, length: 0),
+                                                 CGPath(rect: CGRect(x: 0, y: 0, width: width - 2, height: 10_000), transform: nil), nil)
+            let starts = (CTFrameGetLines(frame) as? [CTLine] ?? []).dropFirst().map { CTLineGetStringRange($0).location }
+            breaks[key] = starts
+            return starts
+        }()
+        guard !found.isEmpty else { return cue }
+        var starts: [Int] = [], at = 0
+        for p in parts { starts.append(at); at += (p as NSString).length }
+        // Last break first, so the earlier offsets still hold. A space before a break becomes the line break; else one goes in.
+        for b in found.sorted(by: >) where b > 0 {
+            let t = b - 1
+            guard let k = starts.lastIndex(where: { $0 <= t }) else { continue }
+            let m = NSMutableString(string: parts[k]), o = t - starts[k]
+            guard o < m.length else { continue }
+            let ch = m.character(at: o)
+            if ch == 0x20 || ch == 0x3000 { m.replaceCharacters(in: NSRange(location: o, length: 1), with: "\n") } else { m.insert("\n", at: o + 1) }
+            parts[k] = m as String
+        }
+        var out = cue
+        if cue.words.isEmpty { out.text = parts[0] } else {
+            for k in parts.indices { out.words[k].text = parts[k] }
+            out.text = parts.joined().trimmingCharacters(in: .whitespaces)
+        }
+        return out
     }
 }
 
