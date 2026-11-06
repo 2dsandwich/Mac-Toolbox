@@ -348,6 +348,8 @@ struct Settings: Codable, Equatable {
     var notchLyricsOpen = false
     /// The line being sung, just under the closed notch.
     var notchLyricLine = false
+    /// The line being sung fills in word by word as it's sung (off: the whole line lights up at once).
+    var notchLyricsFill = true
     var notchEvents = true
     /// Minutes before an event starts that it shows in the notch.
     var notchEventLead = 15

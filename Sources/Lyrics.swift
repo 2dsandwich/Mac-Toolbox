@@ -432,7 +432,7 @@ import SwiftUI
         browse = min(Double(cues.count - 1), max(0, from + lines))
         // A click on the trackpad for each line that rolls past the middle, like a reel's ratchet.
         if let to = browse, to.rounded() != from.rounded() {
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
         }
         browseEnd?.cancel()
         browseEnd = Task {
@@ -684,15 +684,16 @@ private struct KaraokeLine: View {
     let live: Bool
     var tint: Color
     @Environment(\.lyricSize) private var size
+    private var fill: Bool { Store.shared.settings.notchLyricsFill }
 
     var body: some View {
         Text(verbatim: cue.text ?? "")
             .foregroundStyle(.white)
             .fixedSize(horizontal: false, vertical: true)
             // Swapped with the copy at once, never cross-faded (that showed the line twice as it moved).
-            .animation(nil) { $0.opacity(active ? 0 : 1) }
+            .animation(nil) { $0.opacity(active && fill ? 0 : 1) }
             .overlay {
-                if active {
+                if active && fill {
                     let words = sung, on = live && NowPlaying.shared.playing, tint = tint, size = size
                     Isolated(content: TimelineView(Frames(on: on)) { ctx in
                         words.font(.system(size: size, weight: .bold))

@@ -1785,6 +1785,7 @@ private struct NotchPane: View {
             store.settings.notchLyrics = d.notchLyrics
             store.settings.notchLyricsOpen = d.notchLyricsOpen
             store.settings.notchLyricLine = d.notchLyricLine
+            store.settings.notchLyricsFill = d.notchLyricsFill
             store.settings.notchInCaptures = d.notchInCaptures
             store.settings.notchBand = d.notchBand
             store.settings.notchHideInFullScreen = d.notchHideInFullScreen
@@ -1811,6 +1812,8 @@ private struct NotchPane: View {
                 Toggle("Lyrics", isOn: $store.settings.notchLyrics)
                     .disabled(!store.settings.mediaInNotch)
                 Toggle("Lyric line under the closed notch", isOn: $store.settings.notchLyricLine)
+                    .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
+                Toggle("Words fill in as they’re sung", isOn: $store.settings.notchLyricsFill)
                     .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
                 Toggle("Upcoming events", isOn: $store.settings.notchEvents)
             }
