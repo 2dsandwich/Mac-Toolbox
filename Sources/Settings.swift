@@ -69,6 +69,40 @@ enum DictationLanguage: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How much the polish changes what was said.
+enum PolishStrength: String, Codable, CaseIterable, Identifiable {
+    case light, standard, strong
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .light: "Light"
+        case .standard: "Standard"
+        case .strong: "Strong"
+        }
+    }
+    /// For the cloud model; nil keeps the usual rules.
+    var instruction: String? {
+        switch self {
+        case .light: return nil // its own filler rules (Prompts.lightFillers)
+        case .standard: return nil
+        case .strong:
+            return """
+            Strength: strong. Beyond fillers and vague tags, tighten it: drop hedges ("I think maybe", "I was wondering if you could"), \
+            repetition and rambling, and say it in fewer, clearer words. Keep every point, request and detail, the speaker's \
+            language, and their politeness.
+            """
+        }
+    }
+    /// For small on-device models.
+    var compactInstruction: String? {
+        switch self {
+        case .light: "Remove only um, uh, えーと and stutters and fix punctuation. Keep every other word, even \"like\" and \"and stuff\"."
+        case .standard: nil
+        case .strong: "Also cut hedges and repetition: fewer, clearer words, every point kept."
+        }
+    }
+}
+
 enum DictationStyle: String, Codable, CaseIterable, Identifiable {
     case auto, casual, neutral, formal
     var id: String { rawValue }
@@ -414,6 +448,7 @@ struct Settings: Codable, Equatable {
     var modelMeetingChat = ClaudeModel.opus
     var modelMeetingNotes = ClaudeModel.opus
     var dictationStyle = DictationStyle.auto
+    var dictationPolish = PolishStrength.standard
     var dictationSounds = true
     var saveDictations = true
     var dictionary: [String] = []

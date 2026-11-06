@@ -136,6 +136,28 @@ extension AppDelegate {
                      [("en_US", "the formatting of the polishing stage doesn't really do anything it's really bad there are many words that are not correct and there are many filler words make the polishing better it's so bad and it's very bad", 0.8),
                       ("ja_JP", "別 とても とにかく悪い", 0.5)]),
                 ]
+                // Fillers and vague tags in the middle and at the end, not just the start (made-up takes).
+                if args.contains("--filler-only") {
+                    let takes = [
+                        "okay so the notch thing is kind of broken and stuff like when I open it it kind of flickers and all those kinds of things so can you fix that or something you know what I mean",
+                        "I want the lyrics to be bigger and like more centered and everything and also um the album art should fade or whatever if that makes sense yeah that's it",
+                        "make a list of the files that changed and stuff and then basically write tests for them or something like that I guess",
+                        "えーと、なんかボタンの色とか変えてほしいみたいな感じで、あとまあフォントも大きくしてほしい的な",
+                        "buy drinks and snacks and things for the party on Saturday",
+                    ]
+                    for t in takes {
+                        // Each strength on a copy of the settings (the saved ones stay as they are).
+                        for level in PolishStrength.allCases {
+                            var each = s
+                            each.dictationPolish = level
+                            let out = try? await AI.complete(.dictation, system: Prompts.cleanup(each, context: .prompt),
+                                                             user: Prompts.cleanupRequest(heard: [("en_US", t, 0.9)], merged: t, target: Prompts.Target(name: "Ghostty"), context: .prompt))
+                            print("\(level.title.lowercased()) →", Prompts.withoutInventedTags(out ?? "FAILED", heard: t).replacingOccurrences(of: "\n", with: " ⏎ "))
+                        }
+                        print("local →", Prompts.localCleanup(t, snippets: []))
+                    }
+                    exit(0)
+                }
                 for (heard, both) in cases {
                     let start = Date()
                     let said = both.isEmpty ? [("en_US", heard, 0.9)] : both

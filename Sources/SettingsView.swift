@@ -673,6 +673,10 @@ private struct DictationPane: View {
                 Picker("Style", selection: $store.settings.dictationStyle) {
                     ForEach(DictationStyle.allCases) { Text($0.title).tag($0) }
                 }
+                Picker("Strength", selection: $store.settings.dictationPolish) {
+                    ForEach(PolishStrength.allCases) { Text($0.title).tag($0) }
+                }
+                .disabled(!store.settings.aiCleanup)
                 Toggle("Whisper mode (raise a quiet voice)", isOn: $store.settings.whisperMode)
                 Toggle("Use the Mac's microphone when AirPods or another Bluetooth mic is the default", isOn: $store.settings.builtInMicForBluetooth)
                 Toggle("Mute the Mac’s sound while dictating (not during meetings)", isOn: $store.settings.muteWhileDictating)
@@ -682,7 +686,7 @@ private struct DictationPane: View {
             } header: {
                 Text("Polish")
             } footer: {
-                Text("The AI (Settings › AI; on this Mac by default) removes “um”s and false starts, keeps only what you meant when you correct yourself, fixes punctuation (、。 in Japanese) and writes lists, numbers and emails properly. “Match the app” is casual in chat apps, formal in mail, exact in code editors. With it off, MONEY! still removes fillers on its own.")
+                Text("The AI (Settings › AI; on this Mac by default) removes “um”s and false starts, keeps only what you meant when you correct yourself, fixes punctuation (、。 in Japanese) and writes lists, numbers and emails properly. “Match the app” is casual in chat apps, formal in mail, exact in code editors. Light only takes out “um”s and repeats; Strong also tightens the wording. With it off, MONEY! still removes fillers on its own.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if store.settings.dictationStyle == .auto {
