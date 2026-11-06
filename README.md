@@ -46,3 +46,7 @@ Calendar and Tasks use your own OAuth client: in Google Cloud, enable the Calend
 ## Privacy
 
 Clipboard history, dictations, meetings, notes and stats stay on your Mac (`~/Library/Application Support/MONEY`). Nothing is sent anywhere except to the AI service you pick, Google when you sign in, and the public APIs behind the live answers (Open-Meteo, Frankfurter, CoinGecko, holidays-jp, ipify, Apple's iTunes Search for song credits, and LRCLIB for lyrics of the song playing, only while lyrics are on).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
