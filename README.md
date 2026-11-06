@@ -50,3 +50,5 @@ Clipboard history, dictations, meetings, notes and stats stay on your Mac (`~/Li
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Some of the notch, calendar, quick add and focus behaviour is ported from [Ardia](https://github.com/mantrakp04/ardia) (Copyright 2026 Mantra Patel), licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
