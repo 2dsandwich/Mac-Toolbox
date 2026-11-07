@@ -62,18 +62,22 @@ let islandSpring = Animation.spring(response: 0.42, dampingFraction: 0.8)
 let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 
 @MainActor @Observable final class IslandModel {
-    enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media, event }
+    enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media, event, agents }
 
     var stage = IslandStage.hidden {
         didSet {
             guard stage != oldValue else { return }
             // The camera and a tile brought to the front last only while it's open.
-            if stage != .expanded { camera = false; focus = nil }
+            if stage != .expanded { camera = false; focus = nil; agentsOpen = false }
             onStage?(stage)
         }
     }
     /// The open notch shows the front camera as a mirror (the camera runs only while it shows).
     var camera = false { didSet { if !camera { CameraMirror.shared.stop() } } }
+    /// The agents button in the open notch: coding sessions take the main spot until it closes.
+    var agentsOpen = false
+    /// The question last opened for, so each one opens the notch once.
+    @ObservationIgnored private var askedFor: UUID?
     /// Opened by hovering the bare notch with nothing running: the idle home (time, next event, weather, quick starts).
     var idleOpen = false
     /// A tile tapped in the open notch: it takes the main spot until the notch closes.
@@ -119,8 +123,9 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 
     /// The one order there is: alarms and dictation first, then what's playing, timers, meetings, focus, stopwatches,
     /// messages and events.
-    private static let order: [Activity] = [.alarm, .dictation, .media, .timer, .meeting, .pomodoro, .stopwatch, .toast, .event]
-    private func rank(_ a: Activity) -> Int { Self.order.firstIndex(of: a) ?? 99 }
+    private static let order: [Activity] = [.alarm, .dictation, .media, .timer, .meeting, .pomodoro, .stopwatch, .agents, .toast, .event]
+    /// A coding agent waiting on you comes just after a ringing alarm.
+    private func rank(_ a: Activity) -> Int { a == .agents ? 1 : 2 * (Self.order.firstIndex(of: a) ?? 99) }
 
     func activity(for slot: Slot) -> Activity {
         switch slot {
@@ -133,6 +138,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .stopwatch: .stopwatch
         case .media: .media
         case .event: .event
+        case .agents: .agents
         }
     }
 
@@ -157,7 +163,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 
     /// One thing in the notch: each running timer and stopwatch gets its own.
     enum Slot: Hashable {
-        case alarm, dictation, toast, meeting, pomodoro, timer(UUID), stopwatch(UUID), media, event
+        case alarm, dictation, toast, meeting, pomodoro, timer(UUID), stopwatch(UUID), media, event, agents
         var key: String {
             switch self {
             case .timer(let id): "timer-\(id)"
@@ -176,6 +182,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .pomodoro: .pomodoro
         case .media: .media
         case .event: .event
+        case .agents: .agents
         case .timer: Timers.shared.next.map { .timer($0.id) } ?? .toast
         case .stopwatch: Stopwatches.shared.running.first.map { .stopwatch($0.id) } ?? .toast
         }
@@ -186,6 +193,11 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var slots: [Slot] {
         var out: [Slot] = activities.contains(.media) ? [.media] : []
         out += compactOrder.filter { $0 != .media }
+        // An agent waiting on you (or the agents button) goes in front of the player.
+        if agentsOpen || activities.contains(.agents) {
+            out.removeAll { $0 == .agents }
+            out.insert(.agents, at: 0)
+        }
         if let focus, let k = out.firstIndex(of: focus) { out.insert(out.remove(at: k), at: 0) }
         return Array(out.prefix(IslandGeometry.maxRows + 1))
     }
@@ -197,18 +209,19 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .compact: return compactLayout.order
         case .expanded:
             guard !camera, let first = slots.first else { return [] }
-            return (first == .dictation ? [] : [first]) + tiles
+            return (first == .dictation || first == .agents ? [] : [first]) + tiles
         default: return []
         }
     }
 
     /// Open: the tiles beside the first thing.
-    var tiles: [Slot] { camera ? [] : Array(slots.dropFirst()) }
+    var tiles: [Slot] { camera || agentsOpen ? [] : Array(slots.dropFirst()) }
     /// One row for a lone tile, else two (as tall as the player), filling columns left to right.
     var tileRows: Int { tiles.count > 1 ? 2 : 1 }
     var tileColumns: Int { min(IslandGeometry.maxColumns, (tiles.count + tileRows - 1) / tileRows) }
     /// Width the columns of tiles add (counted even while the camera shows, so the notch doesn't jump sideways).
     var tilesWidth: CGFloat {
+        guard !agentsOpen else { return 0 } // the agents view stands alone
         let n = slots.count - 1, rows = n > 1 ? 2 : 1, cols = min(IslandGeometry.maxColumns, max(0, n + rows - 1) / rows)
         return CGFloat(cols) * (IslandGeometry.tileWidth + IslandGeometry.gap)
     }
@@ -221,8 +234,11 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Each side of the band: the room the buttons on the right or the glances on the left need, whichever is more.
     var bandLane: CGFloat {
         let items = bandItems
-        return max(Self.bandButtons, items.map(\.width).reduce(0, +) + CGFloat(max(0, items.count - 1)) * Self.bandGap)
+        let glances = agentsFront ? AgentLimitGauges.width : items.map(\.width).reduce(0, +) + CGFloat(max(0, items.count - 1)) * Self.bandGap
+        return max(Self.bandButtons + (Agents.shared.known ? IslandView.rowButton + IslandGeometry.gap : 0), glances)
     }
+    /// Coding sessions are the main thing in the open notch: the provider's limits take the glances' place.
+    var agentsFront: Bool { stage == .expanded && !camera && slots.first == .agents && Agents.shared.frontLimits != nil }
     /// The glances left of the notch (Settings › Notch).
     var bandItems: [BandItem] { bandOverride ?? Array(Store.shared.settings.notchBand.prefix(2)) }
     /// `--island-snapshot --band a,b`: other glances without touching the saved settings.
@@ -267,6 +283,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .alarm: 48
         case .toast: 42
         case .event: 46
+        case .agents: IslandView.artBig
         case .dictation:
             if case .failed = dictation.phase { 48 } else { dictationControls ? IslandView.rowButton : 0 }
         case nil: IslandView.artBig // the idle home, opened with nothing running (as tall as the player)
@@ -401,12 +418,13 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         if !Timers.shared.running.isEmpty, s.notchTimers { list.append(.timer) }
         if !Stopwatches.shared.running.isEmpty, s.notchStopwatch { list.append(.stopwatch) }
         if s.notchEvents, CalendarEvents.shared.upcoming != nil { list.append(.event) }
+        if s.notchAgents, Agents.shared.showsInNotch { list.append(.agents) }
         if !s.notchEnabled { list.removeAll() }
         list.sort { rank($0) < rank($1) }
         // Paused stays: the song goes away only when Music or Spotify is quit or stopped.
         if NowPlaying.shared.available, Store.shared.settings.mediaInNotch { list.append(.media) }
-        // Over a full-screen app, only what can't wait: a ringing alarm, and dictation you started.
-        if fullScreen, s.notchHideInFullScreen { list.removeAll { $0 != .alarm && $0 != .dictation } }
+        // Over a full-screen app, only what can't wait: a ringing alarm, dictation you started, an agent waiting on you.
+        if fullScreen, s.notchHideInFullScreen { list.removeAll { $0 != .alarm && $0 != .dictation && $0 != .agents } }
         // While dictating, the notch is only dictation (open or closed): the player and the rest come back after.
         // A ringing alarm still shows, so it can be stopped.
         if list.contains(.dictation) { list.removeAll { $0 != .dictation && $0 != .alarm } }
@@ -421,6 +439,11 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             return
         }
         show()
+        // A coding agent asking something opens the notch for its options, once per question.
+        if let q = Agents.shared.questions.first, list.contains(.agents), q.id != askedFor, next != .dictation {
+            askedFor = q.id
+            after(0.3) { self.expand() }
+        }
         // Hands-free dictation opens for its buttons, and a failure to explain itself; push-to-talk stays closed.
         // Polishing happens in the closed notch: an open one closes when it starts.
         let polishing = dictation.phase == .processing
@@ -500,7 +523,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Closed, only times (and a few live marks) show as text; everything else is just its icon.
     func compactTrailingWidth(_ a: Activity) -> CGFloat {
         switch a {
-        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event: return trailingWidth(a)
+        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event, .agents: return trailingWidth(a)
         case .dictation:
             switch dictation.phase {
             case .starting, .listening, .processing: return 16
@@ -536,6 +559,9 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .media: return Self.artSize // the visualizer, as wide as the art across the notch
         case .event: return w(CalendarEvents.shared.upcoming?.countdown(CalendarEvents.shared.now) ?? "", 14, mono: true)
         case .dictation, .toast, .alarm: return compactTextWidth(a)
+        case .agents:
+            let p = Agents.shared.needy
+            return w(p.isEmpty ? "Asks" : p, 12.5)
         }
     }
 
@@ -653,7 +679,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
 
     /// The bare notch was hovered with nothing running: it opens straight from the notch's own shape.
-    func openIdle() {
+    func openIdle(hover: Bool = false) {
         guard stage == .hidden, activities.isEmpty, Store.shared.settings.notchEnabled else { return }
         generation += 1
         idleOpen = true
@@ -670,6 +696,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             withAnimation(islandSpring) {
                 self.stage = .expanded
                 self.contentVisible = true
+                // Hovered over a terminal or an editor: the coding sessions first.
+                if hover, Store.shared.settings.notchAgents, Agents.shared.codingInFront { self.agentsOpen = true }
             }
         }
     }
@@ -930,7 +958,7 @@ final class IslandPanel: NSPanel {
                 if hoverSince == nil { hoverSince = Date() }
                 if let since = hoverSince, Date().timeIntervalSince(since) > s.notchHoverDelay {
                     hoverSince = nil
-                    model.openIdle()
+                    model.openIdle(hover: true)
                 }
             } else {
                 hoverSince = nil
@@ -955,6 +983,7 @@ final class IslandPanel: NSPanel {
             if let since = hoverSince, Date().timeIntervalSince(since) > s.notchHoverDelay {
                 hoverSince = nil
                 model.expand()
+                if Store.shared.settings.notchAgents, Agents.shared.codingInFront { model.agentsOpen = true }
             }
         } else {
             hoverSince = nil
@@ -1044,7 +1073,7 @@ private struct ProgressRing: View {
     }
 }
 
-private struct PressStyle: ButtonStyle {
+struct PressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.86 : 1)
@@ -1052,7 +1081,7 @@ private struct PressStyle: ButtonStyle {
     }
 }
 
-private struct RoundButton: View {
+struct RoundButton: View {
     var symbol: String
     var tint: Color?
     var size: CGFloat = 32 // IslandView.rowButton: one button size all through the open notch
@@ -1233,6 +1262,7 @@ struct IslandView: View {
         case .pomodoro: leading(.pomodoro)
         case .media: leading(.media)
         case .event: leading(.event)
+        case .agents: leading(.agents)
         }
     }
 
@@ -1265,6 +1295,8 @@ struct IslandView: View {
             AlbumArt(image: NowPlaying.shared.artwork, missing: NowPlaying.shared.artMissing)
         case .event:
             Image(systemName: "calendar").font(.system(size: 13, weight: .semibold)).foregroundStyle(.red)
+        case .agents:
+            AgentStateIcon(state: .needsYou, size: 15).symbolEffect(.bounce, options: .repeating)
         case nil:
             EmptyView()
         }
@@ -1272,7 +1304,7 @@ struct IslandView: View {
 
     @ViewBuilder private func compactTrailing(_ a: IslandModel.Activity?) -> some View {
         switch a {
-        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event: trailing(a)
+        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event, .agents: trailing(a)
         case .dictation:
             switch model.dictation.phase {
             case .processing: PolishSpinner(size: 14, line: 2).frame(width: 16, height: 16)
@@ -1323,6 +1355,10 @@ struct IslandView: View {
         case .event:
             let c = CalendarEvents.shared
             Text(c.upcoming?.countdown(c.now) ?? "").font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+        case .agents:
+            // Whose input is needed.
+            let p = Agents.shared.needy
+            Text(p.isEmpty ? "Asks" : p).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.orange).lineLimit(1)
         case nil:
             EmptyView()
         }
@@ -1477,7 +1513,9 @@ struct IslandView: View {
         let polishing = d.phase == .processing
         return HStack(spacing: 0) {
             ZStack(alignment: .leading) {
-                if !dictating {
+                if !dictating, model.agentsFront, let l = Agents.shared.frontLimits {
+                    AgentLimitGauges(limits: l).transition(.opacity)
+                } else if !dictating {
                     HStack(spacing: IslandModel.bandGap) {
                         ForEach(model.bandItems) { BandGlance(item: $0) }
                     }
@@ -1499,6 +1537,12 @@ struct IslandView: View {
                             (NSApp.delegate as? AppDelegate)?.showSettings(pane: .notch)
                         }
                         .help("Settings")
+                        if Agents.shared.known {
+                            RoundButton(symbol: model.agentsOpen ? "terminal.fill" : "terminal", tint: model.agentsOpen ? .white : nil, size: Self.rowButton) {
+                                withAnimation(islandSpring) { model.camera = false; model.agentsOpen.toggle() }
+                            }
+                            .help(model.agentsOpen ? "Close Coding Agents" : "Coding Agents")
+                        }
                         if CameraMirror.available {
                             RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
                                 withAnimation(islandSpring) { model.camera.toggle() }
@@ -1533,6 +1577,7 @@ struct IslandView: View {
         case .dictation: dictationDetail
         case .pomodoro: HStack(alignment: .top, spacing: 12) { spot(slot, size: 24).padding(.top, 2); pomodoroDetail }
         case .meeting: HStack(alignment: .top, spacing: 12) { spot(slot, size: 24).padding(.top, 2); meetingDetail }
+        case .agents: AgentsFace()
         case .event: AnyView(eventDetail) // spelled out: inferred, it trips the compiler's opaque-type check with the swipe offset
         }
     }
@@ -1834,6 +1879,10 @@ struct IslandView: View {
                 caption(model.toast?.detail ?? "")
             case .alarm: trailing(.alarm)
             case .meeting: trailing(.meeting)
+            case .agents:
+                let a = Agents.shared
+                trailing(.agents)
+                caption(a.asking ? "Asks you" : "Needs you")
             }
         }
     }
@@ -1866,7 +1915,7 @@ struct IslandView: View {
             }
         case .alarm:
             RoundButton(symbol: "stop.fill", tint: .orange, size: b) { Alarms.shared.dismiss() }
-        case .toast, .dictation:
+        case .toast, .dictation, .agents:
             EmptyView()
         }
     }
@@ -2128,7 +2177,7 @@ private extension View {
 
 /// Five bars that fit beside the notch.
 /// Polishing: a bright arc chasing round.
-private struct PolishSpinner: View {
+struct PolishSpinner: View {
     var size: CGFloat = 20
     var line: CGFloat = 2.5
 

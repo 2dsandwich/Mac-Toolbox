@@ -1783,6 +1783,7 @@ private struct NotchPane: View {
             store.settings.notchMeeting = d.notchMeeting
             store.settings.notchDictation = d.notchDictation
             store.settings.notchEvents = d.notchEvents
+            store.settings.notchAgents = d.notchAgents
             store.settings.notchEventLead = d.notchEventLead
             store.settings.eventCalendarsOff = d.eventCalendarsOff
             store.settings.mediaInNotch = d.mediaInNotch
@@ -1820,8 +1821,10 @@ private struct NotchPane: View {
                 Toggle("Words fill in as they’re sung", isOn: $store.settings.notchLyricsFill)
                     .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
                 Toggle("Upcoming events", isOn: $store.settings.notchEvents)
+                Toggle("Coding agents", isOn: $store.settings.notchAgents)
             }
             .disabled(!store.settings.notchEnabled)
+            AgentsSettings(store: store)
             Section("Beside the notch when open") {
                 Picker("Left of the notch", selection: Binding(get: { store.settings.notchBand.first ?? .battery }, set: { item in
                     store.settings.notchBand = [item] + store.settings.notchBand.dropFirst().filter { $0 != item }
@@ -1870,7 +1873,7 @@ private struct NotchPane: View {
             } header: {
                 Text("Full screen")
             } footer: {
-                Text("Alarms and dictation still show.").font(.caption).foregroundStyle(.secondary)
+                Text("Alarms, dictation and coding agents waiting on you still show.").font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!store.settings.notchEnabled)
             Section("Opening") {

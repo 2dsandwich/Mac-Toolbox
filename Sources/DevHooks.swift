@@ -605,6 +605,12 @@ extension AppDelegate {
                 let at = Calendar.current.date(bySettingHour: 21, minute: 30, second: 0, of: Date()) ?? Date()
                 CalendarEvents.shared.useDemo([CalendarEvent(id: "demo-later", title: "Design review", start: at, end: at.addingTimeInterval(1800), color: .systemPurple)])
             }
+            // `--agents [question|permission]`: made-up coding sessions and limits (and something asked); `--agents-open`
+            // the agents button pressed.
+            if let j = args.firstIndex(of: "--agents") {
+                Agents.shared.onChange = { [weak island] in island?.refresh() }
+                Agents.shared.useDemo(j + 1 < args.count && !args[j + 1].hasPrefix("--") ? args[j + 1] : nil)
+            }
             // `--no-notch`: as on a Mac without a notch.
             if args.contains("--no-notch") { island.geometry = .plain(island.geometry.screenFrame) }
             // `--band battery,weather`: the glances left of the notch (the saved settings stay as they are).
@@ -837,6 +843,7 @@ extension AppDelegate {
                 if stage == .expanded {
                     // `--camera`: the mirror (a stand-in picture); `--promote-tile`: the first tile tapped to the front.
                     if args.contains("--camera") { island.camera = true }
+                    if args.contains("--agents-open") { island.agentsOpen = true }
                     if args.contains("--promote-tile") { island.focus = island.tiles.first }
                 }
                 let size = island.geometry.panelSize
@@ -919,6 +926,42 @@ extension AppDelegate {
             print("seed", island.geometry.seedSize.width, "compact", island.compactLayout.side, "open", island.shapeSize, "tiles", island.tiles.count, "lane", island.bandLane, "clear each side", (island.openWidth - island.geometry.seedSize.width) / 2 - island.sideInset - island.bandLane)
             print("panel level", islandController.panelLevel, "(menu bar \(NSWindow.Level.mainMenu.rawValue))")
             exit(0)
+        }
+        if let i = args.firstIndex(of: "--agents-connect-test"), i + 1 < args.count {
+            // Connects and disconnects Claude Code in a copy of its settings file (never the real one).
+            let url = URL(fileURLWithPath: args[i + 1])
+            let before = try? JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? NSDictionary
+            do {
+                try Agents.connectClaude(true, file: url)
+                let on = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
+                print("connected:", Agents.claudeConnected(url), "events:", ((on["hooks"] as? [String: Any]) ?? [:]).keys.sorted(), "status line ours:", "\(on["statusLine"] ?? "")".contains("47474"))
+                try Agents.connectClaude(true, file: url)
+                let twice = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
+                print("connect twice, PreToolUse groups:", (twice["hooks"] as? [String: Any])?["PreToolUse"].map { ($0 as? [Any])?.count ?? 0 } ?? 0)
+                try Agents.connectClaude(false, file: url)
+                let after = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? NSDictionary
+                print("disconnected:", !Agents.claudeConnected(url), "same as before:", before == after)
+            } catch { print("error:", error) }
+            exit(0)
+        }
+        if args.contains("--agents-server-test") {
+            // Listens like the real thing; a question is answered with its first option (or Allow) half a second in.
+            let a = Agents.shared
+            a.onChange = {
+                print("sessions:", a.sessions.map { "\($0.project):\($0.state)" }.sorted(), "questions:", a.questions.count, "limits:", a.limits[.claude].map { "\($0.fiveHour?.used ?? -1)/\($0.week?.used ?? -1)" } ?? "-")
+                if let q = a.questions.first {
+                    let id = q.id
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        MainActor.assumeIsolated {
+                            guard Agents.shared.questions.first?.id == id else { return }
+                            if q.permission != nil { Agents.shared.allow(true) } else { for _ in q.asks { if let o = Agents.shared.questions.first.flatMap({ $0.asks[Agents.shared.step].options.first }) { Agents.shared.choose(o) } } }
+                        }
+                    }
+                }
+            }
+            a.run(true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { exit(0) }
+            return true
         }
         if args.contains("--highlight-test") {
             // Prints which words get which color.
@@ -1009,6 +1052,7 @@ extension AppDelegate {
         if args.contains("--google-test") {
             GoogleTests.run()
         }
+        if args.contains("--agents-demo") { Agents.shared.useDemo(args.contains("--agents-question") ? "question" : nil) } // made-up sessions (search bar snapshots)
         if args.contains("--chats") { AskChats.shared.useDemo() } // made-up Ask chats (settings and ask snapshots)
         if args.contains("--ask-test") { askTest(); exit(0) }
         if let i = args.firstIndex(of: "--settings-snapshot"), i + 1 < args.count {
@@ -1064,6 +1108,7 @@ extension AppDelegate {
             case "calendar": .calendar
             case "tasks": .tasks
             case "dictation": .dictation
+            case "agents": .agents
             case "assistant", "ask": .assistant
             default: .apps
             }

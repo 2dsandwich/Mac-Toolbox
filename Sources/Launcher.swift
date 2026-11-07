@@ -3,7 +3,7 @@ import Observation
 import SwiftUI
 
 enum Scope: Equatable {
-    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar, tasks, dictation
+    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar, tasks, dictation, agents
 
     var title: String {
         switch self {
@@ -25,6 +25,7 @@ enum Scope: Equatable {
         case .calendar: "Google Calendar"
         case .tasks: "Tasks"
         case .dictation: "Dictation"
+        case .agents: "Agents"
         }
     }
 
@@ -48,16 +49,17 @@ enum Scope: Equatable {
         case .dictation: "mic.fill"
         case .calendar: "calendar"
         case .tasks: "checklist"
+        case .agents: "terminal"
         }
     }
 
     /// Modes with their own body instead of a result list.
-    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar, .tasks, .dictation].contains(self) }
+    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar, .tasks, .dictation, .agents].contains(self) }
 }
 
 enum Builtin: String, CaseIterable {
     case clipboard, switcher, pomodoro, calendar, tasks, dictation, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
-         allApps, settings, quit
+         agents, allApps, settings, quit
 
     var title: String {
         switch self {
@@ -77,6 +79,7 @@ enum Builtin: String, CaseIterable {
         case .weather: "Weather Anywhere"
         case .meeting: "Meetings"
         case .screenText: "Text from Screen"
+        case .agents: "Coding Agents"
         case .allApps: "All Apps"
         case .settings: "MONEY! Settings"
         case .quit: "Quit MONEY!"
@@ -101,6 +104,7 @@ enum Builtin: String, CaseIterable {
         case .weather: "cloud.sun.fill"
         case .meeting: "waveform"
         case .screenText: "text.viewfinder"
+        case .agents: "terminal"
         case .allApps: "square.grid.3x3.fill"
         case .settings: "gearshape"
         case .quit: "power"
@@ -123,6 +127,7 @@ enum Builtin: String, CaseIterable {
         case .weather: .weather
         case .meeting: .meeting
         case .screenText: .text
+        case .agents: .agents
         case .allApps: .library
         default: nil
         }
@@ -303,6 +308,7 @@ enum Metrics {
         if scope == .calculator { return CalculatorView.height }
         if scope == .calendar { return CalendarPanel.height }
         if scope == .tasks { return TasksPanel.height(TasksBoard.shared) }
+        if scope == .agents { return AgentsPanel.height(Agents.shared) }
         if scope == .translate { return TranslateView.height }
         if scope == .assistant { return AssistantView.height(Assistant.shared, query: query, s) }
         if scope == .notes { return NoteBoardView.height }
@@ -361,6 +367,7 @@ enum Metrics {
         case .calendar: "Search events"
         case .tasks: TasksBoard.shared.editing == nil ? "Add a task" : "Edit task"
         case .dictation: "Search dictations"
+        case .agents: "Coding agents"
         }
     }
 
@@ -567,7 +574,7 @@ enum Metrics {
             // Earlier chats: the newest is picked (↩ continues it) until you type, then ↩ asks.
             items = []
             Assistant.shared.pick = q.isEmpty ? 0 : nil
-        case .text, .meeting, .calculator, .timer, .mixer, .notes, .calendar, .tasks, .dictation:
+        case .text, .meeting, .calculator, .timer, .mixer, .notes, .calendar, .tasks, .dictation, .agents:
             items = []
         case .web:
             let r = BrowserSites.suggest(query, in: sites, limit: max(s.maxRows, 6))
@@ -679,6 +686,7 @@ enum Metrics {
         case .notes: ["notes", "sticky", "sticky notes", "memo", "board", "付箋", "メモ"]
         case .weather: ["weather", "forecast", "天気", "天気予報"]
         case .meeting: ["meeting", "meetings", "record meeting", "会議", "議事録"]
+        case .agents: ["agents", "coding agents", "claude code", "codex", "vibe coding", "limits", "usage", "エージェント"]
         case .screenText: ["text from screen", "scan", "ocr", "screen text", "qr scan", "文字認識"]
         case .allApps: ["all apps", "library", "launchpad", "アプリ一覧"]
         case .settings: ["settings", "preferences", "money"]
@@ -1575,6 +1583,7 @@ enum Metrics {
             case .calendar: enter(.calendar)
             case .tasks: enter(.tasks)
             case .dictation: enter(.dictation)
+            case .agents: enter(.agents)
             case .mixer: enter(.mixer)
             case .translate: enter(.translate)
             case .notes: enter(.notes)

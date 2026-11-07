@@ -385,6 +385,8 @@ struct Settings: Codable, Equatable {
     /// The line being sung fills in word by word as it's sung (off: the whole line lights up at once).
     var notchLyricsFill = true
     var notchEvents = true
+    /// Coding agents (Claude Code, Codex): sessions, questions to answer and usage limits.
+    var notchAgents = true
     /// Minutes before an event starts that it shows in the notch.
     var notchEventLead = 15
     /// Calendars left out of the notch and the search bar (by identifier, so new ones show).

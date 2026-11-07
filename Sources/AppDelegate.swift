@@ -58,6 +58,7 @@ import SwiftUI
         Alarms.shared.onChange = { [weak self] in self?.island.refresh() }
         NowPlaying.shared.onChange = { [weak self] in self?.island.refresh() }
         CalendarEvents.shared.onChange = { [weak self] in self?.island.refresh() }
+        Agents.shared.onChange = { [weak self] in self?.island.refresh() }
         NowPlaying.shared.start()
         _ = AudioMixer.shared // re-applies saved per-app levels
         pomodoro.announce = { [weak self] title, detail in
@@ -108,6 +109,7 @@ import SwiftUI
         copilotWindow.applyPrivacy()
         if old == nil || old?.notchEvents != s.notchEvents || old?.eventCalendarsOff != s.eventCalendarsOff { CalendarEvents.shared.apply(s) }
         if old?.notchEventLead != s.notchEventLead { island.refresh() }
+        if old?.notchAgents != s.notchAgents || old?.notchEnabled != s.notchEnabled { Agents.shared.run(s.notchAgents && s.notchEnabled) }
     }
 
     // MARK: Hotkeys

@@ -76,6 +76,9 @@ struct LauncherRoot: View {
                         .transition(.opacity)
                 } else if model.scope == .tasks {
                     TasksPanel(board: TasksBoard.shared, radius: radius)
+                } else if model.scope == .agents {
+                    AgentsPanel(radius: radius)
+                        .transition(.opacity)
                 } else if model.scope == .dictation {
                     DictationPanel(model: model, s: s, radius: radius)
                         .transition(.opacity)
@@ -690,8 +693,7 @@ private struct ClipboardArea: View {
                                                 s: s, radius: radius, onDelete: { actions.delete(c.id) })
                                             .padding(.vertical, rowGap)
                                             .id(i)
-                                            .onTapGesture(count: 2) { onActivate(i) }
-                                            .onTapGesture { model.selection = i }
+                                            .onTapGesture { actions.copy(c.id) } // a click copies it (↩ still pastes)
                                             .onHover { inside in
                                                 if inside { model.hovered = i } else if model.hovered == i { model.hovered = nil }
                                             }
