@@ -38,13 +38,14 @@ import SwiftUI
 
     var lines: [Line] {
         var out: [Line] = []
-        for l in tasks.lists {
+        let shown = tasks.shownLists
+        for l in shown {
             let open = tasks.open(in: l.id)
             guard !open.isEmpty else { continue }
             out.append(.list(l, first: out.isEmpty))
             out += open.map { t in .task(t, sub: t.parent.map { p in open.contains { $0.id == p } } ?? false) }
         }
-        let done = tasks.completed
+        let done = tasks.completed.filter { t in shown.contains { $0.id == t.list } }
         if !done.isEmpty {
             out.append(.doneHeader(done.count))
             if showDone { out += done.map { .task($0, sub: false) } }
@@ -89,7 +90,7 @@ import SwiftUI
             withAnimation(.smooth(duration: 0.25)) { self.tasks.setDone(t, true) }
             if self.selected == t.id { self.selected = next }
         }
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return finish() }
+        if Store.shared.settings.reduceMotion { return finish() }
         leaving.insert(t.id)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.48) { finish() }
     }
@@ -179,9 +180,15 @@ struct TasksPanel: View {
 
     @MainActor static func height(_ board: TasksBoard) -> CGFloat {
         guard Google.shared.ready else { return PanelLayout.vertical + 34 }
-        let lines = board.lines
-        let list = GoogleTasks.shared.loaded && !lines.isEmpty ? min(maxList, lines.reduce(0) { $0 + $1.height }) : 32
+        let (lines, pinned) = split(board.lines)
+        let list = GoogleTasks.shared.loaded && !lines.isEmpty ? min(maxList, lines.reduce(0) { $0 + $1.height }) + (pinned?.height ?? 0) : 32
         return PanelLayout.vertical + list + (GoogleTasks.shared.error == nil ? 0 : 32)
+    }
+
+    /// A closed "Completed" row is pinned under the list, so scrolling never hides it.
+    static func split(_ lines: [TasksBoard.Line]) -> ([TasksBoard.Line], TasksBoard.Line?) {
+        if let last = lines.last, case .doneHeader = last { return (Array(lines.dropLast()), last) }
+        return (lines, nil)
     }
 
     var body: some View {
@@ -209,65 +216,73 @@ struct TasksPanel: View {
     }
 
     private func list(_ lines: [TasksBoard.Line]) -> some View {
-        let row = PanelLayout.inner(radius)
+        let (scrolled, pinned) = Self.split(lines)
         return ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 0) {
-                    ForEach(lines) { line in
-                        Group {
-                            switch line {
-                            case .list(let l, _):
-                                Text(l.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.primary.opacity(0.35))
-                                    .padding(.horizontal, 8).padding(.bottom, 4)
-                                    .frame(maxWidth: .infinity, alignment: .bottomLeading)
-                            case .task(let t, let sub):
-                                TaskRow(task: t, sub: sub, selected: board.selected == t.id, editing: board.editing == t.id,
-                                        leaving: board.leaving.contains(t.id), radius: row) {
-                                    board.toggle(t)
-                                } pick: {
-                                    board.selected = t.id
-                                }
-                            case .doneHeader(let n):
-                                Button {
-                                    board.selected = "done"
-                                    withAnimation(.smooth(duration: 0.25)) { board.showDone.toggle() }
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
-                                            .rotationEffect(.degrees(board.showDone ? 90 : 0)).frame(width: 16)
-                                        Text("Completed").font(.system(size: 12.5)).foregroundStyle(.secondary)
-                                        Text("\(n)").font(.system(size: 12.5)).foregroundStyle(Color.primary.opacity(0.35))
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .frame(maxHeight: .infinity)
-                                    .background(RoundedRectangle(cornerRadius: row, style: .continuous).fill(board.selected == "done" ? selectedFill : .clear))
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                            }
+            VStack(spacing: 0) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        ForEach(scrolled) { line in
+                            row(line)
+                                .id(line.id)
                         }
-                        .frame(height: line.height)
-                        .id(line.id)
                     }
                 }
-            }
-            .frame(height: min(Self.maxList, lines.reduce(0) { $0 + $1.height }))
-            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height < g.contentSize.height - 2 } action: { _, more in
-                moreBelow = more
-            }
-            // Fades out at the bottom while there's more below (Moneybag's cue).
-            .mask {
-                VStack(spacing: 0) {
-                    Color.black
-                    LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: moreBelow ? 30 : 0)
+                .frame(height: min(Self.maxList, scrolled.reduce(0) { $0 + $1.height }))
+                .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height < g.contentSize.height - 2 } action: { _, more in
+                    moreBelow = more
                 }
-            }
-            .onChange(of: board.selected) { _, id in
-                guard let id else { return }
-                withAnimation(.smooth(duration: 0.2)) { proxy.scrollTo(id) }
+                // Fades out at the bottom while there's more below (Moneybag's cue).
+                .mask {
+                    VStack(spacing: 0) {
+                        Color.black
+                        LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: moreBelow ? 30 : 0)
+                    }
+                }
+                .onChange(of: board.selected) { _, id in
+                    guard let id else { return }
+                    withAnimation(.smooth(duration: 0.2)) { proxy.scrollTo(id) }
+                }
+                if let pinned { row(pinned) }
             }
         }
+    }
+
+    private func row(_ line: TasksBoard.Line) -> some View {
+        let row = PanelLayout.inner(radius)
+        return Group {
+            switch line {
+            case .list(let l, _):
+                Text(l.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.primary.opacity(0.35))
+                    .padding(.horizontal, 8).padding(.bottom, 4)
+                    .frame(maxWidth: .infinity, alignment: .bottomLeading)
+            case .task(let t, let sub):
+                TaskRow(task: t, sub: sub, selected: board.selected == t.id, editing: board.editing == t.id,
+                        leaving: board.leaving.contains(t.id), radius: row) {
+                    board.toggle(t)
+                } pick: {
+                    board.selected = t.id
+                }
+            case .doneHeader(let n):
+                Button {
+                    board.selected = "done"
+                    withAnimation(.smooth(duration: 0.25)) { board.showDone.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(board.showDone ? 90 : 0)).frame(width: 16)
+                        Text("Completed").font(.system(size: 12.5)).foregroundStyle(.secondary)
+                        Text("\(n)").font(.system(size: 12.5)).foregroundStyle(Color.primary.opacity(0.35))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(maxHeight: .infinity)
+                    .background(RoundedRectangle(cornerRadius: row, style: .continuous).fill(board.selected == "done" ? selectedFill : .clear))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(height: line.height)
     }
 }
 

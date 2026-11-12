@@ -475,11 +475,11 @@ struct WindowHotkeysSection: View {
             Toggle("Window layout hotkeys", isOn: $store.settings.windowLayouts)
             if store.settings.windowLayouts {
                 ForEach(WindowLayout.allCases) { l in
-                    LabeledContent {
+                    HStack {
+                        Label(l.title, systemImage: l.symbol)
+                        Spacer()
                         HotKeyField(hotKey: Binding(get: { l.hotKey(store.settings) }, set: { store.settings.windowHotKeys[l.rawValue] = $0 }))
                             .frame(width: 150, height: 26)
-                    } label: {
-                        Label(l.title, systemImage: l.symbol)
                     }
                 }
             }

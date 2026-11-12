@@ -3,62 +3,74 @@ import SwiftUI
 import Carbon.HIToolbox
 
 enum Pane: String, CaseIterable, Identifiable {
-    case general, stats, appearance, hotkeys, shortcuts, tools, clock, notch, clipboard, dictation, meetings, google, claude, apps
+    // The raw values stay as they were: `--settings-snapshot <png> <pane>` and other panes' links use them.
+    case general, hotkeys, stats, appearance, apps, shortcuts, tools, clipboard, notch, clock, dictation, meetings, google, claude, timetable
     var id: String { rawValue }
     var title: String {
         switch self {
         case .general: "General"
+        case .hotkeys: "Hotkeys"
         case .stats: "Stats"
         case .appearance: "Appearance"
-        case .hotkeys: "Hotkeys"
-        case .shortcuts: "Shortcuts"
-        case .tools: "Tools"
-        case .clock: "Clock"
-        case .notch: "Notch"
+        case .apps: "Apps"
+        case .shortcuts: "Keywords"
+        case .tools: "Answers"
         case .clipboard: "Clipboard"
+        case .notch: "Notch"
+        case .clock: "Clock"
         case .dictation: "Dictation"
         case .meetings: "Meetings"
-        case .google: "Google"
+        case .google: "Accounts"
         case .claude: "AI"
-        case .apps: "Apps"
+        case .timetable: "Timetable"
         }
     }
     var symbol: String {
         switch self {
         case .general: "gearshape"
+        case .hotkeys: "command"
         case .stats: "chart.bar.fill"
         case .appearance: "paintbrush"
-        case .hotkeys: "command"
-        case .shortcuts: "bolt"
+        case .apps: "square.grid.2x2"
+        case .shortcuts: "character.cursor.ibeam"
         case .tools: "wand.and.stars"
-        case .clock: "clock.fill"
-        case .notch: "rectangle.topthird.inset.filled"
         case .clipboard: "doc.on.clipboard"
+        case .notch: "rectangle.topthird.inset.filled"
+        case .clock: "clock.fill"
         case .dictation: "mic"
         case .meetings: "waveform"
         case .google: "person.crop.circle"
         case .claude: "sparkles"
-        case .apps: "square.grid.2x2"
+        case .timetable: "graduationcap.fill"
         }
     }
     var color: Color {
         switch self {
         case .general: .gray
+        case .hotkeys: .blue
         case .stats: .purple
         case .appearance: .indigo
-        case .hotkeys: .blue
+        case .apps: .green
         case .shortcuts: .orange
         case .tools: .mint
-        case .clock: .orange
-        case .notch: Color(white: 0.25)
         case .clipboard: .teal
+        case .notch: Color(white: 0.3)
+        case .clock: .orange
         case .dictation: .pink
         case .meetings: .red
         case .google: .blue
         case .claude: Color(red: 0.85, green: 0.45, blue: 0.3)
-        case .apps: .green
+        case .timetable: .teal
         }
     }
+    /// The sidebar, in groups.
+    static let groups: [(title: String?, panes: [Pane])] = [
+        (nil, [.general, .hotkeys, .stats]),
+        ("Search bar", [.appearance, .apps, .shortcuts, .tools, .clipboard]),
+        ("Notch and clock", [.notch, .clock, .timetable]),
+        ("Voice", [.dictation, .meetings]),
+        ("Accounts and AI", [.google, .claude]),
+    ]
 }
 
 struct SettingsView: View {
@@ -71,16 +83,23 @@ struct SettingsView: View {
         // A plain sidebar + page layout: the system split view fought the fixed-size window
         // (blank sidebar, pages sliding under the title bar).
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(Pane.allCases) { p in
-                    SidebarRow(pane: p, selected: p == pane) { pane = p }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Pane.groups, id: \.panes) { g in
+                        if let t = g.title {
+                            Text(t).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                                .padding(.leading, 8).padding(.top, 12).padding(.bottom, 2)
+                        }
+                        ForEach(g.panes) { p in
+                            SidebarRow(pane: p, selected: p == pane) { pane = p }
+                        }
+                    }
                 }
-                Spacer()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 12)
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 12)
+            .scrollIndicators(.never)
             .frame(width: 200)
-            .frame(maxHeight: .infinity)
             .background(Color.primary.opacity(0.03))
             Divider()
             VStack(alignment: .leading, spacing: 0) {
@@ -98,15 +117,18 @@ struct SettingsView: View {
                     case .clipboard: ClipboardPane(store: store, clipboard: clipboard)
                     case .dictation: DictationPane(store: store)
                     case .meetings: MeetingsPane(store: store)
-                    case .google: GooglePane()
+                    case .google: GooglePane(store: store)
                     case .claude: AIPane(store: store)
                     case .apps: AppsPane(store: store, launcher: launcher)
+                    case .timetable: TimetablePane(store: store)
                     }
                 }
                 .formStyle(.grouped)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
+        // Drawn on the window's own colour, so the sidebar and pages match (and off-screen snapshots aren't see-through).
+        .background(Color(nsColor: .windowBackgroundColor))
         .onReceive(NotificationCenter.default.publisher(for: .showSettingsPane)) { n in if let p = n.object as? Pane { pane = p } }
     }
 }
@@ -120,22 +142,42 @@ private struct SidebarRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 9) {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                // Concentric with the row: its radius less the 4 pt around it.
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(pane.color.gradient)
                     .frame(width: 22, height: 22)
                     .overlay(Image(systemName: pane.symbol).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.white))
                 Text(pane.title).font(.system(size: 13))
                 Spacer()
             }
-            .padding(.horizontal, 8)
-            .frame(height: 32)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .padding(.horizontal, 4)
+            .frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(selected ? Color.accentColor.opacity(0.85) : Color.primary.opacity(hovering ? 0.06 : 0)))
             .foregroundStyle(selected ? Color.white : Color.primary)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+    }
+}
+
+/// A hotkey beside its name. (In LabeledContent the grouped Form put the recorder on a line of its own.)
+struct HotKeyRow<Field: View>: View {
+    let title: String
+    @ViewBuilder let field: Field
+
+    init(_ title: String, @ViewBuilder field: () -> Field) {
+        self.title = title
+        self.field = field()
+    }
+
+    var body: some View {
+        HStack {
+            Text(title)
+            Spacer()
+            field
+        }
     }
 }
 
@@ -153,22 +195,27 @@ private struct ToolsPane: View {
                 Text("Type in the search bar and answers appear above your apps. Type ? to list every tool.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Weather") {
-                TextField("City", text: $store.settings.weatherCity, prompt: Text("Where you are"))
+            QuicklinksSection(store: store)
+            Section {
+                TextField("City", text: $store.settings.weatherCity)
                 Picker("Temperature", selection: $store.settings.fahrenheit) {
                     Text("Celsius (°C)").tag(false)
                     Text("Fahrenheit (°F)").tag(true)
                 }
+            } header: {
+                Text("Weather")
+            } footer: {
+                Text("With no city, the weather is for where you are.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Money and time") {
                 Picker("Convert money to", selection: $store.settings.homeCurrency) {
                     ForEach(["JPY", "USD", "EUR", "GBP", "KRW", "CNY", "TWD", "HKD", "SGD", "AUD", "CAD", "THB"].filter { Tools.currencyCodes.contains($0) }, id: \.self) { Text($0).tag($0) }
                 }
-                TextField("World clocks", text: $clocks, prompt: Text("New York, London, Los Angeles"))
+                TextField("World clocks", text: $clocks)
                     .onSubmit(saveClocks)
                     .onChange(of: clocks) { _, _ in saveClocks() }
             }
-            Section("Answers") {
+            Section("Kinds of answers") {
                 ForEach(ToolGroup.allCases) { g in
                     Toggle(g.title, isOn: Binding(get: { !store.settings.disabledTools.contains(g) }, set: { on in
                         store.settings.disabledTools.removeAll { $0 == g }
@@ -178,6 +225,9 @@ private struct ToolsPane: View {
             }
             Section("More") {
                 Stepper("Calculator decimals: \(store.settings.calcDecimals)", value: $store.settings.calcDecimals, in: 0...12)
+                Picker("Translate into", selection: $store.settings.translateTarget) {
+                    ForEach(Translator.languages, id: \.self) { Text($0 == "Auto" ? "Japanese or English, whichever it isn’t" : $0).tag($0) }
+                }
                 Toggle("Color what you type in Clock and Calculator", isOn: $store.settings.colorTypedText)
                 Toggle("Find QR codes and barcodes in ⌘3 Text", isOn: $store.settings.scanQR)
                 Toggle("Remember volume mixer levels", isOn: $store.settings.rememberAppVolumes)
@@ -204,6 +254,42 @@ private struct ToolsPane: View {
     }
 }
 
+/// Keyword, name and address for each quicklink; {query} in the address is what's typed after the keyword.
+private struct QuicklinksSection: View {
+    @Bindable var store: Store
+
+    var body: some View {
+        Section {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 8) {
+                GridRow {
+                    Text("Keyword")
+                    Text("Name")
+                    Text("Address")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                ForEach($store.settings.quicklinks) { $link in
+                    GridRow {
+                        TextField("", text: $link.keyword).frame(width: 64)
+                        TextField("", text: $link.name).frame(width: 110)
+                        HStack {
+                            TextField("", text: $link.url)
+                            Button { store.settings.quicklinks.removeAll { $0.id == link.id } } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.plain).help("Remove")
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+            Button("Add Quicklink") { store.settings.quicklinks.append(Quicklink(url: "https://")) }
+        } header: {
+            Text("Quicklinks")
+        } footer: {
+            Text("Type a keyword, a space and what to look for, like “yt cats”. {query} in the address is replaced with what you type.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 // MARK: General
 
 private struct GeneralPane: View {
@@ -225,8 +311,10 @@ private struct GeneralPane: View {
                     ForEach(EmptyState.allCases) { Text($0.title).tag($0) }
                 }
                 Toggle("Complete app names inline (Tab accepts)", isOn: $store.settings.ghostCompletion)
-                Toggle("Show what’s playing in the notch", isOn: $store.settings.mediaInNotch)
                 Toggle("Show Clipboard, Switch Apps and Settings in results", isOn: $store.settings.builtinsInResults)
+                Toggle("Show matching files under the apps", isOn: $store.settings.filesInResults)
+                Stepper("Files shown: \(store.settings.fileResults)", value: $store.settings.fileResults, in: 1...10)
+                    .disabled(!store.settings.filesInResults)
                 TextField("Placeholder", text: $store.settings.placeholder)
             }
             Section {
@@ -238,32 +326,57 @@ private struct GeneralPane: View {
                 Text("Type a keyword and press Tab to jump into it. Backspace on an empty field goes back to apps.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                Toggle("Calmer motion when Reduce Motion is on", isOn: $store.settings.followReduceMotion)
+                Toggle("More contrast behind the text", isOn: $store.settings.moreContrast)
+                Toggle("Larger rows, easier to click", isOn: $store.settings.largerTargets)
+                Toggle("Follow the system text size", isOn: $store.settings.followTextSize)
+            } header: {
+                Text("Accessibility")
+            } footer: {
+                Text("More contrast also turns on with Increase Contrast in System Settings › Accessibility › Display.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Position") {
                 Picker("Open on", selection: $store.settings.screen) {
                     ForEach(ScreenChoice.allCases) { Text($0.title).tag($0) }
                 }
                 LabeledContent("Drag the bar to move it; it snaps to the centre and edges.") {
-                    Button("Reset Position") { launcher.resetPosition() }
+                    Button("Reset position") { launcher.resetPosition() }
                         .disabled(store.settings.position == nil)
                 }
             }
             Section("Keys in the popup") {
                 keyRow("↑ ↓", "Move")
                 keyRow("↩", "Open, switch or paste")
-                keyRow("⇥", "Accept completion / enter a scope")
-                keyRow("⌘1", "Apps")
-                keyRow("⌘2", "Clipboard")
-                keyRow("⌘3", "Text from the screen")
-                keyRow("⌘4", "Meeting dictation")
-                keyRow("⌘H / ⌘Q", "Hide / quit the selected app")
-                keyRow("⌘,", "Settings")
+                keyRow("⇥", "Accept the completion or enter a scope")
+                keyRow("⌘ ↩", "Show a file in Finder, force quit, or copy")
+                keyRow("Space", "Quick Look the file picked with ↑ ↓")
+                keyRow("⌘ 1", "Apps")
+                keyRow("⌘ 2", "Clipboard")
+                keyRow("⌘ 3", "Text from the screen")
+                keyRow("⌘ 4", "Meeting dictation")
+                keyRow("⌘ H", "Hide the selected app")
+                keyRow("⌘ Q", "Quit the selected app")
+                keyRow("⌘ ,", "Settings")
                 keyRow("⎋", "Clear, then close")
             }
         }
     }
 
+    /// Each key (space-separated) as a keycap.
     private func keyRow(_ keys: String, _ what: String) -> some View {
-        LabeledContent(what) { Text(keys).font(.system(.body, design: .rounded)).foregroundStyle(.secondary) }
+        LabeledContent(what) {
+            HStack(spacing: 4) {
+                ForEach(keys.split(separator: " ").map(String.init), id: \.self) { k in
+                    Text(k).font(.system(size: 12, weight: .medium, design: .rounded))
+                        .frame(minWidth: 22, minHeight: 22)
+                        .padding(.horizontal, 4)
+                        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.primary.opacity(0.08)))
+                        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
+                }
+            }
+        }
     }
 }
 
@@ -272,6 +385,7 @@ private struct GeneralPane: View {
 private struct AppearancePane: View {
     @Bindable var store: Store
     let launcher: LauncherController
+    @State private var confirmReset = false
 
     var body: some View {
         // The preview stays put while the settings under it scroll.
@@ -300,7 +414,7 @@ private struct AppearancePane: View {
                 if store.settings.customTint {
                     ColorPicker("Tint colour", selection: tintBinding, supportsOpacity: false)
                 }
-                slider("Tint strength", $store.settings.tintStrength, 0...4, step: 0.25, format: "%.2g×")
+                slider("Tint strength", $store.settings.tintStrength, 0...4, step: 0.25, format: "%g×")
                 slider("Darkness", $store.settings.darkness, 0...0.9, step: 0.05, format: "%.0f%%", scale: 100)
                 Toggle("Darken the glass more inside Clipboard and Switch", isOn: $store.settings.shadeScopes)
             } header: {
@@ -308,14 +422,13 @@ private struct AppearancePane: View {
                     Text("Look")
                     Spacer()
                     Button("Preview") { launcher.show(.apps) }
-                    Button("Reset All") { store.resetAppearance() }
+                    Button("Reset to Default…") { confirmReset = true }
                 }
             }
             Section("Size") {
                 slider("Width", $store.settings.width, 420...1000, step: 10, format: "%.0f pt")
                 slider("Clipboard width", $store.settings.clipboardWidth, 520...1200, step: 10, format: "%.0f pt")
                 slider("Bar height", $store.settings.barHeight, 44...110, step: 1, format: "%.0f pt")
-                slider("Text size", $store.settings.fontSize, 13...32, step: 1, format: "%.0f pt")
                 slider("Corner radius", $store.settings.cornerRadius, 0...55, step: 1, format: "%.0f pt")
                 slider("Corner radius in scopes", $store.settings.scopedCornerRadius, 0...55, step: 1, format: "%.0f pt")
                 slider("Row height", $store.settings.rowHeight, 28...64, step: 1, format: "%.0f pt")
@@ -326,7 +439,15 @@ private struct AppearancePane: View {
                 Toggle("Key hints", isOn: $store.settings.showHints)
                 Toggle("Apps / Clipboard buttons when hovering the bar", isOn: $store.settings.showTabs)
                 Toggle("Fade in and out", isOn: $store.settings.animations)
+                slider("Animation speed", $store.settings.animationSpeed, 0.5...2, step: 0.25, format: "%g×")
+                    .disabled(!store.settings.animations)
             }
+            TextSection(store: store)
+        }
+        .confirmationDialog("Reset the search bar’s look?", isPresented: $confirmReset) {
+            Button("Reset to Default", role: .destructive) { store.resetAppearance() }
+        } message: {
+            Text("Size, corners, colours, glass, text and animation go back to how they started. Buttons and position stay.")
         }
     }
 
@@ -357,7 +478,7 @@ private struct HotkeysPane: View {
                 Toggle(isOn: Binding(get: { !spotlightOn && store.settings.launcherHotKey == .launcherDefault }, set: useCommandSpace)) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Open MONEY! with ⌘Space instead of Spotlight")
-                        Text(spotlightOn ? "⌘Space opens Spotlight now" : store.settings.launcherHotKey == .launcherDefault ? "⌘Space opens MONEY!. Spotlight’s shortcut is off."
+                        Text(spotlightOn ? "⌘Space opens Spotlight now" : store.settings.launcherHotKey == .launcherDefault ? "Spotlight’s shortcut is off; ⌘Space opens MONEY!"
                              : "Spotlight’s shortcut is off; MONEY! uses \(store.settings.launcherHotKey.display)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -367,9 +488,9 @@ private struct HotkeysPane: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
-                LabeledContent("Search apps") { HotKeyField(hotKey: $store.settings.launcherHotKey).frame(width: 150, height: 26) }
-                LabeledContent("Clipboard history") { HotKeyField(hotKey: $store.settings.clipboardHotKey).frame(width: 150, height: 26) }
-                LabeledContent("App switcher") { HotKeyField(hotKey: $store.settings.switcherHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("Search apps") { HotKeyField(hotKey: $store.settings.launcherHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("Clipboard history") { HotKeyField(hotKey: $store.settings.clipboardHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("App switcher") { HotKeyField(hotKey: $store.settings.switcherHotKey).frame(width: 150, height: 26) }
             }
             Section {
                 Toggle("Hold the modifier to switch, like ⌘Tab", isOn: $store.settings.holdToSwitch)
@@ -401,7 +522,7 @@ private struct HotkeysPane: View {
 
 // MARK: Shortcuts
 
-/// Every app with a box for your own word. Type that word in Flick and the app comes up first.
+/// Every app with a box for your own word. Type that word in MONEY! and the app comes up first.
 private struct ShortcutsPane: View {
     @Bindable var store: Store
     let launcher: LauncherController
@@ -418,7 +539,7 @@ private struct ShortcutsPane: View {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Filter apps", text: $filter).textFieldStyle(.plain)
-                    Toggle("With shortcuts only", isOn: $onlyAssigned).toggleStyle(.checkbox).fixedSize()
+                    Toggle("With keywords only", isOn: $onlyAssigned).toggleStyle(.checkbox).fixedSize()
                 }
             }
             .padding(.horizontal, 20)
@@ -431,7 +552,7 @@ private struct ShortcutsPane: View {
                             Image(nsImage: IconCache.icon(forPath: app.path)).resizable().frame(width: 24, height: 24)
                             Text(app.name).lineLimit(1)
                             Spacer()
-                            TextField("", text: binding(app.path), prompt: Text("Type a word"))
+                            TextField("", text: binding(app.path))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 160)
                         }
@@ -443,7 +564,7 @@ private struct ShortcutsPane: View {
             }
             .overlay {
                 if apps.isEmpty {
-                    Text(onlyAssigned ? "No app shortcuts yet" : "No apps match").foregroundStyle(.secondary)
+                    Text(onlyAssigned ? "No app keywords yet" : "No apps match").foregroundStyle(.secondary)
                 }
             }
         }
@@ -521,7 +642,7 @@ private struct ClipboardPane: View {
                         .buttonStyle(.plain)
                     }
                 }
-                Menu("Add Running App") {
+                Menu("Add running app") {
                     ForEach(runningApps, id: \.self) { id in
                         Button(appName(id)) { store.settings.ignoredApps.append(id) }
                     }
@@ -530,14 +651,14 @@ private struct ClipboardPane: View {
             }
             Section {
                 LabeledContent("\(clipboard.clips.count) items saved") {
-                    Button("Clear History…", role: .destructive) { confirmClear = true }
+                    Button("Clear history…", role: .destructive) { confirmClear = true }
                 }
             }
         }
         .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in trusted = Paster.trusted }
         .confirmationDialog("Clear clipboard history?", isPresented: $confirmClear) {
-            Button("Clear All but Pinned", role: .destructive) { clipboard.clearAll(keepPinned: true) }
-            Button("Clear Everything", role: .destructive) { clipboard.clearAll(keepPinned: false) }
+            Button("Clear all but pinned", role: .destructive) { clipboard.clearAll(keepPinned: true) }
+            Button("Clear everything", role: .destructive) { clipboard.clearAll(keepPinned: false) }
         }
     }
 
@@ -574,7 +695,7 @@ private struct AppsPane: View {
                     }
                 }
                 HStack {
-                    Button("Add Folder…") {
+                    Button("Add folder…") {
                         let panel = NSOpenPanel()
                         panel.canChooseDirectories = true
                         panel.canChooseFiles = false
@@ -602,7 +723,7 @@ private struct AppsPane: View {
                             .buttonStyle(.plain)
                     }
                 }
-                Button("Hide an App…") {
+                Button("Hide an app…") {
                     let panel = NSOpenPanel()
                     panel.allowedContentTypes = [.application]
                     panel.allowsMultipleSelection = true
@@ -631,13 +752,13 @@ private struct DictationPane: View {
         Form {
             Section {
                 Toggle("Dictation", isOn: $store.settings.dictationEnabled)
-                Toggle("Hold Fn (🌐) to dictate, Fn + Control to edit by voice", isOn: $store.settings.fnDictation)
-                LabeledContent("Dictate") { HotKeyField(hotKey: $store.settings.dictationHotKey).frame(width: 150, height: 26) }
-                LabeledContent("Edit by voice") { HotKeyField(hotKey: $store.settings.commandHotKey).frame(width: 150, height: 26) }
-                LabeledContent("Paste last dictation") { HotKeyField(hotKey: $store.settings.pasteLastHotKey).frame(width: 150, height: 26) }
-                LabeledContent("Undo polish") { HotKeyField(hotKey: $store.settings.undoPolishHotKey).frame(width: 150, height: 26) }
+                Toggle("Hold Fn to dictate, Fn + Control to edit by voice", isOn: $store.settings.fnDictation)
+                HotKeyRow("Dictate") { HotKeyField(hotKey: $store.settings.dictationHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("Edit by voice") { HotKeyField(hotKey: $store.settings.commandHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("Paste last dictation") { HotKeyField(hotKey: $store.settings.pasteLastHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("Undo polish") { HotKeyField(hotKey: $store.settings.undoPolishHotKey).frame(width: 150, height: 26) }
             } footer: {
-                Text("For Fn, set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”. Hold the key and talk, then let go: the text appears where your cursor is. Tap it (once or twice) to keep listening hands-free, and tap again to finish. Esc cancels. “Edit by voice” works on the selected text: select something, hold the key, and say what to do (“make this more polite”, “translate to English”). With nothing selected it writes what you ask for.")
+                Text("For Fn, set System Settings › Keyboard › “Press Globe key to” to “Do Nothing”. Hold the key, talk, let go: the text appears at your cursor. Tap it to keep listening hands-free; Esc cancels. Edit by voice works on the selected text (“make this more polite”), or writes what you ask for.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Languages") {
@@ -657,7 +778,7 @@ private struct DictationPane: View {
                         }
                     }
                 }
-                Menu("Add Language") {
+                Menu("Add language") {
                     ForEach(models.supported.filter { !listen.contains($0) }, id: \.self) { id in
                         Button(SpeechModels.name(id)) {
                             store.settings.dictationLocales = listen + [id]
@@ -686,7 +807,7 @@ private struct DictationPane: View {
             } header: {
                 Text("Polish")
             } footer: {
-                Text("The AI (Settings › AI; on this Mac by default) removes “um”s and false starts, keeps only what you meant when you correct yourself, fixes punctuation (、。 in Japanese) and writes lists, numbers and emails properly. “Match the app” is casual in chat apps, formal in mail, exact in code editors. Light only takes out “um”s and repeats; Strong also tightens the wording. With it off, MONEY! still removes fillers on its own.")
+                Text("The model from AI (on this Mac by default) removes “um”s and false starts, keeps what you meant when you correct yourself, and fixes punctuation, lists and numbers. Light only takes out fillers; Strong also tightens the wording.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if store.settings.dictationStyle == .auto {
@@ -729,7 +850,7 @@ private struct DictationPane: View {
                         Button { store.settings.snippets.removeAll { $0.id == sn.id } } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain)
                     }
                 }
-                Button("Add Snippet") { store.settings.snippets.append(Snippet()) }
+                Button("Add snippet") { store.settings.snippets.append(Snippet()) }
             } header: {
                 Text("Snippets")
             } footer: {
@@ -737,7 +858,7 @@ private struct DictationPane: View {
             }
             Section("Permissions") {
                 LabeledContent("Microphone") {
-                    Button("Open Settings…") { open("Privacy_Microphone") }
+                    Button("Open settings…") { open("Privacy_Microphone") }
                 }
                 LabeledContent("Accessibility (to paste for you)") {
                     if trusted {
@@ -818,7 +939,7 @@ private struct VoiceModesSection: View {
                 }
                 .padding(.vertical, 4)
             }
-            Button("Add Instructions") { store.settings.voiceModes.append(VoiceMode()) }
+            Button("Add instructions") { store.settings.voiceModes.append(VoiceMode()) }
         }
     }
 
@@ -871,13 +992,15 @@ private struct MeetingsPane: View {
                     ForEach(MeetingTemplate.all) { t in Text(t.name).tag(t.name) }
                 }
                 LabeledContent("Your own templates") {
-                    Button("Open Folder") { NSWorkspace.shared.open(MeetingTemplate.openFolder()) }
+                    Button("Open folder") { NSWorkspace.shared.open(MeetingTemplate.openFolder()) }
                 }
                 Toggle("Floating meeting window with live help", isOn: $store.settings.meetingOverlay)
-                LabeledContent("Show / hide it") { HotKeyField(hotKey: $store.settings.copilotHotKey).frame(width: 150, height: 26) }
+                HotKeyRow("Show / hide it") { HotKeyField(hotKey: $store.settings.copilotHotKey).frame(width: 150, height: 26) }
                 Toggle("Hide MONEY! from screen sharing and recordings", isOn: $store.settings.hideFromScreenShare)
             } footer: {
-                Text("In the popup, ⌘4 starts recording. Your voice is “Me”; everything the Mac plays (Zoom, Meet, Teams…) is “Others”. Switch EN / 日本語 any time from the bar. Speech is recognized on this Mac; notes are written by the model you pick in Settings › AI (on this Mac by default).")
+                // The key follows the button order in Appearance; no key when Meetings has no button.
+                let key = store.settings.quickModes.prefix(4).firstIndex(of: .mode(.meeting)).map { "⌘\($0 + 2) in the search bar starts recording. " } ?? ""
+                Text(key + "Your voice is “Me”, what the Mac plays is “Others”. Speech is recognized on this Mac; notes come from the model chosen in AI.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Saved to") {
@@ -917,16 +1040,18 @@ private struct AIPane: View {
 
     var body: some View {
         Form {
-            AskChatsSection(chats: AskChats.shared)
-
             Section {
+                let used = Set(AITask.allCases.map { AI.choice($0, store.settings).provider })
+                ForEach(AIProvider.allCases.filter { used.contains($0) && $0.needsKey && AI.key($0) == nil }) { p in
+                    Text("No \(p.short) API key. Add it under Services below.").font(.caption).foregroundStyle(.orange)
+                }
                 ForEach(AITask.allCases) { task in
-                    TaskRow(store: store, task: task, lists: lists)
+                    TaskRow(store: store, task: task, lists: lists, load: load)
                 }
             } header: {
                 Text("A model for each job")
             } footer: {
-                Text("Every job starts on Apple’s on-device model: free, private and nothing to download. Switch a job to an open model (Ollama, LM Studio) or a cloud service when you want more power. Open each job’s Advanced settings for its temperature and length.")
+                Text("Every job starts on Apple’s on-device model: free, private and nothing to download. For more power at no cost, use an open model on this Mac (Ollama, LM Studio) or a free tier (OpenRouter’s :free models, Groq, Gemini, Mistral, GitHub Models). Open each job’s Advanced settings for its temperature and length.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -954,9 +1079,11 @@ private struct AIPane: View {
             } header: {
                 Text("Services")
             } footer: {
-                Text("Keys are kept in your Keychain. “Load models” asks the service for its current list.")
+                Text("Keys are kept in your Keychain. “Load models” asks the service for its current list. “Test” sends one short question.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            AskChatsSection(chats: AskChats.shared)
         }
         .task { await checkOllama() }
         .confirmationDialog("Download \(confirmPull?.name ?? "")?", isPresented: Binding(get: { confirmPull != nil }, set: { if !$0 { confirmPull = nil } }), presenting: confirmPull) { m in
@@ -1059,6 +1186,7 @@ private struct TaskRow: View {
     @Bindable var store: Store
     let task: AITask
     let lists: [AIProvider: [String]]
+    let load: (AIProvider) -> Void
     @State private var advanced = false
     @State private var testing = false
     @State private var result: String?
@@ -1074,7 +1202,11 @@ private struct TaskRow: View {
                 }
                 Spacer()
                 Picker("", selection: providerBinding) {
-                    ForEach(AIProvider.allCases) { p in Label(p.title, systemImage: p.symbol).tag(p) }
+                    ForEach(Self.groups, id: \.title) { g in
+                        Section(g.title) {
+                            ForEach(g.providers) { p in Label(p.title, systemImage: p.symbol).tag(p) }
+                        }
+                    }
                 }
                 .labelsHidden()
                 .frame(width: 210)
@@ -1085,17 +1217,30 @@ private struct TaskRow: View {
                         .font(.system(size: 12, design: .monospaced))
                     Menu("Models") {
                         let names = Array(Set((lists[c.provider] ?? []) + c.provider.suggestedModels)).sorted()
+                        if lists[c.provider] == nil {
+                            Button("Load the list from \(c.provider.short)") { load(c.provider) }
+                            Divider()
+                        }
                         if c.provider == .ollama {
                             Button("\(task.recommendedOpenModel.name) (recommended)") { binding.model.wrappedValue = task.recommendedOpenModel.name }
                             Divider()
                         }
-                        ForEach(names, id: \.self) { n in Button(n) { binding.model.wrappedValue = n } }
+                        // OpenRouter's free models first, marked.
+                        ForEach(names.filter { $0.hasSuffix(":free") } + names.filter { !$0.hasSuffix(":free") }, id: \.self) { n in
+                            Button(n.hasSuffix(":free") ? "\(n)  ·  Free" : n) { binding.model.wrappedValue = n }
+                        }
                     }
                     .fixedSize()
                 }
                 .padding(.leading, 28)
             }
-            if let why = AI.problem(task, store.settings) {
+            if task == .vision {
+                Label(c.provider.seesImages(c.model) ? "This model sees images" : "This model gets the text read from images, not the images",
+                      systemImage: c.provider.seesImages(c.model) ? "eye" : "text.viewfinder")
+                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 28)
+            }
+            // A missing key is said once, above the jobs.
+            if let why = AI.problem(task, store.settings), !(c.provider.needsKey && AI.key(c.provider) == nil) {
                 Text(why).font(.caption).foregroundStyle(.orange).padding(.leading, 28)
             }
             DisclosureGroup("Advanced", isExpanded: $advanced) {
@@ -1127,6 +1272,14 @@ private struct TaskRow: View {
     private var binding: Binding<TaskModel> {
         Binding(get: { AI.choice(task, store.settings) }, set: { store.settings.aiTasks[task.rawValue] = $0 })
     }
+
+    /// The services in the picker, free ones first.
+    static let groups: [(title: String, providers: [AIProvider])] = [
+        ("Free, on this Mac", AIProvider.allCases.filter(\.isLocal)),
+        ("Free tier, needs a key", AIProvider.allCases.filter { !$0.isLocal && $0.isFree }),
+        ("Paid, needs a key", AIProvider.allCases.filter { $0.cost == "Paid" }),
+        ("Your own server", [.custom]),
+    ]
 
     /// Switching service picks a sensible model for this job.
     private var providerBinding: Binding<AIProvider> {
@@ -1176,9 +1329,13 @@ private struct ProviderRow: View {
     let load: () -> Void
     @State private var key = ""
     @State private var hasKey = false
+    @State private var testing = false
+    @State private var tested: (text: String, ok: Bool)?
+    /// `--settings-snapshot … --open-services` draws them open.
+    @State private var open = CommandLine.arguments.contains("--open-services")
 
     var body: some View {
-        DisclosureGroup {
+        DisclosureGroup(isExpanded: $open) {
             VStack(alignment: .leading, spacing: 10) {
                 if provider.needsKey || provider == .custom {
                     LabeledContent("API key") {
@@ -1190,7 +1347,7 @@ private struct ProviderRow: View {
                                     hasKey = false
                                 }
                             } else {
-                                SecureField(provider == .custom ? "optional" : "paste key", text: $key).frame(width: 220)
+                                SecureField("", text: $key).textFieldStyle(.roundedBorder).frame(width: 220).accessibilityLabel("API key")
                                 Button("Save") {
                                     AI.setKey(key, for: provider)
                                     key = ""
@@ -1224,7 +1381,9 @@ private struct ProviderRow: View {
                 }
                 HStack {
                     Button("Load models", action: load)
-                    if let error { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(1) }
+                    Button(testing ? "Testing…" : "Test") { test() }.disabled(testing || testModel.isEmpty)
+                    if let tested { Text(tested.text).font(.caption).foregroundStyle(tested.ok ? Color.secondary : .orange).lineLimit(1) }
+                    else if let error { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(1) }
                     else if let models { Text("\(models.count) models").font(.caption).foregroundStyle(.secondary) }
                 }
             }
@@ -1241,8 +1400,29 @@ private struct ProviderRow: View {
 
     private var status: String {
         let used = AITask.allCases.filter { AI.choice($0, store.settings).provider == provider }.count
-        let state = provider.isLocal ? "On this Mac" : provider.needsKey ? (hasKey ? "Key saved" : "No key") : "No key needed"
-        return used > 0 ? "\(state) · \(used) job\(used == 1 ? "" : "s")" : state
+        let key = provider.isLocal ? nil : provider.needsKey ? (hasKey ? "Key saved" : "No key") : "No key needed"
+        return ([provider.cost, key] + [used > 0 ? "\(used) job\(used == 1 ? "" : "s")" : nil]).compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// The model a job already uses here, else a free one from the list, else the first suggestion.
+    private var testModel: String {
+        AITask.allCases.map { AI.choice($0, store.settings) }.first { $0.provider == provider }?.model
+            ?? models?.first { $0.hasSuffix(":free") } ?? provider.suggestedModels.first ?? models?.first ?? ""
+    }
+
+    private func test() {
+        testing = true
+        tested = nil
+        let start = Date(), model = testModel
+        Task {
+            do {
+                let out = try await AI.ping(provider, model: model, store.settings)
+                tested = ("\(model) answered “\(Tools.oneLine(out, 40))” in \(String(format: "%.1f", Date().timeIntervalSince(start))) s", true)
+            } catch {
+                tested = (error.localizedDescription, false)
+            }
+            testing = false
+        }
     }
 
     private var binding: Binding<ProviderSettings> {
@@ -1286,7 +1466,7 @@ private struct StatsPane: View {
                 row("Words", "text.word.spacing", .words)
                 LabeledContent {
                     let words = stats.total(.words), secs = stats.total(.speakingSeconds)
-                    Text(secs > 0 ? "\(Int(words / (secs / 60))) words a minute" : "—").foregroundStyle(.secondary)
+                    Text(secs > 0 ? "\(Int(words / (secs / 60))) words a minute" : "Not yet").foregroundStyle(.secondary)
                 } label: { Label("Speaking speed", systemImage: "speedometer") }
                 LabeledContent {
                     Text(duration(stats.minutesSaved(stats.total(.words), speaking: stats.total(.speakingSeconds)))).foregroundStyle(.secondary)
@@ -1313,7 +1493,7 @@ private struct StatsPane: View {
             }
             Section {
                 LabeledContent("Counting since") { Text(stats.since.formatted(date: .abbreviated, time: .omitted)).foregroundStyle(.secondary) }
-                Button("Reset Stats…", role: .destructive) { confirmReset = true }
+                Button("Reset stats…", role: .destructive) { confirmReset = true }
             }
         }
         .confirmationDialog("Reset all stats?", isPresented: $confirmReset) {
@@ -1650,7 +1830,7 @@ private struct PreviewDrop: DropDelegate {
 }
 
 /// Lays chips out left to right, wrapping onto new lines.
-private struct FlowLayout: Layout {
+struct FlowLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
@@ -1750,9 +1930,6 @@ private struct ClockPane: View {
             Section("Stopwatch") {
                 Toggle("Show hundredths of a second", isOn: $store.settings.stopwatchHundredths)
             }
-            Section("Focus") {
-                Toggle("Show Focus in the notch", isOn: $store.settings.notchFocus)
-            }
         }
     }
 
@@ -1762,139 +1939,6 @@ private struct ClockPane: View {
                 ForEach(ClockSound.names, id: \.self) { Text($0).tag($0) }
             }
             Button { ClockSound.play(value.wrappedValue) } label: { Image(systemName: "play.fill") }.buttonStyle(.borderless).help("Play")
-        }
-    }
-}
-
-// MARK: Notch
-
-private struct NotchPane: View {
-    @Bindable var store: Store
-    private var events: CalendarEvents { .shared }
-
-    /// Everything on this pane back to how it started, the order included.
-    private func resetNotch() {
-        let d = Settings()
-        withAnimation {
-            store.settings.notchEnabled = d.notchEnabled
-            store.settings.notchTimers = d.notchTimers
-            store.settings.notchStopwatch = d.notchStopwatch
-            store.settings.notchFocus = d.notchFocus
-            store.settings.notchMeeting = d.notchMeeting
-            store.settings.notchDictation = d.notchDictation
-            store.settings.notchEvents = d.notchEvents
-            store.settings.notchAgents = d.notchAgents
-            store.settings.notchEventLead = d.notchEventLead
-            store.settings.eventCalendarsOff = d.eventCalendarsOff
-            store.settings.mediaInNotch = d.mediaInNotch
-            store.settings.notchLyrics = d.notchLyrics
-            store.settings.notchLyricsOpen = d.notchLyricsOpen
-            store.settings.notchLyricLine = d.notchLyricLine
-            store.settings.notchLyricsFill = d.notchLyricsFill
-            store.settings.notchInCaptures = d.notchInCaptures
-            store.settings.notchBand = d.notchBand
-            store.settings.notchHideInFullScreen = d.notchHideInFullScreen
-            store.settings.notchHoverExpand = d.notchHoverExpand
-            store.settings.notchHoverDelay = d.notchHoverDelay
-            store.settings.notchCollapseDelay = d.notchCollapseDelay
-        }
-    }
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Use the notch", isOn: $store.settings.notchEnabled)
-            } footer: {
-                Text("What’s going on shows around the notch (at the top of the screen on Macs without one).").font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Show") {
-                Toggle("Timers", isOn: $store.settings.notchTimers)
-                Toggle("Stopwatches", isOn: $store.settings.notchStopwatch)
-                Toggle("Focus", isOn: $store.settings.notchFocus)
-                Toggle("Meetings", isOn: $store.settings.notchMeeting)
-                Toggle("Dictation", isOn: $store.settings.notchDictation)
-                Toggle("What’s playing", isOn: $store.settings.mediaInNotch)
-                Toggle("Lyrics", isOn: $store.settings.notchLyrics)
-                    .disabled(!store.settings.mediaInNotch)
-                Toggle("Lyric line under the closed notch", isOn: $store.settings.notchLyricLine)
-                    .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
-                Toggle("Words fill in as they’re sung", isOn: $store.settings.notchLyricsFill)
-                    .disabled(!store.settings.mediaInNotch || !store.settings.notchLyrics)
-                Toggle("Upcoming events", isOn: $store.settings.notchEvents)
-                Toggle("Coding agents", isOn: $store.settings.notchAgents)
-            }
-            .disabled(!store.settings.notchEnabled)
-            AgentsSettings(store: store)
-            Section("Beside the notch when open") {
-                Picker("Left of the notch", selection: Binding(get: { store.settings.notchBand.first ?? .battery }, set: { item in
-                    store.settings.notchBand = [item] + store.settings.notchBand.dropFirst().filter { $0 != item }
-                })) {
-                    ForEach(BandItem.allCases) { Text($0.title).tag($0) }
-                }
-                Picker("Beside it", selection: Binding(get: { store.settings.notchBand.dropFirst().first }, set: { item in
-                    store.settings.notchBand = Array(store.settings.notchBand.prefix(1)) + (item.map { [$0] } ?? [])
-                })) {
-                    Text("Nothing").tag(BandItem?.none)
-                    ForEach(BandItem.allCases.filter { $0 != store.settings.notchBand.first }) { Text($0.title).tag(Optional($0)) }
-                }
-            }
-            .disabled(!store.settings.notchEnabled)
-            Section("Upcoming events") {
-                Picker("Show before it starts", selection: $store.settings.notchEventLead) {
-                    ForEach([5, 10, 15, 30, 60], id: \.self) { m in Text(m == 60 ? "1 hour" : "\(m) minutes").tag(m) }
-                }
-                if events.authorized {
-                    ForEach(events.calendars) { c in
-                        Toggle(isOn: Binding(get: { !store.settings.eventCalendarsOff.contains(c.id) }, set: { on in
-                            store.settings.eventCalendarsOff.removeAll { $0 == c.id }
-                            if !on { store.settings.eventCalendarsOff.append(c.id) }
-                        })) {
-                            HStack(spacing: 8) {
-                                Circle().fill(Color(nsColor: c.color)).frame(width: 9, height: 9)
-                                Text(c.title)
-                                if !c.source.isEmpty { Text(c.source).foregroundStyle(.secondary) }
-                            }
-                        }
-                    }
-                } else {
-                    LabeledContent("Calendars") {
-                        Button(events.undecided ? "Allow Access" : "Open Privacy Settings") { events.requestAccess() }
-                    }
-                }
-            }
-            .disabled(!store.settings.notchEnabled || !store.settings.notchEvents)
-            .onAppear { if events.authorized { events.reload() } }
-            Section("Screenshots and sharing") {
-                Toggle("Show the notch in screenshots, recordings and screen sharing", isOn: $store.settings.notchInCaptures)
-            }
-            .disabled(!store.settings.notchEnabled)
-            Section {
-                Toggle("Hide while an app is full screen", isOn: $store.settings.notchHideInFullScreen)
-            } header: {
-                Text("Full screen")
-            } footer: {
-                Text("Alarms, dictation and coding agents waiting on you still show.").font(.caption).foregroundStyle(.secondary)
-            }
-            .disabled(!store.settings.notchEnabled)
-            Section("Opening") {
-                Toggle("Open when the pointer rests on it", isOn: $store.settings.notchHoverExpand)
-                LabeledContent("Wait before opening") {
-                    Slider(value: $store.settings.notchHoverDelay, in: 0...1, step: 0.05).frame(width: 180)
-                    Text(String(format: "%.2f s", store.settings.notchHoverDelay)).monospacedDigit().frame(width: 52)
-                }
-                .disabled(!store.settings.notchHoverExpand)
-                LabeledContent("Close after leaving") {
-                    Slider(value: $store.settings.notchCollapseDelay, in: 0.2...3, step: 0.1).frame(width: 180)
-                    Text(String(format: "%.1f s", store.settings.notchCollapseDelay)).monospacedDigit().frame(width: 52)
-                }
-            }
-            .disabled(!store.settings.notchEnabled)
-            Section {
-                HStack {
-                    Spacer()
-                    Button("Reset Notch Settings") { resetNotch() }
-                }
-            }
         }
     }
 }

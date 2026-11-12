@@ -369,7 +369,7 @@ import SwiftUI
     }
 }
 
-/// The thread under the bar: one card that reads like a chat, newest exchange on top. Your question is a bubble on
+/// The thread under the bar: one card that reads like a chat, newest exchange at the bottom. Your question is a bubble on
 /// the right, the answer plain text on the left with its sources under it. The card grows with the answer, then scrolls.
 /// With no thread yet, earlier chats show there instead.
 struct AssistantView: View {
@@ -377,6 +377,8 @@ struct AssistantView: View {
     let model: LauncherModel
     let s: Settings
     let radius: CGFloat
+    /// Whether there's more above and below the part in view (each edge fades while there is).
+    @State private var more = [false, false]
 
     static let maxCard: CGFloat = 440
 
@@ -385,12 +387,12 @@ struct AssistantView: View {
         return Metrics.rowGap + min(maxCard, max(a.contentHeight, 52)) + Metrics.listInset
     }
 
-    static var animates: Bool { Store.shared.settings.animations && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    static var animates: Bool { Store.shared.settings.animations && !Store.shared.settings.reduceMotion }
 
     var body: some View {
         if assistant.turns.isEmpty {
             AskChatList(assistant: assistant, chats: AskChats.shared.matching(model.query), s: s,
-                        radius: max(4, min(radius - Metrics.listInset, s.rowHeight / 2))) { chat in
+                        radius: max(4, min(radius - Metrics.listInset, s.rowSize / 2))) { chat in
                 assistant.open(chat)
                 model.setQuery("")
             }
@@ -401,24 +403,33 @@ struct AssistantView: View {
 
     private var thread: some View {
         let shape = RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous)
-        return ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 22) {
-                    ForEach(assistant.turns.reversed()) { t in
-                        AssistantTurn(turn: t, busy: assistant.busy && t.id == assistant.turns.last?.id)
-                            .transition(.opacity)
-                    }
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 22) {
+                ForEach(assistant.turns) { t in
+                    let last = t.id == assistant.turns.last?.id
+                    AssistantTurn(turn: t, busy: assistant.busy && last, retry: last && t.failed && !assistant.busy ? { assistant.regenerate() } : nil)
+                        .transition(.opacity)
                 }
-                .padding(cardPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { assistant.contentHeight = $0 }
-                .id("thread")
             }
-            .scrollIndicators(.never)
-            // A new question goes to the top: show it there.
-            .onChange(of: assistant.turns.count) { _, _ in proxy.scrollTo("thread", anchor: .top) }
+            .padding(cardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { assistant.contentHeight = $0 }
         }
-        // New questions slide the thread down; a growing answer eases the turns under it down.
+        .scrollIndicators(.never)
+        // Opens on the newest exchange and stays there as a question or an answer comes in.
+        .defaultScrollAnchor(.bottom)
+        .onScrollGeometryChange(for: [Bool].self) { g in
+            [g.contentOffset.y > 2, g.contentOffset.y + g.containerSize.height < g.contentSize.height - 2]
+        } action: { _, edges in more = edges }
+        // Fades the edge where there's more to scroll to.
+        .mask {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.black.opacity(0), .black], startPoint: .top, endPoint: .bottom).frame(height: more[0] ? 30 : 0)
+                Color.black
+                LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: more[1] ? 30 : 0)
+            }
+        }
+        // New questions and growing answers ease the thread up.
         .animation(Self.animates ? .smooth(duration: 0.3) : nil, value: assistant.turns.count)
         .animation(Self.animates ? .smooth(duration: 0.3) : nil, value: assistant.turns.last?.answer.count)
         .background(shape.fill(cardFill))
@@ -434,12 +445,15 @@ struct AssistantView: View {
 struct AssistantTurn: View {
     let turn: Assistant.Turn
     let busy: Bool
+    /// The last question failed: ask it again (⌘R).
+    var retry: (() -> Void)?
     /// How much of the answer is revealed (see `NotesView.shown`); a turn still being answered starts hidden.
     @State private var shown: Double
 
-    init(turn: Assistant.Turn, busy: Bool) {
+    init(turn: Assistant.Turn, busy: Bool, retry: (() -> Void)? = nil) {
         self.turn = turn
         self.busy = busy
+        self.retry = retry
         _shown = State(initialValue: busy ? 0 : Self.full(turn.answer))
     }
 
@@ -448,7 +462,7 @@ struct AssistantTurn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(turn.question)
-                .font(.system(size: 13.5))
+                .font(.app(.answers, 13.5))
                 .textSelection(.enabled)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
@@ -456,7 +470,10 @@ struct AssistantTurn: View {
                 .padding(.leading, 56)
                 .frame(maxWidth: .infinity, alignment: .trailing)
             if turn.failed {
-                Label(turn.answer, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
+                HStack(spacing: 10) {
+                    Label(turn.answer, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
+                    if let retry { PillButton(title: "Try Again", symbol: "arrow.clockwise", help: "Ask again (⌘R)", action: retry) }
+                }
             } else if !turn.answer.isEmpty {
                 AskAnswer(text: turn.answer, shown: shown)
             } else if busy {

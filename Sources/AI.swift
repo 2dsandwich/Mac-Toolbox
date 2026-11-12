@@ -4,7 +4,8 @@ import FoundationModels
 /// Where a job's text goes: Apple's on-device model (the default; nothing to download, nothing leaves the Mac),
 /// Claude, any OpenAI-compatible service, or open models running locally in Ollama / LM Studio.
 enum AIProvider: String, Codable, CaseIterable, Identifiable {
-    case apple, ollama, lmstudio, anthropic, openai, gemini, openrouter, groq, mistral, xai, deepseek, custom
+    // Free first: on this Mac, then free tiers, then paid.
+    case apple, ollama, lmstudio, openrouter, groq, gemini, mistral, github, openai, anthropic, xai, deepseek, custom
 
     var id: String { rawValue }
 
@@ -19,6 +20,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
         case .openrouter: "OpenRouter"
         case .groq: "Groq"
         case .mistral: "Mistral"
+        case .github: "GitHub Models"
         case .xai: "xAI Grok"
         case .deepseek: "DeepSeek"
         case .custom: "Custom (OpenAI-compatible)"
@@ -36,6 +38,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
         case .openrouter: "OpenRouter"
         case .groq: "Groq"
         case .mistral: "Mistral"
+        case .github: "GitHub"
         case .xai: "Grok"
         case .deepseek: "DeepSeek"
         case .custom: "Custom"
@@ -55,6 +58,18 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
     var isLocal: Bool { self == .apple || self == .ollama || self == .lmstudio }
     var needsKey: Bool { !isLocal && self != .custom }
 
+    /// What it costs, said plainly in Settings (nil: depends on the server).
+    var cost: String? {
+        switch self {
+        case .apple, .ollama, .lmstudio: "Free, on this Mac"
+        case .openrouter: "Free models (:free)"
+        case .groq, .gemini, .mistral, .github: "Free tier"
+        case .openai, .anthropic, .xai, .deepseek: "Paid"
+        case .custom: nil
+        }
+    }
+    var isFree: Bool { cost?.hasPrefix("Free") == true }
+
     var defaultBaseURL: String {
         switch self {
         case .apple: ""
@@ -66,6 +81,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
         case .openrouter: "https://openrouter.ai/api/v1"
         case .groq: "https://api.groq.com/openai/v1"
         case .mistral: "https://api.mistral.ai/v1"
+        case .github: "https://models.github.ai/inference"
         case .xai: "https://api.x.ai/v1"
         case .deepseek: "https://api.deepseek.com/v1"
         case .custom: "http://localhost:8080/v1"
@@ -81,6 +97,7 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
         case .openrouter: "https://openrouter.ai/keys"
         case .groq: "https://console.groq.com/keys"
         case .mistral: "https://console.mistral.ai/api-keys"
+        case .github: "https://github.com/settings/personal-access-tokens"
         case .xai: "https://console.x.ai"
         case .deepseek: "https://platform.deepseek.com/api_keys"
         default: nil
@@ -95,9 +112,11 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
         case .anthropic: ClaudeModel.allCases.map(\.rawValue)
         case .openai: ["gpt-5", "gpt-5-mini", "gpt-5-nano"]
         case .gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
-        case .openrouter: ["anthropic/claude-opus-5-5", "openai/gpt-5", "google/gemini-2.5-flash", "qwen/qwen3-235b-a22b"]
+        case .openrouter: ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3.1:free", "google/gemma-3-27b-it:free",
+                           "anthropic/claude-opus-5-5", "openai/gpt-5", "google/gemini-2.5-flash"]
         case .groq: ["llama-3.3-70b-versatile", "qwen/qwen3-32b", "openai/gpt-oss-120b"]
         case .mistral: ["mistral-small-latest", "mistral-medium-latest", "mistral-large-latest"]
+        case .github: ["openai/gpt-4.1-mini", "openai/gpt-4.1", "meta/Llama-3.3-70B-Instruct", "mistral-ai/mistral-small-2503"]
         case .xai: ["grok-4", "grok-4-fast"]
         case .deepseek: ["deepseek-chat", "deepseek-reasoner"]
         case .lmstudio, .custom: []
@@ -108,17 +127,18 @@ enum AIProvider: String, Codable, CaseIterable, Identifiable {
     func seesImages(_ model: String) -> Bool {
         switch self {
         case .anthropic, .openai, .gemini, .openrouter, .xai: return true
-        case .ollama, .lmstudio, .custom:
+        case .apple, .deepseek: return false
+        case .ollama, .lmstudio, .custom, .groq, .mistral, .github:
             let m = model.lowercased()
-            return ["gemma3", "vl", "llava", "vision", "minicpm-v", "mistral-small3", "llama4"].contains { m.contains($0) }
-        default: return false
+            return ["gemma3", "vl", "llava", "vision", "minicpm-v", "mistral-small3", "llama4", "llama-4", "pixtral", "mistral-small", "mistral-medium",
+                    "gpt-4o", "gpt-4.1", "gpt-5", "multimodal"].contains { m.contains($0) }
         }
     }
 }
 
 /// The jobs that use a language model. Each has its own model and tuned defaults.
 enum AITask: String, Codable, CaseIterable, Identifiable {
-    case dictation, voiceEdit, meetingChat, meetingNotes, translate, assistant
+    case dictation, voiceEdit, meetingChat, meetingNotes, translate, assistant, vision
 
     var id: String { rawValue }
 
@@ -130,6 +150,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingNotes: "Meeting notes"
         case .translate: "Translate"
         case .assistant: "Ask"
+        case .vision: "Reading images"
         }
     }
 
@@ -141,6 +162,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingNotes: "Writes the notes when a meeting ends. Long transcripts."
         case .translate: "“tr …” in the search bar."
         case .assistant: "Tab in the empty search bar. Short answers; Claude also searches the web."
+        case .vision: "Photos and screenshots, like a timetable to import. Best with a model that sees images."
         }
     }
 
@@ -152,13 +174,14 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingNotes: "doc.text.fill"
         case .translate: "character.bubble.fill"
         case .assistant: "sparkles"
+        case .vision: "photo"
         }
     }
 
     // Tuned per job: cleanup and translation stay literal, chat and notes get a little room.
     var temperature: Double {
         switch self {
-        case .dictation: 0
+        case .dictation, .vision: 0
         case .voiceEdit: 0.2
         case .translate: 0.2
         case .meetingNotes: 0.3
@@ -172,7 +195,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .voiceEdit: 4096
         case .meetingChat: 1500
         case .assistant: 1024
-        case .meetingNotes: 4096
+        case .meetingNotes, .vision: 4096
         case .translate: 2048
         }
     }
@@ -180,7 +203,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
     /// Claude's effort for the job.
     var effort: String {
         switch self {
-        case .dictation, .meetingChat, .translate, .assistant: "low"
+        case .dictation, .meetingChat, .translate, .assistant, .vision: "low"
         case .voiceEdit, .meetingNotes: "medium"
         }
     }
@@ -190,6 +213,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .dictation: 12
         case .translate: 30
         case .voiceEdit, .meetingChat, .assistant: 60
+        case .vision: 90
         case .meetingNotes: 300
         }
     }
@@ -203,6 +227,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         case .meetingChat: "\n\nBe brief. If the transcript doesn't say, say you don't know."
         case .meetingNotes: "\n\nOnly include what the transcript says."
         case .assistant: "\n\nBe brief. If you aren't sure, say so."
+        case .vision: "\n\nOnly include what the image shows."
         }
     }
 
@@ -211,7 +236,7 @@ enum AITask: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .dictation: OpenModel.all[0]
         case .voiceEdit, .meetingNotes: OpenModel.all[1]
-        case .meetingChat, .translate, .assistant: OpenModel.all[2]
+        case .meetingChat, .translate, .assistant, .vision: OpenModel.all[2]
         }
     }
 }
@@ -275,8 +300,14 @@ enum AIError: LocalizedError {
         // Polishing speech needs a model that keeps every word and applies "no, actually…" corrections; Apple's
         // on-device one drops sentences and keeps fillers. With a Claude key, Haiku does it (on-device is the fallback).
         // Ask wants quick answers and web search, which Haiku has.
-        if [.dictation, .voiceEdit, .assistant].contains(task), key(.anthropic) != nil { return TaskModel(provider: .anthropic, model: "claude-haiku-5-5") }
+        if [.dictation, .voiceEdit, .assistant, .vision].contains(task), key(.anthropic) != nil { return TaskModel(provider: .anthropic, model: "claude-haiku-5-5") }
         return TaskModel()
+    }
+    /// The job's model sees images itself. When it doesn't, `complete(.vision, …, imageJPEG:)` still works: the image's
+    /// text is read on this Mac and sent instead.
+    static func seesImages(_ task: AITask = .vision, _ s: Settings) -> Bool {
+        let c = choice(task, s)
+        return c.provider.seesImages(c.model)
     }
     static func options(_ p: AIProvider, _ s: Settings) -> ProviderSettings { s.aiProviders[p.rawValue] ?? ProviderSettings() }
     static func baseURL(_ p: AIProvider, _ s: Settings) -> String {
@@ -471,21 +502,32 @@ enum AIError: LocalizedError {
         }
     }
 
-    private static func post(_ url: String, body: [String: Any], headers: [String: String], timeout: TimeInterval) async throws -> [String: Any] {
+    /// Canned replies for the self-checks (`--providers-test`): while set, nothing goes out over the network.
+    static var canned: ((URLRequest) -> (data: Data, status: Int))?
+
+    private static func send(_ req: URLRequest) async throws -> (data: Data, status: Int) {
+        if let canned { return canned(req) }
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+        } catch let e as URLError where e.code == .cannotConnectToHost || e.code == .cannotFindHost {
+            throw AIError.unavailable("Can’t reach \(req.url?.host ?? "the server"). Is it running?")
+        }
+    }
+
+    static func jsonRequest(_ url: String, body: [String: Any], headers: [String: String], timeout: TimeInterval) throws -> URLRequest {
         guard let u = URL(string: url) else { throw AIError.badURL }
         var req = URLRequest(url: u, timeoutInterval: timeout)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp): (Data, URLResponse)
-        do {
-            (data, resp) = try await URLSession.shared.data(for: req)
-        } catch let e as URLError where e.code == .cannotConnectToHost || e.code == .cannotFindHost {
-            throw AIError.unavailable("Can’t reach \(u.host ?? url). Is it running?")
-        }
+        return req
+    }
+
+    private static func post(_ req: URLRequest) async throws -> [String: Any] {
+        let (data, status) = try await send(req)
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             let err = json["error"]
             let msg = (err as? [String: Any])?["message"] as? String ?? err as? String ?? String(data: data, encoding: .utf8) ?? ""
@@ -494,10 +536,11 @@ enum AIError: LocalizedError {
         return json
     }
 
-    private static func openAI(_ p: AIProvider, base: String, model: String, system: String, user: String, image: Data?,
-                               temperature: Double, maxTokens: Int, reasoning: String, timeout: TimeInterval) async throws -> String {
+    /// A chat request to an OpenAI-compatible service (OpenAI, Gemini, OpenRouter, Groq, Mistral, GitHub, LM Studio…).
+    static func openAIRequest(_ p: AIProvider, base: String, model: String, system: String, user: String, image: Data?, temperature: Double,
+                              maxTokens: Int, reasoning: String, key: String?, timeout: TimeInterval) throws -> URLRequest {
         var headers: [String: String] = [:]
-        if let k = key(p) { headers["Authorization"] = "Bearer \(k)" } else if p.needsKey { throw AIError.noKey(p) }
+        if let key { headers["Authorization"] = "Bearer \(key)" } else if p.needsKey { throw AIError.noKey(p) }
         if p == .openrouter {
             headers["HTTP-Referer"] = "https://github.com/2dsandwich/Mac-Toolbox"
             headers["X-Title"] = "MONEY!"
@@ -506,19 +549,31 @@ enum AIError: LocalizedError {
             [["type": "text", "text": user], ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64," + img.base64EncodedString()]]]
         } ?? user
         var body: [String: Any] = ["model": model, "messages": [["role": "system", "content": system], ["role": "user", "content": content]]]
-        let reasoningModel = reasoning != "default" || model.hasPrefix("gpt-5") || model.hasPrefix("o3") || model.hasPrefix("o4")
-        if p == .openai { body["max_completion_tokens"] = maxTokens } else { body["max_tokens"] = maxTokens }
+        // "openai/gpt-5" on OpenRouter and GitHub is still gpt-5.
+        let bare = model.split(separator: "/").last.map(String.init) ?? model
+        let reasoningModel = reasoning != "default" || bare.hasPrefix("gpt-5") || bare.hasPrefix("o3") || bare.hasPrefix("o4")
+        if p == .openai || (p == .github && model.hasPrefix("openai/")) { body["max_completion_tokens"] = maxTokens } else { body["max_tokens"] = maxTokens }
         if reasoning != "default" { body["reasoning_effort"] = reasoning }
         if !reasoningModel { body["temperature"] = temperature }
-        let json = try await post(base + "/chat/completions", body: body, headers: headers, timeout: timeout)
+        return try jsonRequest(base + "/chat/completions", body: body, headers: headers, timeout: timeout)
+    }
+
+    /// The answer's text from an OpenAI-style reply.
+    static func chatText(_ json: [String: Any]) throws -> String {
         let msg = ((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any]) ?? [:]
         if let text = msg["content"] as? String { return text }
         if let parts = msg["content"] as? [[String: Any]] { return parts.compactMap { $0["text"] as? String }.joined() }
         throw AIError.empty
     }
 
-    private static func ollama(base: String, model: String, system: String, user: String, image: Data?, temperature: Double,
-                               maxTokens: Int, o: ProviderSettings, timeout: TimeInterval) async throws -> String {
+    private static func openAI(_ p: AIProvider, base: String, model: String, system: String, user: String, image: Data?,
+                               temperature: Double, maxTokens: Int, reasoning: String, timeout: TimeInterval) async throws -> String {
+        try chatText(await post(openAIRequest(p, base: base, model: model, system: system, user: user, image: image, temperature: temperature,
+                                              maxTokens: maxTokens, reasoning: reasoning, key: key(p), timeout: timeout)))
+    }
+
+    static func ollamaRequest(base: String, model: String, system: String, user: String, image: Data?, temperature: Double,
+                              maxTokens: Int, o: ProviderSettings, timeout: TimeInterval) throws -> URLRequest {
         var userMsg: [String: Any] = ["role": "user", "content": user]
         if let image { userMsg["images"] = [image.base64EncodedString()] }
         var body: [String: Any] = [
@@ -528,35 +583,60 @@ enum AIError: LocalizedError {
         ]
         // Qwen 3 thinks out loud by default; off is much faster for these jobs.
         if model.lowercased().hasPrefix("qwen3") { body["think"] = o.thinking }
-        let json = try await post(base + "/api/chat", body: body, headers: [:], timeout: max(timeout, 120))
+        return try jsonRequest(base + "/api/chat", body: body, headers: [:], timeout: max(timeout, 120))
+    }
+
+    private static func ollama(base: String, model: String, system: String, user: String, image: Data?, temperature: Double,
+                               maxTokens: Int, o: ProviderSettings, timeout: TimeInterval) async throws -> String {
+        let json = try await post(ollamaRequest(base: base, model: model, system: system, user: user, image: image, temperature: temperature,
+                                                maxTokens: maxTokens, o: o, timeout: timeout))
         guard let text = (json["message"] as? [String: Any])?["content"] as? String else { throw AIError.empty }
         return text
     }
 
+    /// Sends a one-line question to a service and model, for Settings' Test button.
+    static func ping(_ p: AIProvider, model: String, _ s: Settings) async throws -> String {
+        stripThinking(try await withTimeLimit(30) {
+            try await route(TaskModel(provider: p, model: model), task: .assistant, s: s, system: "Reply with the single word OK.",
+                            user: "Are you there?", image: nil, temperature: 0, maxTokens: 64)
+        })
+    }
+
     // MARK: Model lists
+
+    static func modelsRequest(_ p: AIProvider, base: String, key: String?) throws -> URLRequest {
+        // GitHub lists its models in a catalog beside the inference address.
+        let urlString = p == .ollama ? base + "/api/tags" : p == .github && base == p.defaultBaseURL ? "https://models.github.ai/catalog/models" : base + "/models"
+        guard let url = URL(string: urlString) else { throw AIError.badURL }
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        if p == .anthropic, let key {
+            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            req.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
+        } else if let key {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        return req
+    }
+
+    /// Model names from a /models reply: OpenAI's `data`, Ollama's `models`, or GitHub's plain list. Free OpenRouter
+    /// models come first.
+    static func parseModels(_ p: AIProvider, _ data: Data) -> [String] {
+        let json = try? JSONSerialization.jsonObject(with: data)
+        let list = (json as? [[String: Any]]) ?? ((json as? [String: Any])?[p == .ollama ? "models" : "data"] as? [[String: Any]]) ?? []
+        let names = list.compactMap { ($0[p == .ollama ? "name" : "id"] as? String).map { p == .gemini && $0.hasPrefix("models/") ? String($0.dropFirst(7)) : $0 } }
+        return names.sorted { ($0.hasSuffix(":free") ? 0 : 1, $0) < ($1.hasSuffix(":free") ? 0 : 1, $1) }
+    }
 
     /// The models a service offers (Ollama: the ones installed).
     static func listModels(_ p: AIProvider, _ s: Settings) async throws -> [String] {
-        let base = baseURL(p, s)
-        var urlString = base + "/models"
-        if p == .ollama { urlString = base + "/api/tags" }
-        guard let url = URL(string: urlString) else { throw AIError.badURL }
-        var req = URLRequest(url: url, timeoutInterval: 8)
-        if p == .anthropic, let k = key(p) {
-            req.setValue(k, forHTTPHeaderField: "x-api-key")
-            req.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
-        } else if let k = key(p) {
-            req.setValue("Bearer \(k)", forHTTPHeaderField: "Authorization")
-        }
+        let req = try modelsRequest(p, base: baseURL(p, s), key: key(p))
         let data: Data
         do {
-            (data, _) = try await URLSession.shared.data(for: req)
+            data = try await send(req).data
         } catch {
             throw AIError.unavailable(p.isLocal ? "\(p.short) isn’t running" : error.localizedDescription)
         }
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        if p == .ollama { return (json["models"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }.sorted() }
-        return (json["data"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }.sorted()
+        return parseModels(p, data)
     }
 
     /// Downloads an open model into Ollama, reporting progress (0…1).

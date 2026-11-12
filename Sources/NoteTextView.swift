@@ -8,7 +8,7 @@ import AppKit
 /// How each kind of line looks. The look is attributes over the Markdown; bullets, boxes, bars and grids are drawn.
 @MainActor enum MDStyle {
     static let size: CGFloat = 14
-    static let body = NSFont.systemFont(ofSize: size)
+    static var body: NSFont { Fonts.ns(.answers, size) }
     static let hiddenFont = NSFont.systemFont(ofSize: 0.5)
     /// Width of one nesting level and of a list marker.
     static let step: CGFloat = 22
@@ -27,7 +27,7 @@ import AppKit
         var tables: [[NSRange]] = []
     }
 
-    static func headingFont(_ h: Int) -> NSFont { .systemFont(ofSize: [20, 17, 15][h - 1], weight: .semibold) }
+    static func headingFont(_ h: Int) -> NSFont { Fonts.ns(.answers, [20, 17, 15][h - 1], weight: .semibold) }
 
     static func paragraph(head: CGFloat = 0, before: CGFloat = 0, after: CGFloat = 0, spacing: CGFloat = 4, height: CGFloat = 0, max: CGFloat = 0) -> NSParagraphStyle {
         let p = NSMutableParagraphStyle()

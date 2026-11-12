@@ -80,7 +80,6 @@ struct CalculatorView: View {
             .frame(height: 16)
             Spacer(minLength: 0)
             HStack(alignment: .firstTextBaseline) {
-                Text(q.isEmpty || value == nil ? " " : "=").font(.system(size: 20, weight: .medium)).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Text(value.map { Tools.fmt($0, digits: Store.shared.settings.calcDecimals) } ?? "…")
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
@@ -207,6 +206,9 @@ private struct MixerRow: View {
             .frame(width: 150, alignment: .leading)
             Slider(value: value, in: 0...top)
                 .controlSize(.small)
+                // Apps go up to 200%: a tick in the middle marks their normal 100%.
+                .background { if top > 1 { Capsule().fill(Color.secondary).frame(width: 2, height: 22) } }
+                .help(top > 1 ? "100% is the app's own volume; past the mark boosts it" : "")
                 .opacity(muted ? 0.4 : 1)
             Text("\(Int((value.wrappedValue * 100).rounded()))%")
                 .font(.system(size: 12, weight: .medium)).monospacedDigit().foregroundStyle(.secondary)

@@ -1,12 +1,14 @@
 import Foundation
 import Observation
 
-// Google Tasks, as in Moneybag: every list, add / complete / edit / delete with the change shown at once and undone if
+// Google Tasks, as in Moneybag: every list of every account, add / complete / edit / delete with the change shown at once and undone if
 // Google refuses it, subtasks under their parent, and the recently completed ones. Cached on disk for a quick start.
 
 struct TaskList: Codable, Equatable, Identifiable {
     var id: String
     var title: String
+    /// The account it belongs to (nil in caches from before there were several: the first account).
+    var account: String?
 }
 
 struct TaskItem: Codable, Equatable, Identifiable {
@@ -67,6 +69,15 @@ struct TaskItem: Codable, Equatable, Identifiable {
 
     // MARK: Reading
 
+    /// The lists switched on in Settings › Google.
+    var shownLists: [TaskList] {
+        let off = Store.shared.settings.taskListsOff
+        return lists.filter { !off.contains($0.id) }
+    }
+
+    /// The account a list belongs to, for writing to it.
+    private func account(_ list: String) -> String? { lists.first { $0.id == list }?.account }
+
     /// A list's open tasks in Google's order, each parent followed by its subtasks.
     func open(in list: String) -> [TaskItem] {
         let mine = tasks.filter { $0.list == list && !$0.done }
@@ -87,14 +98,17 @@ struct TaskItem: Codable, Equatable, Identifiable {
         loading = true
         defer { loading = false }
         do {
-            let json = try await Google.shared.json(URL(string: "\(Self.api)/users/@me/lists?maxResults=100")!)
-            let all = (json["items"] as? [[String: Any]] ?? []).compactMap { l in
-                (l["id"] as? String).map { TaskList(id: $0, title: l["title"] as? String ?? "Tasks") }
+            var all: [TaskList] = []
+            for email in Google.shared.emails {
+                let json = try await Google.shared.json(URL(string: "\(Self.api)/users/@me/lists?maxResults=100")!, account: email)
+                all += (json["items"] as? [[String: Any]] ?? []).compactMap { l in
+                    (l["id"] as? String).map { TaskList(id: $0, title: l["title"] as? String ?? "Tasks", account: email) }
+                }
             }
             var found: [TaskItem] = []
             for l in all {
-                found += try await fetch(l.id, done: false)
-                found += try await fetch(l.id, done: true)
+                found += try await fetch(l, done: false)
+                found += try await fetch(l, done: true)
             }
             // A change still on its way would be undone by this older copy.
             guard writes == 0 else { return }
@@ -110,7 +124,8 @@ struct TaskItem: Codable, Equatable, Identifiable {
         }
     }
 
-    private func fetch(_ list: String, done: Bool) async throws -> [TaskItem] {
+    private func fetch(_ l: TaskList, done: Bool) async throws -> [TaskItem] {
+        let list = l.id
         var out: [TaskItem] = []
         var page = ""
         let since = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-30 * 86_400))
@@ -121,7 +136,7 @@ struct TaskItem: Codable, Equatable, Identifiable {
                    .init(name: "maxResults", value: "100")]
                 : [.init(name: "showCompleted", value: "false"), .init(name: "maxResults", value: "100")]
             if !page.isEmpty { u.queryItems?.append(.init(name: "pageToken", value: page)) }
-            let json = (try JSONSerialization.jsonObject(with: try await Google.shared.call(u.url!))) as? [String: Any] ?? [:]
+            let json = (try JSONSerialization.jsonObject(with: try await Google.shared.call(u.url!, account: l.account))) as? [String: Any] ?? [:]
             out += (json["items"] as? [[String: Any]] ?? []).compactMap { Self.task($0, list: list) }.filter { $0.done == done }
             page = json["nextPageToken"] as? String ?? ""
         } while !page.isEmpty && !done && out.count < 1000
@@ -163,14 +178,14 @@ struct TaskItem: Codable, Equatable, Identifiable {
         let names = lists.map(\.title)
         Task {
             let p = await QuickAdd.final(text, groups: names)
-            guard let target = lists.first(where: { $0.title == p.group })?.id ?? list ?? lists.first?.id else { return }
+            guard let target = lists.first(where: { $0.title == p.group })?.id ?? list ?? shownLists.first?.id ?? lists.first?.id else { return }
             let temp = TaskItem(id: "local-" + UUID().uuidString, list: target, title: p.title, notes: p.note, due: p.day)
             tasks.insert(temp, at: 0)
             var body: [String: Any] = ["title": temp.title]
             if let n = temp.notes { body["notes"] = n }
             if let d = temp.due { body["due"] = Self.dueString(d) }
             await write(undo: { $0.tasks.removeAll { $0.id == temp.id } }) {
-                let data = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(target)/tasks")!, method: "POST", body: body)
+                let data = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(target)/tasks")!, method: "POST", body: body, account: self.account(target))
                 if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let made = Self.task(json, list: target),
                    let i = self.tasks.firstIndex(where: { $0.id == temp.id }) {
                     self.tasks[i] = made
@@ -189,7 +204,7 @@ struct TaskItem: Codable, Equatable, Identifiable {
         if let notes { body["notes"] = notes }
         if let due { body["due"] = Self.dueString(due) }
         await write(undo: { $0.tasks.removeAll { $0.id == temp.id } }) {
-            let data = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(target)/tasks")!, method: "POST", body: body)
+            let data = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(target)/tasks")!, method: "POST", body: body, account: self.account(target))
             if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let t = Self.task(json, list: target),
                let i = self.tasks.firstIndex(where: { $0.id == temp.id }) {
                 self.tasks[i] = t
@@ -220,7 +235,7 @@ struct TaskItem: Codable, Equatable, Identifiable {
         tasks.remove(at: i)
         Task {
             await write(undo: { $0.tasks.insert(t, at: min(i, $0.tasks.count)) }) {
-                _ = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(t.list)/tasks/\(t.id)")!, method: "DELETE")
+                _ = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(t.list)/tasks/\(t.id)")!, method: "DELETE", account: self.account(t.list))
             }
         }
     }
@@ -228,7 +243,8 @@ struct TaskItem: Codable, Equatable, Identifiable {
     private func patch(_ before: TaskItem, _ body: [String: Any]) {
         Task {
             await write(undo: { m in if let i = m.tasks.firstIndex(where: { $0.id == before.id }) { m.tasks[i] = before } }) {
-                _ = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(before.list)/tasks/\(before.id)")!, method: "PATCH", body: body)
+                _ = try await Google.shared.call(URL(string: "\(Self.api)/lists/\(before.list)/tasks/\(before.id)")!, method: "PATCH", body: body,
+                                                 account: self.account(before.list))
             }
         }
     }
@@ -263,12 +279,12 @@ struct TaskItem: Codable, Equatable, Identifiable {
 
     // MARK: Snapshots
 
-    func useDemo() {
+    func useDemo(empty: Bool = false) {
         demo = true
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
         let day = { (n: Int) in cal.date(byAdding: .day, value: n, to: today)! }
-        lists = [TaskList(id: "l1", title: "My Tasks"), TaskList(id: "l2", title: "Festival")]
+        lists = [TaskList(id: "l1", title: "My Tasks", account: "ben@example.com"), TaskList(id: "l2", title: "Festival", account: "ben@festival.example")]
         tasks = [
             TaskItem(id: "t1", list: "l1", title: "Call Ben about the contract", notes: "Ask about the second stage", due: day(0), position: "1"),
             TaskItem(id: "t2", list: "l1", title: "Renew passport", due: day(-2), position: "2"),
@@ -278,9 +294,11 @@ struct TaskItem: Codable, Equatable, Identifiable {
             TaskItem(id: "t6", list: "l2", title: "Pricing page", parent: "t4", position: "2"),
             TaskItem(id: "t7", list: "l2", title: "Venue walkthrough", due: day(5), position: "2"),
             TaskItem(id: "t8", list: "l2", title: "Artist contracts", position: "3"),
+            TaskItem(id: "t11", list: "l1", title: "Write the thank-you notes for everyone who helped with the spring festival", due: day(3), position: "4"),
             TaskItem(id: "t9", list: "l1", title: "Pay the electricity bill", done: true, completed: Date().addingTimeInterval(-3600)),
             TaskItem(id: "t10", list: "l2", title: "Send the stage plan", done: true, completed: Date().addingTimeInterval(-86_400)),
         ]
+        if empty { tasks = [] }
         loaded = true
     }
 }

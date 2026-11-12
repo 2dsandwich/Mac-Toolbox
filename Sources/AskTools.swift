@@ -88,6 +88,11 @@ struct AskReceipt: Identifiable {
         Tool(name: "calendar_events", source: .calendar, status: "Checking your calendar", symbol: "calendar",
              description: "Events in the user's calendars from one time to another, optionally only those whose title, place, notes or guests contain the query.",
              properties: ["from": text(day), "to": text(day + " (a date alone includes that whole day)"), "query": text("Words to match")], required: ["from", "to"]),
+        Tool(name: "add_event", source: .calendar, status: "Adding the event", symbol: "calendar.badge.plus",
+             description: "Adds an event to the user's calendar at a set time, or for a whole day (birthdays, trips, days off). Use for \"put … in my calendar\" and meetings or plans with a time; a to-do without a time is a task.",
+             properties: ["title": text("Short"), "start": text("Local date and time YYYY-MM-DDTHH:mm, or the date YYYY-MM-DD for all day"), "minutes": ["type": "integer", "description": "How long; 60 if not said"],
+                          "all_day": ["type": "boolean", "description": "The whole day, no time"]],
+             required: ["title", "start"]),
         Tool(name: "tasks_list", source: .tasks, status: "Checking your tasks", symbol: "checklist",
              description: "The user's to-dos (Google Tasks) by list, with the ids complete_task needs.",
              properties: ["list": text("A list's name; all lists if left out"), "include_completed": ["type": "boolean"]]),
@@ -117,6 +122,9 @@ struct AskReceipt: Identifiable {
              properties: ["id": text("The meeting's id")], required: ["id"]),
         Tool(name: "search_notes", source: .notes, status: "Reading your notes", symbol: "note.text",
              description: "The user's sticky notes, newest first.", properties: ["query": text("Words to match")]),
+        Tool(name: "timetable", source: nil, status: "Checking your timetable", symbol: "graduationcap.fill",
+             description: "The user's class timetable: the class on now and the next one (name, room, teacher, time, period), the whole week, and with a date that day's classes. For \"what's my next class\", \"where is my 3rd period on Tuesday\".",
+             properties: ["date": text("YYYY-MM-DD, for that day's classes")]),
         Tool(name: "system_status", source: nil, status: "Checking your Mac", symbol: "laptopcomputer",
              description: "This Mac's battery, storage, memory, uptime and macOS version."),
         Tool(name: "selected_text", source: .selection, status: "Reading your selection", symbol: "text.cursor",
@@ -152,7 +160,7 @@ struct AskReceipt: Identifiable {
         Your other tools reach the user's own things on this Mac. Use them for personal questions (what's on tomorrow, remind me to…, \
         what did Ben say in yesterday's meeting, what's this song, explain this) instead of guessing or searching the web; don't use them for general questions. \
         "Remind me to…" adds a task, due on the day named; a reminder at a time of day sets an alarm labelled with it. \
-        A task, timer or alarm is made at once and the app shows it under your answer with Undo, so confirm it in a few words. \
+        A task, event, timer or alarm is made at once and the app shows it under your answer with Undo, so confirm it in a few words. \
         Ask before anything that can't be undone. Dates and times you send and get back are the user's local time: it is now \(f.string(from: Date())) (\(offset)).\
         \(off.isEmpty ? "" : " Switched off by the user: \(off.joined(separator: ", ")). If a question needs one, say it can be turned on in Settings › AI.")
         """
@@ -221,6 +229,7 @@ struct AskReceipt: Identifiable {
         case "calendar_events": return try await calendar(j)
         case "tasks_list": return try await tasks(j)
         case "add_task": return try await addTask(j, turn)
+        case "add_event": return try await addEvent(j, turn)
         case "complete_task": return try await completeTask(j, turn)
         case "create_timer": return try timer(j, turn)
         case "set_alarm": return try alarm(j, turn)
@@ -230,6 +239,7 @@ struct AskReceipt: Identifiable {
         case "meeting_notes": return try meeting(j)
         case "search_notes": return notes(j)
         case "system_status": return system(s)
+        case "timetable": return Timetables.shared.askResult(date: j.s("date"))
         case "selected_text": return try selection()
         case "open": return try open(j)
         default: throw Problem("There's no tool called \(name).")
@@ -480,6 +490,19 @@ struct AskReceipt: Identifiable {
         return ["added": Self.task(t, g), "list": l?.title ?? ""]
     }
 
+    private func addEvent(_ j: AskJSON, _ turn: UUID) async throws -> Any {
+        let allDay = j.b("all_day") ?? false
+        guard let title = j.s("title"), let raw = j.s("start"), allDay || raw.count > 10, let start = Self.date(raw) else {
+            throw Problem("An event needs a title and a start time (YYYY-MM-DDTHH:mm), or all_day with a date.")
+        }
+        let e = try await CalendarEvents.shared.add(title: title, start: start, minutes: min(Int(j.d("minutes") ?? 60), 24 * 60), allDay: allDay)
+        let when = e.start.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()) + " · " + e.timeRange
+        receipt(turn, AskReceipt(symbol: "calendar", color: e.color, title: e.title, detail: (e.calendar.isEmpty ? "" : e.calendar + " · ") + when) {
+            CalendarEvents.shared.remove(e)
+        })
+        return ["added": e.title, "start": Self.show(e.start), "end": Self.show(e.end), "calendar": e.calendar]
+    }
+
     private func completeTask(_ j: AskJSON, _ turn: UUID) async throws -> Any {
         let g = try await tasksReady()
         guard let id = j.s("id"), let t = g.tasks.first(where: { $0.id == id }) else { throw Problem("No task with that id; get one from tasks_list.") }
@@ -624,14 +647,14 @@ struct AskSourcesSection: View {
                 } else if location.undecided {
                     Button("Allow…") { location.requestPermission() }
                 } else {
-                    Button("Open Settings…") { open("Privacy_LocationServices") }
+                    Button("Open settings…") { open("Privacy_LocationServices") }
                 }
             }
             LabeledContent("Calendar access") {
                 if calendar.authorized {
                     Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                 } else {
-                    Button(calendar.undecided ? "Allow…" : "Open Settings…") { calendar.requestAccess() }
+                    Button(calendar.undecided ? "Allow…" : "Open settings…") { calendar.requestAccess() }
                 }
             }
         }

@@ -10,7 +10,7 @@ import SwiftUI
                             "Italian", "Portuguese", "Thai", "Vietnamese", "Indonesian", "Russian", "Arabic"]
 
     /// "Auto": Japanese ↔ English, whichever the text isn't.
-    var target = "Auto"
+    var target = Store.shared.settings.translateTarget
     /// What it's written in ("Auto": guessed from the text).
     var source = "Auto"
     @ObservationIgnored private let voice = AVSpeechSynthesizer()
@@ -80,7 +80,7 @@ import SwiftUI
         busy = true
         error = nil
         let item = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated {
+            _ = MainActor.assumeIsolated {
                 Task { @MainActor in
                     do {
                         let out = try await AI.complete(.translate, system: """
@@ -121,7 +121,14 @@ struct TranslateView: View {
 
     static let barHeight: CGFloat = 44
     static let resultHeight: CGFloat = 176
-    static var height: CGFloat { PanelLayout.vertical + PanelLayout.gap + barHeight + resultHeight }
+    /// Nothing typed: only the languages, no empty result box under them.
+    @MainActor static func height(_ query: String) -> CGFloat {
+        PanelLayout.vertical + barHeight + (showsResult(query) ? PanelLayout.gap + resultHeight : 0)
+    }
+
+    @MainActor static func showsResult(_ query: String) -> Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || Translator.shared.error != nil
+    }
 
     var body: some View {
         let text = model.query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -145,44 +152,48 @@ struct TranslateView: View {
                 languageMenu(title: to, auto: translator.target == "Auto", current: translator.target, autoTitle: "Auto (Japanese ↔ English)") { translator.target = $0 }
             }
             .frame(height: Self.barHeight)
-            Block(radius: radius) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ScrollView(.vertical) {
-                        Group {
-                            if let err = translator.error {
-                                Label(err, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
-                            } else if let r = translator.result, !text.isEmpty {
-                                Text(r).font(.system(size: 22, weight: .medium)).textSelection(.enabled)
-                                    .opacity(translator.busy ? 0.4 : 1)
-                                    .contentTransition(.opacity)
-                            } else if translator.busy {
-                                ThinkingDots().colorMultiply(.primary)
-                            } else {
-                                Image(systemName: "character.bubble").font(.system(size: 30)).foregroundStyle(.quaternary)
-                                    .frame(maxWidth: .infinity, minHeight: 110)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .animation(.smooth(duration: 0.2), value: translator.result)
-                    }
-                    .scrollIndicators(.never)
-                    HStack(spacing: 8) {
-                        Spacer(minLength: 0)
-                        if let r = translator.result, !text.isEmpty, translator.error == nil {
-                            ClockButton(symbol: "speaker.wave.2.fill", help: "Listen") { translator.speak(r, in: to) }
-                            ClockButton(symbol: "doc.on.doc", help: "Copy (↩)") { (NSApp.delegate as? AppDelegate)?.launcher.copyTranslation(r) }
-                        }
-                    }
-                    .frame(height: 34)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-            }
-            .frame(height: Self.resultHeight)
+            if Self.showsResult(model.query) { result(text, to) }
         }
         .padding(PanelLayout.edges)
         .onChange(of: translator.source) { _, _ in translator.request(model.query, now: true) }
         .onChange(of: translator.target) { _, _ in translator.request(model.query, now: true) }
+    }
+
+    private func result(_ text: String, _ to: String) -> some View {
+        Block(radius: radius) {
+            VStack(alignment: .leading, spacing: 0) {
+                ScrollView(.vertical) {
+                    Group {
+                        if let err = translator.error {
+                            Label(err, systemImage: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundStyle(.orange)
+                        } else if let r = translator.result, !text.isEmpty {
+                            Text(r).font(.system(size: 22, weight: .medium)).textSelection(.enabled)
+                                .opacity(translator.busy ? 0.4 : 1)
+                                .contentTransition(.opacity)
+                        } else if translator.busy {
+                            ThinkingDots().colorMultiply(.primary)
+                        } else {
+                            Image(systemName: "character.bubble").font(.system(size: 30)).foregroundStyle(.quaternary)
+                                .frame(maxWidth: .infinity, minHeight: 110)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .animation(.smooth(duration: 0.2), value: translator.result)
+                }
+                .scrollIndicators(.never)
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    if let r = translator.result, !text.isEmpty, translator.error == nil {
+                        ClockButton(symbol: "speaker.wave.2.fill", help: "Listen") { translator.speak(r, in: to) }
+                        ClockButton(symbol: "doc.on.doc", help: "Copy (↩)") { (NSApp.delegate as? AppDelegate)?.launcher.copyTranslation(r) }
+                    }
+                }
+                .frame(height: 34)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .frame(height: Self.resultHeight)
     }
 
     /// A language, as a wide pill that opens the list.

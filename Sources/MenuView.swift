@@ -103,8 +103,8 @@ struct MenuView: View {
             }
             VStack(spacing: 0) {
                 MenuRow(title: "Open MONEY!", symbol: "magnifyingglass", key: store.settings.launcherHotKey.display) { act(.apps) }
-                if !meeting.isRunning { MenuRow(title: "Record Meeting", symbol: "waveform") { act(.meeting) } }
-                MenuRow(title: "Text from Screen", symbol: "text.viewfinder") { act(.text) }
+                if !meeting.isRunning { MenuRow(title: "New meeting", symbol: "waveform") { act(.meeting) } }
+                MenuRow(title: "Text from screen", symbol: "text.viewfinder") { act(.text) }
             }
             Divider()
             VStack(spacing: 0) {
@@ -124,7 +124,7 @@ struct MenuView: View {
         .background {
             RoundedRectangle(cornerRadius: MenuLayout.radius, style: .continuous).fill(.clear)
                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: MenuLayout.radius, style: .continuous))
-            RoundedRectangle(cornerRadius: MenuLayout.radius, style: .continuous).fill(Color.black.opacity(store.settings.darkness * 0.55))
+            RoundedRectangle(cornerRadius: MenuLayout.radius, style: .continuous).fill(Color.black.opacity(store.settings.shade * 0.55))
         }
         .clipShape(RoundedRectangle(cornerRadius: MenuLayout.radius, style: .continuous))
         .environment(\.colorScheme, .dark)

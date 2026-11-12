@@ -24,6 +24,8 @@ struct StickyNote: Codable, Identifiable, Equatable {
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     /// Off for layout snapshots, so demo notes never reach the real board.
     @ObservationIgnored var persist = true
+    /// The board's size as last laid out, for placing new notes (about the default bar's until it's shown).
+    @ObservationIgnored var area = CGSize(width: 610, height: NoteBoardView.height - 20)
 
     static let colors: [(name: String, paper: Color, ink: Color)] = [
         ("Yellow", Color(red: 1.0, green: 0.92, blue: 0.55), Color(red: 0.33, green: 0.27, blue: 0.05)),
@@ -58,11 +60,15 @@ struct StickyNote: Codable, Identifiable, Equatable {
     /// A new note, a little down and to the right of the last one (and on top), in the next colour.
     @discardableResult func add(_ text: String = "") -> StickyNote {
         Stats.shared.add(.notes)
-        let n = notes.count
-        let col = n % 4, row = (n / 4) % 3
+        // A grid a note's width plus a gap apart, so tilted notes never overlap; once it's full, the next round sits
+        // a little lower and to the right.
+        let n = notes.count, size = Double(NoteBoardView.noteSize), gap = 16.0
+        let w = max(Double(area.width), size), h = max(Double(area.height), size)
+        let cols = max(1, Int((w - gap) / (size + gap))), rows = max(1, Int((h - gap) / (size + gap)))
+        let col = n % cols, row = (n / cols) % rows, round = Double(n / (cols * rows) * 14)
         var note = StickyNote(text: text, color: (notes.last.map { $0.color + 1 } ?? 0) % Self.colors.count,
-                              x: 0.14 + Double(col) * 0.24 + Double.random(in: -0.02...0.02),
-                              y: 0.22 + Double(row) * 0.3 + Double.random(in: -0.02...0.02),
+                              x: (gap + size / 2 + Double(col) * (size + gap) + round + Double.random(in: -3...3)) / w,
+                              y: (gap + size / 2 + Double(row) * (size + gap) + round + Double.random(in: -3...3)) / h,
                               tilt: Double.random(in: -3.5...3.5))
         note.updated = Date()
         withAnimation(.spring(duration: 0.4, bounce: 0.35)) { notes.append(note) }
@@ -114,7 +120,10 @@ struct NoteBoardView: View {
                 .clipShape(RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous))
                 .allowsHitTesting(false)
                 if board.notes.isEmpty {
-                    Image(systemName: "note.text.badge.plus").font(.system(size: 30)).foregroundStyle(.tertiary)
+                    VStack(spacing: 12) {
+                        Text("No notes").font(.system(size: 13)).foregroundStyle(.secondary)
+                        PillButton(title: "New Note", symbol: "plus") { board.add() }
+                    }
                 }
                 ForEach(board.notes) { note in
                     StickyNoteView(note: note, board: board, area: geo.size, dimmed: !q.isEmpty && !note.text.localizedCaseInsensitiveContains(q))
@@ -129,7 +138,10 @@ struct NoteBoardView: View {
                 board.update(n.id) { $0.x = Double(location.x / geo.size.width); $0.y = Double(location.y / geo.size.height) }
             }
             .onTapGesture { board.editing = nil }
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["board"] = $0 }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                model.controlFrames["board"] = $0
+                board.area = $0.size
+            }
         }
         .padding(PanelLayout.edges)
         .frame(height: Self.height)

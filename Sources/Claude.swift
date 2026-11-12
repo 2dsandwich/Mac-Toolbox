@@ -57,7 +57,7 @@ enum Claude {
         case noKey, http(Int, String), refused, empty
         var errorDescription: String? {
             switch self {
-            case .noKey: "No Claude API key (Settings › Claude)"
+            case .noKey: "No Claude API key (Settings › AI)"
             case .http(let code, let msg): "Claude error \(code): \(msg)"
             case .refused: "Claude declined this request"
             case .empty: "Claude returned no text"

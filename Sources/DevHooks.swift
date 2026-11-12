@@ -10,6 +10,17 @@ import SwiftUI
 extension AppDelegate {
     /// Runs the switch it was launched with, if any; true means it handled the launch (most print and exit).
     func runDevHook(_ args: [String]) -> Bool {
+        if runTimetableHook(args) { return true }
+        if let j = args.firstIndex(of: "--set"), j + 1 < args.count {
+            // `--set '{"notchLyrics":false}'`: any snapshot drawn with some settings changed. Nothing is saved.
+            store.persist = false
+            if var dict = (try? JSONEncoder().encode(store.settings)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+               let set = args[j + 1].data(using: .utf8).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) {
+                dict.merge(set) { _, new in new }
+                if let data = try? JSONSerialization.data(withJSONObject: dict), let s = try? JSONDecoder().decode(Settings.self, from: data) { store.settings = s }
+                else { print("--set: not settings") }
+            }
+        }
         if let i = args.firstIndex(of: "--ocr-test"), i + 1 < args.count {
             let img = NSImage(contentsOfFile: args[i + 1])!
             let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil)!
@@ -559,11 +570,17 @@ extension AppDelegate {
             islandController.freeze()
             CameraMirror.placeholder = true // the real camera never comes on here
             NowPlaying.shared.demo = true
+            // `--clocks timer|stopwatch`: just that one (the default is two timers and a stopwatch; `--long` a long label).
+            let clocks = args.firstIndex(of: "--clocks").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
             if !args.contains("--media-only") {
-                Timers.shared.add(minutes: 25, label: "Tea")
-                Timers.shared.add(minutes: 3)
-                Stopwatches.shared.add()
+                if clocks != "stopwatch" { Timers.shared.add(minutes: 25, label: args.contains("--long") ? "Steep the oolong, then the second infusion" : "Tea") }
+                if clocks == nil { Timers.shared.add(minutes: 3) }
+                if clocks != "timer" { Stopwatches.shared.add() }
             }
+            // `--alarm`: one ringing (only held in memory: the saved alarms stay as they are, and nothing sounds).
+            if args.contains("--alarm") { Alarms.shared.ringing = Alarm(hour: 7, minute: 30, label: args.contains("--long") ? "Leave for the airport, passport and charger" : "Wake up") }
+            // `--meeting`: the made-up meeting, recording.
+            if args.contains("--meeting") { demoMeeting(args) }
             if args.contains("--focus") { pomodoro.start(Pomodoro.Plan()) }
             if !args.contains("--no-media") {
                 let m = NowPlaying.shared
@@ -572,6 +589,7 @@ extension AppDelegate {
                 m.playing = !args.contains("--paused")
                 m.duration = 200
                 m.position = 80
+                if args.contains("--heart") { m.liked = args.contains("--liked") }
                 m.artwork = args.contains("--no-art") ? nil : Self.demoArt()
                 if args.contains("--lyrics") || args.contains("--lyrics-face") {
                     // Made-up lines (`--lyrics-at <seconds>` moves the song, 92 for the break's note).
@@ -585,7 +603,7 @@ extension AppDelegate {
             if let j = args.firstIndex(of: "--dictation"), j + 1 < args.count {
                 // Dictation as it looks while listening or polishing (with a long take, to see it scroll).
                 let d = island.dictation
-                d.phase = args[j + 1] == "polishing" ? .processing : .listening
+                d.phase = switch args[j + 1] { case "polishing": .processing; case "failed": .failed("Microphone is off"); default: .listening }
                 d.handsFree = args.contains("--hands-free")
                 d.noSound = args.contains("--no-sound")
                 d.levels = (0..<20).map { i in Float(d.noSound ? 0 : 0.15 + 0.6 * abs(sin(Double(i) * 0.7))) }
@@ -618,6 +636,45 @@ extension AppDelegate {
                 island.bandOverride = args[j + 1].split(separator: ",").compactMap { BandItem(rawValue: String($0)) }
             }
             island.refresh()
+            // `--shelf <n>`: n made-up files on the shelf (`--drop-hint` a file being dragged over the notch, `--shelf-hover`
+            // the first one pointed at). Empty files in a temporary folder, so they have their real icons.
+            if let j = args.firstIndex(of: "--shelf"), j + 1 < args.count {
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("MONEY-shelf-demo", isDirectory: true)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let names = ["Quarterly report.pdf", "Mockup v3.png", "Budget 2027.xlsx", "Interview notes.txt", "Site photos.zip", "Keynote draft for the spring launch.key",
+                             "Invoice 1042.pdf", "Logo.svg", "Recording.m4a", "Contract signed by both parties, final version.docx"]
+                let urls = names.prefix(Int(args[j + 1]) ?? 1).map { dir.appendingPathComponent($0) }
+                for u in urls where !FileManager.default.fileExists(atPath: u.path) { FileManager.default.createFile(atPath: u.path, contents: Data()) }
+                Shelf.shared.add(urls)
+                if args.contains("--shelf-hover") { island.shelfHover = urls.first }
+            }
+            if args.contains("--drop-hint") { island.fileDrag = true; island.refresh() }
+            // The closed notch's brief notes, from made-up states (held for the pictures): `--battery-toast plug|unplug|20|10|full`,
+            // `--download-toast`.
+            if let j = args.firstIndex(of: "--battery-toast"), j + 1 < args.count {
+                let (from, to): (Battery.State, Battery.State) = switch args[j + 1] {
+                case "plug": (.init(pct: 54), .init(pct: 54, charging: true, plugged: true))
+                case "unplug": (.init(pct: 54, charging: true, plugged: true), .init(pct: 54))
+                case "20": (.init(pct: 21), .init(pct: 20))
+                case "10": (.init(pct: 11), .init(pct: 10))
+                default: (.init(pct: 100, plugged: true), .init(pct: 100, plugged: true, charged: true))
+                }
+                var warned = Set<Int>()
+                if let a = Battery.alert(from, to, warned: &warned) { island.showBattery(a, seconds: 60) }
+            }
+            if args.contains("--download-toast") {
+                island.showDownload(FileManager.default.temporaryDirectory.appendingPathComponent("Quarterly report final.pdf"), seconds: 60)
+            }
+            // `--toast agent|color|copied|class|plain`: the other brief notes, as their callers send them.
+            if let j = args.firstIndex(of: "--toast"), j + 1 < args.count {
+                switch args[j + 1] {
+                case "agent": island.flash("notch-app", "Agents view in the notch", symbol: "checkmark.circle.fill", color: .green, seconds: 60, note: true)
+                case "color": island.flash("#3A7BD5", "Copied", symbol: "eyedropper", seconds: 60)
+                case "copied": island.flash("Pasted 42 words", symbol: "doc.on.clipboard.fill", color: .white, seconds: 60, note: true)
+                case "class": island.flash("Programming · Room 3-B", "Next class", symbol: "graduationcap.fill", color: .teal, seconds: 60, note: true, alone: true)
+                default: island.flash("Alarm set for 7:30", "in 9 hours", symbol: "alarm.fill", color: .orange, seconds: 60)
+                }
+            }
             if args.contains("--idle") {
                 // Nothing running: hovering opens it (clock, battery, camera); leaving closes it all the way.
                 island.openIdle()
@@ -646,7 +703,7 @@ extension AppDelegate {
                 print("expanded, right 60 over player →", swipe(60, 0), skipped)
                 print("expanded, right 60 below player →", swipe(60, 0, player: false), skipped)
                 print("expanded, up 40 →", swipe(0, -40), island.stage)
-                print("front app full screen:", IslandController.frontIsFullScreen(on: island.geometry.screenFrame))
+                print("front app full screen:", IslandController.frontIsFullScreen(on: island.geometry.screenFrame, top: NSScreen.screens.first?.frame.maxY ?? 0))
                 exit(0)
             }
             if let k = args.firstIndex(of: "--dictation-frames"), k + 1 < args.count {
@@ -845,6 +902,7 @@ extension AppDelegate {
                     if args.contains("--camera") { island.camera = true }
                     if args.contains("--agents-open") { island.agentsOpen = true }
                     if args.contains("--promote-tile") { island.focus = island.tiles.first }
+                    if args.contains("--drop-hint") { island.focus = .shelf }
                 }
                 let size = island.geometry.panelSize
                 setbuf(stdout, nil)
@@ -898,6 +956,28 @@ extension AppDelegate {
                 }
                 w.orderOut(nil)
             }
+            if args.contains("--agents-frames") {
+                // The agents button pressed and pressed again over the player, caught every 16 ms (the art must not flash).
+                island.stage = .expanded
+                let size = island.geometry.panelSize
+                let hv = NSHostingView(rootView: IslandView(model: island, openMeeting: {}).frame(width: size.width, height: size.height).background(Color(white: 0.85)))
+                let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: -5000, y: -5000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+                w.contentView = hv
+                w.orderFrontRegardless()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+                for _ in 0..<2 {
+                    withAnimation(islandSpring) { island.camera = false; island.agentsOpen.toggle() }
+                    let start = Date()
+                    for _ in 0..<12 {
+                        RunLoop.main.run(until: Date().addingTimeInterval(0.016))
+                        let rect = NSRect(x: hv.bounds.midX - 450, y: hv.isFlipped ? 0 : hv.bounds.maxY - 300, width: 900, height: 300)
+                        if let rep = hv.bitmapImageRepForCachingDisplay(in: rect) { hv.cacheDisplay(in: rect, to: rep); images.append(rep) }
+                        print("frame", images.count - 1, Int(Date().timeIntervalSince(start) * 1000), "ms")
+                    }
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+                }
+                w.orderOut(nil)
+            }
             if args.contains("--frames") {
                 // Opening and closing caught part way: 60, 120 and 220 ms into each.
                 island.stage = .compact
@@ -927,14 +1007,46 @@ extension AppDelegate {
             print("panel level", islandController.panelLevel, "(menu bar \(NSWindow.Level.mainMenu.rawValue))")
             exit(0)
         }
+        if args.contains("--notch-extras-test") {
+            // The battery notes over a made-up discharge and charge, new files in a scratch folder as a browser writes
+            // them, and whether the output volume can be read (never changed; the value isn't printed).
+            var warned = Set<Int>(), last: Battery.State? = .init(pct: 15), got: [String] = []
+            for (pct, plugged, charged) in [(16, false, false), (21, true, false), (22, false, false), (20, false, false), (21, false, false),
+                                            (20, false, false), (10, false, false), (9, false, false), (9, true, false), (100, true, true), (100, true, true)] {
+                let n = Battery.State(pct: pct, charging: plugged && !charged, plugged: plugged, charged: charged)
+                if let a = Battery.alert(last, n, warned: &warned) { got.append("\(pct) \(a.detail)") }
+                last = n
+            }
+            let want = ["21 Charging", "22 On battery", "20 Battery low", "10 Battery low", "9 Charging", "100 Fully charged"]
+            print("battery:", got == want ? "ok" : "WRONG", got)
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("MONEY-folder-test-\(getpid())", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: dir.appendingPathComponent("old.pdf").path, contents: Data())
+            let watch = FolderWatch(dir)
+            var seen: [String] = []
+            watch.onFile = { seen.append($0.lastPathComponent) }
+            watch.start()
+            let fm = FileManager.default
+            func step(_ work: () -> Void) { work(); RunLoop.main.run(until: Date().addingTimeInterval(0.3)) }
+            step { fm.createFile(atPath: dir.appendingPathComponent("a.pdf.crdownload").path, contents: Data()) }
+            step { try? fm.moveItem(at: dir.appendingPathComponent("a.pdf.crdownload"), to: dir.appendingPathComponent("a.pdf")) }
+            step { fm.createFile(atPath: dir.appendingPathComponent("b.zip").path, contents: Data()); fm.createFile(atPath: dir.appendingPathComponent("b.zip.part").path, contents: Data()) }
+            step { try? fm.removeItem(at: dir.appendingPathComponent("b.zip.part")) }
+            step { try? fm.createDirectory(at: dir.appendingPathComponent("c.dmg.download"), withIntermediateDirectories: true) }
+            step { fm.createFile(atPath: dir.appendingPathComponent(".hidden").path, contents: Data()) }
+            print("downloads:", seen == ["a.pdf", "b.zip"] ? "ok" : "WRONG", seen)
+            try? fm.removeItem(at: dir)
+            exit(0)
+        }
         if let i = args.firstIndex(of: "--agents-connect-test"), i + 1 < args.count {
             // Connects and disconnects Claude Code in a copy of its settings file (never the real one).
             let url = URL(fileURLWithPath: args[i + 1])
             let before = try? JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? NSDictionary
+            print("connected before:", Agents.claudeConnected(url), "outdated before:", Agents.claudeOutdated(url))
             do {
                 try Agents.connectClaude(true, file: url)
                 let on = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
-                print("connected:", Agents.claudeConnected(url), "events:", ((on["hooks"] as? [String: Any]) ?? [:]).keys.sorted(), "status line ours:", "\(on["statusLine"] ?? "")".contains("47474"))
+                print("connected:", Agents.claudeConnected(url), "outdated:", Agents.claudeOutdated(url), "events:", ((on["hooks"] as? [String: Any]) ?? [:]).keys.sorted(), "status line ours:", "\(on["statusLine"] ?? "")".contains("47474"))
                 try Agents.connectClaude(true, file: url)
                 let twice = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] ?? [:]
                 print("connect twice, PreToolUse groups:", (twice["hooks"] as? [String: Any])?["PreToolUse"].map { ($0 as? [Any])?.count ?? 0 } ?? 0)
@@ -942,6 +1054,100 @@ extension AppDelegate {
                 let after = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? NSDictionary
                 print("disconnected:", !Agents.claudeConnected(url), "same as before:", before == after)
             } catch { print("error:", error) }
+            exit(0)
+        }
+        if args.contains("--agents-hook-test") {
+            // Fake hook events, no network: what each session says it's doing, its subagents, todos and an Always Allow reply.
+            setbuf(stdout, nil)
+            let a = Agents.shared
+            func send(_ event: String, _ extra: [String: Any]) {
+                a.hook(["session_id": "s1", "cwd": "/tmp/notch-app", "hook_event_name": event].merging(extra) { $1 }, app: "com.mitchellh.ghostty", nil)
+            }
+            send("UserPromptSubmit", ["prompt": "Make the rows two lines"])
+            send("PreToolUse", ["tool_name": "Bash", "tool_input": ["command": "swiftc -O Sources/*.swift", "description": "Build the app"]])
+            print("bash:", a.sessions[0].detail)
+            send("PreToolUse", ["tool_name": "Bash", "tool_input": ["command": "ls -la build"]])
+            print("bash, no description:", a.sessions[0].detail)
+            for (tool, input) in [("Edit", ["file_path": "/tmp/notch-app/Sources/Island.swift"]), ("Read", ["file_path": "/tmp/a/README.md"]), ("Grep", ["pattern": "agentsOpen"]),
+                                  ("WebFetch", ["url": "https://code.claude.com/docs/en/hooks"]), ("WebSearch", ["query": "swiftui matchedGeometryEffect flicker"]),
+                                  ("TaskUpdate", ["taskId": "2", "status": "in_progress", "activeForm": "Drawing the stats column"])] as [(String, [String: Any])] {
+                send("PreToolUse", ["tool_name": tool, "tool_input": input])
+                print(tool + ":", a.sessions[0].detail)
+            }
+            send("PreToolUse", ["tool_name": "TodoWrite", "tool_input": ["todos": [["content": "a", "status": "completed", "activeForm": "A"], ["content": "b", "status": "in_progress", "activeForm": "Wiring the hooks"], ["content": "c", "status": "pending", "activeForm": "C"]]]])
+            print("todo:", a.sessions[0].todo.map { "\($0.done)/\($0.total) \($0.current)" } ?? "none", "| detail:", a.sessions[0].detail)
+            send("PreToolUse", ["tool_name": "Agent", "tool_use_id": "call1", "tool_input": ["description": "Survey the hook payloads", "subagent_type": "Explore"]])
+            send("SubagentStart", ["agent_id": "ag1", "agent_type": "Explore"])
+            send("PreToolUse", ["agent_id": "ag1", "agent_type": "Explore", "tool_name": "Read", "tool_input": ["file_path": "/tmp/hooks.md"]])
+            print("subagent:", a.sessions[0].subs.map { "\($0.name) [\($0.kind)] \($0.state): \($0.activity)" }, "| session still:", a.sessions[0].detail)
+            send("SubagentStop", ["agent_id": "ag1", "agent_type": "Explore", "last_assistant_message": "Found three shapes"])
+            print("subagent stopped:", a.sessions[0].subs.map { "\($0.state): \($0.activity)" })
+            send("TaskCreated", ["task_id": "1", "task_subject": "Rows"]); send("TaskCreated", ["task_id": "2", "task_subject": "Stats"]); send("TaskCompleted", ["task_id": "1"])
+            print("tasks:", a.sessions[0].todo.map { "\($0.done)/\($0.total)" } ?? "none")
+            send("PermissionRequest", ["tool_name": "Edit", "tool_input": ["file_path": "/tmp/x/Island.swift", "old_string": "a\nb\nc", "new_string": "a\nB\nB2\nc"],
+                                       "permission_suggestions": [["type": "addRules", "rules": [["toolName": "Edit"]], "behavior": "allow", "destination": "localSettings"]]])
+            if let q = a.questions.first {
+                print("diff:", q.diff.map { "\($0.file) +\($0.added.count) −\($0.removed.count) \($0.removed) → \($0.added)" } ?? "none")
+                let reply = try? JSONSerialization.data(withJSONObject: Agents.decision(q, true, always: true), options: .sortedKeys)
+                print("always allow reply:", reply.map { String(decoding: $0, as: UTF8.self) } ?? "")
+            }
+            exit(0)
+        }
+        if args.contains("--agents-host-test") {
+            // Each live Claude session's terminal app, found from its process (bundle ids only).
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/sessions")
+            for f in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
+                guard let j = (try? Data(contentsOf: f)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+                      let pid = (j["pid"] as? NSNumber)?.int32Value else { continue }
+                print("pid \(pid): tty \(AgentFiles.tty(pid) ?? "none"), app \(AgentFiles.hostApp(pid) ?? "none")")
+            }
+            exit(0)
+        }
+        if args.contains("--agents-files-test") {
+            // Reads the real Claude Code and Codex files and prints only counts and timings (never names or text).
+            setbuf(stdout, nil)
+            let t0 = Date()
+            let c = AgentFiles.shared.codex(window: 30 * 86_400)
+            let t1 = Date()
+            print(String(format: "codex: %d threads in the last month (%d titled, %d working, %d subagents, %d with a step, %d with context) in %.0f ms",
+                         c.threads.count, c.threads.filter { !$0.title.isEmpty }.count, c.threads.filter(\.working).count, c.threads.filter { $0.parent != nil }.count,
+                         c.threads.filter { !$0.activity.isEmpty }.count, c.threads.filter { $0.context != nil }.count, t1.timeIntervalSince(t0) * 1000))
+            print("codex limits:", c.five != nil, c.week != nil, "today's tokens > 0:", c.today > 0)
+            let again = Date(); _ = AgentFiles.shared.codex()
+            print(String(format: "codex again: %.0f ms", Date().timeIntervalSince(again) * 1000))
+            _ = AgentFiles.shared.codex() // the first at this window takes note of the logs it reads
+            let same = Date(); _ = AgentFiles.shared.codex()
+            print(String(format: "codex with nothing written since: %.1f ms", Date().timeIntervalSince(same) * 1000))
+            let t2 = Date(); let today = AgentFiles.shared.claudeToday(); let t3 = Date()
+            print(String(format: "claude today's tokens > 0: %@ in %.0f ms", today > 0 ? "yes" : "no", t3.timeIntervalSince(t2) * 1000))
+            let again2 = Date(); _ = AgentFiles.shared.claudeToday()
+            print(String(format: "claude again: %.0f ms", Date().timeIntervalSince(again2) * 1000))
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/sessions")
+            let files = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "json" }
+            for f in files.prefix(3) {
+                guard let j = (try? Data(contentsOf: f)).flatMap(AgentFiles.json), let id = j["sessionId"] as? String else { continue }
+                let p = AgentFiles.claudeProcess(id)
+                let project = (j["cwd"] as? String ?? "").replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+                let transcript = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects/\(project)/\(id).jsonl").path
+                print("claude session: pid", p != nil, "named", p?.name != nil, "transcript", FileManager.default.fileExists(atPath: transcript), "title", AgentFiles.claudeTitle(transcript) != nil, "tty", p.flatMap { AgentFiles.tty($0.pid) } != nil)
+            }
+            print("focus scripts:", ["com.mitchellh.ghostty", "com.apple.Terminal", "com.googlecode.iterm2", "com.microsoft.VSCode"].map { "\($0): \(AgentFiles.focusScript(app: $0, tty: "/dev/ttys999") != nil)" })
+            exit(0)
+        }
+        if args.contains("--mixer-test") {
+            // Times the mixer's refresh (the background keeper's work) and checks that a level a hair off 100% keeps no
+            // keeper running. Counts and timings only; the test id is made up, so nothing is tapped.
+            let m = AudioMixer.shared
+            for pass in 1...3 {
+                let t = Date()
+                m.refresh()
+                print(String(format: "refresh %d: %d apps in %.1f ms", pass, m.apps.count, Date().timeIntervalSince(t) * 1000))
+            }
+            func keeping() -> Bool { (Mirror(reflecting: m).children.first { $0.label == "keeper" }?.value as? Timer?).flatMap { $0 } != nil }
+            for v: Float in [1.0013, 0.997, 0.5, 1] {
+                m.setVolume(v, for: "test.none")
+                print("set \(v): saved", m.volumes["test.none"] != nil, "keeper running", keeping())
+            }
             exit(0)
         }
         if args.contains("--agents-server-test") {
@@ -954,7 +1160,7 @@ extension AppDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         MainActor.assumeIsolated {
                             guard Agents.shared.questions.first?.id == id else { return }
-                            if q.permission != nil { Agents.shared.allow(true) } else { for _ in q.asks { if let o = Agents.shared.questions.first.flatMap({ $0.asks[Agents.shared.step].options.first }) { Agents.shared.choose(o) } } }
+                            if q.permission != nil { Agents.shared.allow(true) } else { for _ in q.asks { if let o = Agents.shared.questions.first.flatMap({ $0.asks[Agents.shared.step].options.first }) { Agents.shared.choose(o.label) } } }
                         }
                     }
                 }
@@ -1018,6 +1224,21 @@ extension AppDelegate {
             }
             return true
         }
+        if args.contains("--extras-test") {
+            // The search bar extras' parsing and ranking, on made-up data only.
+            let json = #"{"dl_throughput": 312400000, "ul_throughput": 41700000, "responsiveness": 1180.5}"#.data(using: .utf8)!
+            guard case .done(let down, let up, let rpm)? = SpeedTest.parse(json) else { fatalError("speed test JSON") }
+            assert(abs(down - 312.4) < 0.01 && abs(up - 41.7) < 0.01 && Int(rpm) == 1180)
+            assert(SpeedTest.parse(Data("oops".utf8)) == nil)
+            let yt = Quicklink.defaults[0].link("cats & dogs")!.absoluteString
+            assert(yt == "https://www.youtube.com/results?search_query=cats%20%26%20dogs", yt)
+            let ranked = FileSearch.rank(["/a/Budget Notes.txt", "/a/old budget.pdf", "/a/budget.xlsx", "/a/xbudgetx"].map(URL.init(fileURLWithPath:)), "budget")
+            assert(ranked.map(\.lastPathComponent) == ["budget.xlsx", "Budget Notes.txt", "old budget.pdf", "xbudgetx"], "\(ranked)")
+            let noon = Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 12, hour: 12))!
+            assert(Snippets.expand("{date}|{time}|{clipboard}", clipboard: "x", now: noon) == noon.formatted(date: .abbreviated, time: .omitted) + "|" + noon.formatted(date: .omitted, time: .shortened) + "|x")
+            print("extras ok")
+            exit(0)
+        }
         if args.contains("--pomodoro-test") {
             for t in ["45分 休憩10分 4回", "30/5", "30;5", "50；10", "25／5／20", "30 5", "1h", "50 min focus 10 min break", "until 3pm", "集中90分 休憩なし", "2 rounds of 25", "half an hour"] {
                 print(t, "→", Pomodoro.parse(t).map(Pomodoro.describe) ?? "nil")
@@ -1052,15 +1273,33 @@ extension AppDelegate {
         if args.contains("--google-test") {
             GoogleTests.run()
         }
-        if args.contains("--agents-demo") { Agents.shared.useDemo(args.contains("--agents-question") ? "question" : nil) } // made-up sessions (search bar snapshots)
+        if let j = args.firstIndex(of: "--agents-demo") {
+            // Made-up sessions (search bar snapshots); `--agents-demo <kind>` as for `--agents` in the notch.
+            Agents.shared.useDemo(args.contains("--agents-question") ? "question" : j + 1 < args.count && !args[j + 1].hasPrefix("--") ? args[j + 1] : nil)
+        }
         if args.contains("--chats") { AskChats.shared.useDemo() } // made-up Ask chats (settings and ask snapshots)
         if args.contains("--ask-test") { askTest(); exit(0) }
         if let i = args.firstIndex(of: "--settings-snapshot"), i + 1 < args.count {
-            // Google: a made-up account (or signed out), never the Keychain.
-            Google.shared.useDemo(signedIn: !args.contains("--signed-out"), email: "ben@example.com")
+            // Nothing is saved (`--set` above changes settings for the drawing only).
+            store.persist = false
+            // Google: a made-up account (or signed out; `--two-accounts`, the second one to sign in again), never the Keychain.
+            // Made-up calendars and task lists too, never the Mac's own.
+            let two = args.contains("--two-accounts")
+            Google.shared.useDemo(signedIn: !args.contains("--signed-out"), emails: ["ben@example.com"] + (two ? ["ben@festival.example"] : []),
+                                  reauth: two ? ["ben@festival.example"] : [])
+            CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
+            GoogleTasks.shared.useDemo()
+            // Apps and Keywords list them (read once, as the pane opens).
+            launcher.index.refresh(folders: store.settings.searchFolders)
+            let scanned = Date().addingTimeInterval(5)
+            while launcher.index.apps.isEmpty, Date() < scanned { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
             showSettings(pane: i + 2 < args.count ? Pane(rawValue: args[i + 2]) ?? .general : .general)
             settingsWindow?.setFrameOrigin(NSPoint(x: -4000, y: -4000))
+            // `--tall`: a window tall enough to show a long pane whole.
+            if args.contains("--tall"), let w = settingsWindow { w.setFrame(NSRect(x: -4000, y: -4000, width: w.frame.width, height: 2000), display: true) }
             RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+            // `--scroll 900`: the pane scrolled down that far, to see its lower sections.
+            if let j = args.firstIndex(of: "--scroll"), j + 1 < args.count, let y = Double(args[j + 1]) { scrollSettings(to: y) }
             if let v = settingsWindow?.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
                 v.cacheDisplay(in: v.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
@@ -1109,8 +1348,23 @@ extension AppDelegate {
             case "tasks": .tasks
             case "dictation": .dictation
             case "agents": .agents
+            case "timetable": .timetable
             case "assistant", "ask": .assistant
+            case "files": .files
+            case "processes": .processes
+            case "colors": .colors
+            case "snippets": .snippets
+            case "menu": .menu
             default: .apps
+            }
+            // Made-up files, processes, menus, colors and snippets in every snapshot; nothing is read, killed or run.
+            // --speed running|done|failed: the speed test card in that state ("speed test" in the bar).
+            LauncherExtras.demo = true
+            switch value("--speed") {
+            case "running": SpeedTest.shared.state = .running(Date().addingTimeInterval(-12))
+            case "done": SpeedTest.shared.state = .done(down: 312.4, up: 41.7, rpm: 1180)
+            case "failed": SpeedTest.shared.state = .failed
+            default: break
             }
             if scope == .text, let img = value("--image").flatMap(NSImage.init(contentsOfFile:)),
                let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
@@ -1130,6 +1384,9 @@ extension AppDelegate {
                 CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
                 demoMeeting(args)
                 if args.contains("--list") || args.contains("--past") {
+                    if args.contains("--empty") { // --list --empty: nothing recorded, no events left today
+                        MeetingDoc.folderOverride = FileManager.default.temporaryDirectory.appendingPathComponent("money-demo-meetings-none")
+                    }
                     meeting.reset()
                     launcher.model.reloadPastMeetings()
                     if args.contains("--past"), let first = meeting.pastMeetings().first, let doc = MeetingDoc.load(first.url) {
@@ -1138,13 +1395,17 @@ extension AppDelegate {
                     }
                 }
             }
+            // Made-up clips, never the real history (--clip-empty: none yet).
+            clipboard.useDemo(empty: args.contains("--clip-empty"))
             if scope == .pomodoro || scope == .timer { launcher.model.pomodoro = pomodoro }
             if scope == .notes {
                 NoteBoard.shared.persist = false
                 NoteBoard.shared.notes = []
-                NoteBoard.shared.add("Call the venue about the 12th")
-                NoteBoard.shared.add("Sponsor deck — Friday!")
-                NoteBoard.shared.add("買い物: 牛乳、卵、コーヒー")
+                if !args.contains("--empty") { // --empty: no notes yet
+                    NoteBoard.shared.add("Call the venue about the 12th")
+                    NoteBoard.shared.add("Sponsor deck — Friday!")
+                    NoteBoard.shared.add("買い物: 牛乳、卵、コーヒー")
+                }
                 NoteBoard.shared.editing = nil
             }
             if scope == .assistant, args.contains("--demo") {
@@ -1154,11 +1415,11 @@ extension AppDelegate {
             }
             // Made-up events, never the real calendar ("calendar", "予定"); the real notch stays hidden.
             island.onStage = nil
-            CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
+            CalendarEvents.shared.useDemo(scope == .meeting && args.contains("--empty") ? [] : CalendarEvents.demoEvents())
             // Made-up Google tasks; --signed-out shows the sign-in row. --select <id|done>, --completed, --edit.
             Google.shared.useDemo(signedIn: !args.contains("--signed-out"))
             if scope == .tasks {
-                GoogleTasks.shared.useDemo()
+                GoogleTasks.shared.useDemo(empty: args.contains("--empty")) // --empty: no tasks
                 let b = TasksBoard.shared
                 // After the panel's own reset on appearing.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
@@ -1189,6 +1450,8 @@ extension AppDelegate {
                     }
                     if !args.contains("--frames") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: calendarFocus) }
                 }
+                // --new-event: the new-event card, filled from --query as if ↩ was pressed in the bar.
+                if args.contains("--new-event") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { board.compose(value("--query") ?? "") } }
                 if args.contains("--frames") { calendarFrames(open: calendarFocus, to: args[i + 1]) }
             }
             if scope == .dictation {
@@ -1206,8 +1469,10 @@ extension AppDelegate {
             if let m = value("--clock").flatMap(ClockMode.init(rawValue:)) { launcher.model.clockMode = m }
             if launcher.model.clockMode == .stopwatch, let w = Stopwatches.shared.list.first { w.banked = 83.42; w.laps = [83.42, 51.2, 24.9] }
             if launcher.model.clockMode == .timer, args.contains("--demo") { Timers.shared.add(minutes: 25, label: "Tea"); Timers.shared.add(minutes: 3) }
+            Alarms.shared.persist = false
             if launcher.model.clockMode == .alarms, args.contains("--demo") {
-                if args.contains("--edit") { launcher.model.newAlarm() } else { Alarms.shared.list = [Alarm(hour: 7, minute: 30, label: "Wake up", weekdays: Set(2...6))] }
+                // --edit: a new alarm being set; --empty: none yet.
+                if args.contains("--edit") { launcher.model.newAlarm() } else { Alarms.shared.list = args.contains("--empty") ? [] : [Alarm(hour: 7, minute: 30, label: "Wake up", weekdays: Set(2...6))] }
             }
             if scope == .web, let path = value("--browser") {
                 let id = Bundle(path: path)?.bundleIdentifier
@@ -1226,6 +1491,7 @@ extension AppDelegate {
 
         if runMeetingHook(args) { return true }
         if runAskToolsHook(args) { return true }
+        if runCustomizeHook(args) { return true }
         if args.contains("--meeting-ai-test") {
             // Two real requests on Haiku with the made-up meeting: its notes, then the follow-up email prompt. Prints both.
             island.onStage = nil
@@ -1289,7 +1555,7 @@ extension AppDelegate {
 
     /// A made-up meeting for the snapshots (never the real folder): recording, or with --state / --done, writing or done.
     func demoMeeting(_ args: [String]) {
-        MeetingDoc.folderOverride = MeetingDoc.demoFolder()
+        MeetingDoc.folderOverride = MeetingDoc.demoFolder(many: args.contains("--many"))
         meeting.demo()
         let state = args.firstIndex(of: "--state").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? (args.contains("--list") || args.contains("--past") ? "idle" : args.contains("--done") ? "done" : "live")
         let notes = """

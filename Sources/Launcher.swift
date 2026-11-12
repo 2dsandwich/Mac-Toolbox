@@ -1,9 +1,11 @@
 import AppKit
 import Observation
+import Quartz
 import SwiftUI
 
 enum Scope: Equatable {
-    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar, tasks, dictation, agents
+    case apps, switcher, clipboard, text, meeting, web, pomodoro, library, calculator, timer, mixer, translate, notes, weather, assistant, calendar, tasks, dictation, agents,
+         files, processes, colors, snippets, menu, timetable
 
     var title: String {
         switch self {
@@ -26,6 +28,12 @@ enum Scope: Equatable {
         case .tasks: "Tasks"
         case .dictation: "Dictation"
         case .agents: "Agents"
+        case .files: "Files"
+        case .processes: "Processes"
+        case .colors: "Colors"
+        case .snippets: "Snippets"
+        case .menu: "Menu"
+        case .timetable: "Timetable"
         }
     }
 
@@ -50,16 +58,22 @@ enum Scope: Equatable {
         case .calendar: "calendar"
         case .tasks: "checklist"
         case .agents: "terminal"
+        case .files: "doc.text.magnifyingglass"
+        case .processes: "xmark.octagon"
+        case .colors: "eyedropper"
+        case .snippets: "text.quote"
+        case .menu: "filemenu.and.selection"
+        case .timetable: "graduationcap"
         }
     }
 
     /// Modes with their own body instead of a result list.
-    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar, .tasks, .dictation, .agents].contains(self) }
+    var isPanel: Bool { [.text, .meeting, .pomodoro, .calculator, .timer, .mixer, .translate, .notes, .calendar, .tasks, .dictation, .agents, .timetable].contains(self) }
 }
 
 enum Builtin: String, CaseIterable {
     case clipboard, switcher, pomodoro, calendar, tasks, dictation, calculator, timer, stopwatch, alarm, mixer, translate, notes, weather, meeting, screenText,
-         agents, allApps, settings, quit
+         agents, files, processes, colorPicker, snippets, menu, timetable, allApps, settings, quit
 
     var title: String {
         switch self {
@@ -80,6 +94,12 @@ enum Builtin: String, CaseIterable {
         case .meeting: "Meetings"
         case .screenText: "Text from Screen"
         case .agents: "Coding Agents"
+        case .files: "Search Files"
+        case .processes: "Kill Process"
+        case .colorPicker: "Color Picker"
+        case .snippets: "Snippets"
+        case .menu: "Search Menu Items"
+        case .timetable: "Timetable"
         case .allApps: "All Apps"
         case .settings: "MONEY! Settings"
         case .quit: "Quit MONEY!"
@@ -105,6 +125,12 @@ enum Builtin: String, CaseIterable {
         case .meeting: "waveform"
         case .screenText: "text.viewfinder"
         case .agents: "terminal"
+        case .files: "doc.text.magnifyingglass"
+        case .processes: "xmark.octagon"
+        case .colorPicker: "eyedropper"
+        case .snippets: "text.quote"
+        case .menu: "filemenu.and.selection"
+        case .timetable: "graduationcap"
         case .allApps: "square.grid.3x3.fill"
         case .settings: "gearshape"
         case .quit: "power"
@@ -128,6 +154,12 @@ enum Builtin: String, CaseIterable {
         case .meeting: .meeting
         case .screenText: .text
         case .agents: .agents
+        case .files: .files
+        case .processes: .processes
+        case .colorPicker: .colors
+        case .snippets: .snippets
+        case .menu: .menu
+        case .timetable: .timetable
         case .allApps: .library
         default: nil
         }
@@ -169,6 +201,10 @@ struct ResultItem: Identifiable {
     var keyword: String?
     /// A site's favicon from the browser.
     var image: NSImage?
+    /// What ⌘↩ does instead (reveal a file, force quit).
+    var alt: Answer.Action?
+    /// A file row: what Space shows in Quick Look.
+    var url: URL?
 }
 
 /// Row geometry shared by the views and the controller (Moneybag numbers: 2.5pt gaps, 6pt inset).
@@ -179,8 +215,10 @@ enum Metrics {
     /// Transparent room around the card inside the window, for its shadow.
     static let margin: CGFloat = 40
 
-    static func slot(_ s: Settings) -> CGFloat { s.rowHeight + rowGap * 2 }
+    static func slot(_ s: Settings) -> CGFloat { s.rowSize + rowGap * 2 }
     static func clipboardList(_ s: Settings) -> CGFloat { CGFloat(max(s.maxRows, 6)) * slot(s) + listInset - rowGap }
+    /// A list with nothing to show: one line saying so, not an empty card.
+    static let emptyLine: CGFloat = 32 + listInset
     /// Largest picture area for ⌘3 text.
     static let textMax = CGSize(width: 900, height: 540)
 
@@ -197,11 +235,16 @@ enum Metrics {
             if scope != .notes { controlFrames["board"] = nil }
             // Leaving Ask (or closing the popup in it) ends the thread, kept in the chat list; Tab starts a fresh one.
             if oldValue == .assistant, scope != .assistant { Assistant.shared.leave(draft: query) }
+            if scope != oldValue { enteredExtra() }
         }
     }
     var items: [ResultItem] = []
     var selection = 0
     var hovered: Int?
+    /// The selection was moved with the arrows since the last typing: Space is Quick Look then, not a space.
+    @ObservationIgnored var browsed = false
+    /// The app in front when the popup opened (the menu scope searches its menus).
+    @ObservationIgnored var frontApp: NSRunningApplication?
     var ghost = ""
     /// Drives the open/close animation of the card.
     var presented = false
@@ -287,6 +330,7 @@ enum Metrics {
     func width(_ s: Settings) -> CGFloat {
         switch scope {
         case .clipboard, .meeting: return CGFloat(max(s.clipboardWidth, s.width))
+        case .timetable: return CGFloat(max(940, s.width)) // a week of days and the side panel
         case .text:
             guard screenText != nil else { return CGFloat(s.width) }
             return max(CGFloat(s.width), textDisplaySize.width + Metrics.listInset * 2)
@@ -303,18 +347,21 @@ enum Metrics {
     }
 
     func listHeight(_ s: Settings) -> CGFloat {
-        if scope == .clipboard || scope == .meeting || scope == .dictation { return Metrics.clipboardList(s) }
+        if scope == .clipboard { return items.isEmpty ? Metrics.emptyLine : Metrics.clipboardList(s) }
+        if scope == .meeting { return meetingListMode && openedMeeting == nil && items.isEmpty ? Metrics.emptyLine : Metrics.clipboardList(s) }
+        if scope == .dictation { return DictationPanel.height(self, s) }
         if scope == .pomodoro { return ClockHub.height(self) }
         if scope == .calculator { return CalculatorView.height }
         if scope == .calendar { return CalendarPanel.height }
         if scope == .tasks { return TasksPanel.height(TasksBoard.shared) }
-        if scope == .agents { return AgentsPanel.height(Agents.shared) }
-        if scope == .translate { return TranslateView.height }
+        if scope == .agents { return AgentsPanel.height(Agents.shared, width: CGFloat(s.width)) }
+        if scope == .timetable { return TimetablePanel.height }
+        if scope == .translate { return TranslateView.height(query) }
         if scope == .assistant { return AssistantView.height(Assistant.shared, query: query, s) }
         if scope == .notes { return NoteBoardView.height }
         if scope == .mixer { return MixerView.height(AudioMixer.shared.apps.count) }
         if scope == .library {
-            guard !items.isEmpty else { return 44 }
+            guard !items.isEmpty else { return Metrics.emptyLine }
             let rows = (items.count + libraryColumns - 1) / libraryColumns
             return CGFloat(min(rows, Metrics.libraryRows)) * Metrics.libraryCell.height + Metrics.rowGap + Metrics.listInset
         }
@@ -322,8 +369,13 @@ enum Metrics {
             if screenText != nil { return textDisplaySize.height + Metrics.listInset }
             return textStatus == nil ? 0 : 44
         }
-        guard !items.isEmpty else { return 0 }
+        guard !items.isEmpty else { return noMatches ? Metrics.emptyLine : 0 }
         return visibleListHeight(s) + Metrics.listInset - Metrics.rowGap
+    }
+
+    /// Typed text that found nothing, in the lists whose results come at once (apps and files can still be on the way).
+    var noMatches: Bool {
+        items.isEmpty && [.switcher, .processes, .snippets, .menu].contains(scope) && !query.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// Rows are one height; answer cards are taller. Shows as many as fit in maxRows rows (a card always shows).
@@ -341,39 +393,14 @@ enum Metrics {
 
     func cardHeight(_ s: Settings) -> CGFloat { s.barHeight + listHeight(s) }
 
-    func placeholder(_ s: Settings) -> String {
-        switch scope {
-        case .apps: s.placeholder
-        case .switcher: "Switch to…"
-        case .clipboard: "Search clipboard"
-        case .text: screenText == nil ? "Text from the screen" : "Find in text"
-        case .meeting: meetingListMode && openedMeeting == nil ? "Search past meetings" : "Search this meeting"
-        case .web: "Search or type a site"
-        case .pomodoro:
-            switch clockMode {
-            case .focus: "25/5, 1h, until 3pm…"
-            case .timer: "5m, 1h 30m, 90s tea…"
-            case .stopwatch: "Stopwatch"
-            case .alarms: "7:30, 6am wake up, 7時半…"
-            }
-        case .library: "Search all apps"
-        case .calculator: "Type or tap: 12×8, (3+4)^2…"
-        case .timer: "5m, 1h 30m, 90s tea…"
-        case .mixer: "Volume for each app"
-        case .translate: "Type to translate"
-        case .notes: "New note…"
-        case .weather: "City or place…"
-        case .assistant: "Ask anything"
-        case .calendar: "Search events"
-        case .tasks: TasksBoard.shared.editing == nil ? "Add a task" : "Edit task"
-        case .dictation: "Search dictations"
-        case .agents: "Coding agents"
-        }
-    }
+    /// No hint text in the bar: only the search bar's own, set by you in Settings › General (each scope's chip and
+    /// buttons say what it does).
+    func placeholder(_ s: Settings) -> String { scope == .apps ? s.placeholder : "" }
 
     func move(_ delta: Int) {
         guard !items.isEmpty else { return }
         selection = (selection + delta + items.count) % items.count
+        browsed = true
     }
 
     var libraryColumns: Int { Metrics.libraryColumns(width(store.settings)) }
@@ -514,8 +541,8 @@ enum Metrics {
                 case .running: items = switcher.apps().map(runningItem)
                 }
             } else {
-                let answers = s.instantAnswers ? Tools.answers(q, s).enumerated().map { answerItem($1, $0) } : []
-                items = answers + searchApps(q, s)
+                let answers = s.instantAnswers ? (Timetables.shared.answer(q).map { [$0] } ?? Tools.answers(q, s)).enumerated().map { answerItem($1, $0) } : []
+                items = searchExtras(q) + answers + searchApps(q, s) + fileHits(q)
             }
         case .library:
             let running = runningPaths()
@@ -574,8 +601,10 @@ enum Metrics {
             // Earlier chats: the newest is picked (↩ continues it) until you type, then ↩ asks.
             items = []
             Assistant.shared.pick = q.isEmpty ? 0 : nil
-        case .text, .meeting, .calculator, .timer, .mixer, .notes, .calendar, .tasks, .dictation, .agents:
+        case .text, .meeting, .calculator, .timer, .mixer, .notes, .calendar, .tasks, .dictation, .agents, .timetable:
             items = []
+        case .files, .processes, .colors, .snippets, .menu:
+            items = extraItems(q)
         case .web:
             let r = BrowserSites.suggest(query, in: sites, limit: max(s.maxRows, 6))
             items = r.items.map(siteItem)
@@ -583,6 +612,7 @@ enum Metrics {
         }
         selection = 0
         hovered = nil
+        browsed = false
         updateGhost()
         applyHighlights()
     }
@@ -605,7 +635,7 @@ enum Metrics {
 
     /// A live answer arrived (weather, rates…): redraw, keeping the same row selected.
     func refreshAnswers() {
-        guard scope == .weather || (scope == .apps && !query.isEmpty) else { return }
+        guard scope == .weather || Self.extraScopes.contains(scope) || (scope == .apps && !query.isEmpty) else { return }
         let id = selected?.id
         recompute()
         if let id, let i = items.firstIndex(where: { $0.id == id }) { selection = i }
@@ -690,7 +720,13 @@ enum Metrics {
         case .screenText: ["text from screen", "scan", "ocr", "screen text", "qr scan", "文字認識"]
         case .allApps: ["all apps", "library", "launchpad", "アプリ一覧"]
         case .settings: ["settings", "preferences", "money"]
-        case .quit: ["quit money", "quit"]
+        case .files: ["files", "file", "find", "search files", "documents", "ファイル"]
+        case .processes: ["kill", "quit", "force quit", "kill process", "processes", "activity", "task manager", "強制終了"]
+        case .colorPicker: ["color picker", "colour picker", "pick color", "pick colour", "eyedropper", "colors", "スポイト"]
+        case .snippets: ["snippets", "snippet", "text snippets", "スニペット", "定型文"]
+        case .menu: ["menu", "menus", "menu items", "menu bar", "メニュー"]
+        case .timetable: ["timetable", "時間割", "class", "classes", "next class", "class schedule", "授業", "次の授業", "じかんわり"]
+        case .quit: ["quit money"]
         }
     }
 
@@ -819,8 +855,12 @@ enum Metrics {
             self?.openSettings()
         }
         LiveData.shared.onUpdate = { [weak self] in self?.model.refreshAnswers() }
+        FileSearch.shared.onUpdate = { [weak self] in self?.model.refreshAnswers() }
+        Processes.shared.onUpdate = { [weak self] in self?.model.refreshAnswers() }
+        MenuCommands.shared.onUpdate = { [weak self] in self?.model.refreshAnswers() }
+        SpeedTest.shared.onUpdate = { [weak self] in self?.model.refreshAnswers() }
         Tools.translate = { [weak self] text, target in
-            Translator.shared.target = target ?? "Auto"
+            Translator.shared.target = target ?? Store.shared.settings.translateTarget
             self?.enter(.translate)
             self?.model.setQuery(text)
         }
@@ -832,7 +872,7 @@ enum Metrics {
     }
 
     private var animate: Bool {
-        store.settings.animations && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        store.settings.animations && !store.settings.reduceMotion
     }
 
     // MARK: Showing
@@ -849,6 +889,7 @@ enum Metrics {
         // out before the window appears, so it never visibly shrinks or grows from the old size on open.
         var quiet = Transaction()
         quiet.disablesAnimations = true
+        if !wasShown { model.frontApp = NSWorkspace.shared.frontmostApplication.flatMap { $0.processIdentifier == getpid() ? nil : $0 } }
         withTransaction(wasShown ? Transaction() : quiet) {
             if !prepared {
                 index.refreshIfStale(folders: store.settings.searchFolders)
@@ -876,7 +917,7 @@ enum Metrics {
                 }
             }
             if animate {
-                withAnimation(.spring(duration: 0.32, bounce: 0.18)) { model.presented = true }
+                withAnimation(.spring(duration: 0.32, bounce: 0.18).speed(store.settings.animationSpeed)) { model.presented = true }
             } else {
                 model.presented = true
             }
@@ -899,6 +940,7 @@ enum Metrics {
             withAnimation(.smooth(duration: 0.2)) { model.alarmDraft = nil }
             return
         }
+        if QuickLook.shared.isOpen { return QuickLook.shared.close() }
         _ = handle(#selector(NSResponder.cancelOperation(_:)))
     }
 
@@ -906,11 +948,13 @@ enum Metrics {
         stopHold()
         guard isShown else { return }
         isShown = false
+        QuickLook.shared.close()
+        FileSearch.shared.reset()
         removeKeyMonitor()
         HotKeyCenter.shared.remove(escToken)
         escToken = nil
         if animated && animate {
-            withAnimation(.easeIn(duration: 0.13)) { model.presented = false }
+            withAnimation(.easeIn(duration: 0.13).speed(store.settings.animationSpeed)) { model.presented = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, !self.isShown else { return }
@@ -941,7 +985,7 @@ enum Metrics {
             self.model.scope = scope
             self.model.setQuery("")
         }
-        if animate { withAnimation(.smooth(duration: 0.3)) { change() } } else { change() }
+        if animate { withAnimation(.smooth(duration: 0.3).speed(store.settings.animationSpeed)) { change() } } else { change() }
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -993,9 +1037,10 @@ enum Metrics {
 
     /// Commands the text field forwards (arrows, Tab, Return, Esc, delete).
     func handle(_ sel: Selector) -> Bool {
-        if model.scope == .calendar, CalendarBoard.shared.handle(sel, typing: !model.query.isEmpty) { return true }
+        if model.scope == .calendar, CalendarBoard.shared.handle(sel, query: model.query) { return true }
         if model.scope == .assistant, handleAsk(sel) { return true }
         if model.scope == .tasks, TasksBoard.shared.handle(sel, model) { return true }
+        if model.scope == .timetable, TimetableBoard.shared.handle(sel, model) { return true }
         if model.scope == .dictation { return handleDictation(sel) }
         switch sel {
         case #selector(NSResponder.moveUp(_:)) where model.scope == .pomodoro && model.clockMode == .alarms && model.alarmDraft != nil:
@@ -1017,9 +1062,11 @@ enum Metrics {
         case #selector(NSResponder.moveUp(_:)):
             model.move(-1)
             if holding { navigated = true }
+            if QuickLook.shared.isOpen { quickLook(toggle: false) }
         case #selector(NSResponder.moveDown(_:)):
             model.move(1)
             if holding { navigated = true }
+            if QuickLook.shared.isOpen { quickLook(toggle: false) }
         case #selector(NSResponder.pageUp(_:)), #selector(NSResponder.scrollPageUp(_:)):
             model.selection = max(0, model.selection - store.settings.maxRows)
         case #selector(NSResponder.pageDown(_:)), #selector(NSResponder.scrollPageDown(_:)):
@@ -1127,7 +1174,7 @@ enum Metrics {
 
     /// A mode's word at the start of what's typed, and the rest ("weather in tokyo" → Weather, "tokyo").
     static func modeWithText(_ q: String) -> (Scope, String)? {
-        let modes: [(Scope, String)] = [(.weather, #"weather|forecast|天気予報|天気"#), (.translate, #"translate|翻訳"#)]
+        let modes: [(Scope, String)] = [(.weather, #"weather|forecast|天気予報|天気"#), (.translate, #"translate|翻訳"#), (.files, #"files?|find"#)]
         for (scope, words) in modes {
             guard let r = q.range(of: #"^\s*(?:"# + words + #")(?:\s+(?:in|for|at|の)\b)?\s*"#, options: [.regularExpression, .caseInsensitive]) else { continue }
             let rest = String(q[r.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -1155,6 +1202,13 @@ enum Metrics {
 
     private func keyEquivalent(_ e: NSEvent) -> Bool {
         let flags = e.modifierFlags.intersection([.command, .option, .control, .shift])
+        // Space on a file picked with the arrows (not while Japanese input is being composed).
+        if e.keyCode == 49, flags.isEmpty, model.browsed, model.selected?.url != nil,
+           (model.field?.currentEditor() as? NSTextView)?.hasMarkedText() != true {
+            quickLook(toggle: true)
+            return true
+        }
+        if model.scope == .timetable, TimetableBoard.shared.command(e) { return true }
         guard flags == .command else { return false }
         if model.scope == .tasks, TasksBoard.shared.command(e, model) { return true }
         let key = e.charactersIgnoringModifiers?.lowercased() ?? ""
@@ -1179,6 +1233,9 @@ enum Metrics {
         case ("p", _):
             guard case .clip(let c)? = model.selected?.kind else { return false }
             togglePin(c.id)
+        case ("y", _):
+            guard model.selected?.url != nil else { return false }
+            quickLook(toggle: true)
         case ("n", _) where model.scope == .assistant: // a new chat
             Assistant.shared.leave(draft: "")
             model.recompute()
@@ -1206,6 +1263,12 @@ enum Metrics {
         return true
     }
 
+    /// Quick Look for the selected file (toggle: Space and ⌘Y; otherwise it follows the selection).
+    private func quickLook(toggle: Bool) {
+        guard let url = model.selected?.url, !(toggle && QuickLook.shared.isOpen) else { return QuickLook.shared.close() }
+        QuickLook.shared.show(url, above: panel.level)
+    }
+
     // MARK: Web mode (Tab on a browser)
 
     /// Like the Moneybag bar: type a site, get its home page from your history, Return opens it in that browser.
@@ -1216,7 +1279,7 @@ enum Metrics {
             self.model.scope = .web
             self.model.setQuery("")
         }
-        if animate { withAnimation(.smooth(duration: 0.3)) { change() } } else { change() }
+        if animate { withAnimation(.smooth(duration: 0.3).speed(store.settings.animationSpeed)) { change() } } else { change() }
         let id = app.bundleID
         Task {
             let loaded = await Task.detached(priority: .userInitiated) { BrowserSites.load(bundleID: id) }.value
@@ -1566,7 +1629,7 @@ enum Metrics {
             openApp(path: a.path)
         case .answer(let a):
             Stats.shared.add(.answers)
-            runAnswer(a, flags: flags)
+            if flags.contains(.command), let alt = item.alt { runAnswer(Answer(title: "", action: alt), flags: []) } else { runAnswer(a, flags: flags) }
         case .running(let r):
             hide()
             Stats.shared.add(.appsOpened)
@@ -1584,10 +1647,14 @@ enum Metrics {
             case .tasks: enter(.tasks)
             case .dictation: enter(.dictation)
             case .agents: enter(.agents)
+            case .timetable: enter(.timetable)
             case .mixer: enter(.mixer)
             case .translate: enter(.translate)
             case .notes: enter(.notes)
             case .weather: enter(.weather)
+            case .files, .processes, .snippets, .menu: if let scope = b.scope { enter(scope) }
+            // ↩ picks right away; Tab opens the colors picked before.
+            case .colorPicker: runAnswer(Answer(title: "", action: ColorPicks.pickAction(clipboard)), flags: [])
             case .meeting, .screenText, .allApps: if let scope = b.scope { tab(scope) }
             case .settings: hide(animated: false); openSettings()
             case .quit: NSApp.terminate(nil)
@@ -1814,6 +1881,11 @@ final class LauncherPanel: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    // Quick Look asks the key window's responders who feeds it.
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) { panel.dataSource = QuickLook.shared }
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) { panel.dataSource = nil }
 
     /// Esc from a text box other than the search field (e.g. a meeting chat) closes the popup properly.
     override func cancelOperation(_ sender: Any?) { onOutsideClick?() }

@@ -4,7 +4,8 @@ import SwiftUI
 /// Off-screen checks for Ask's own tools (AskTools.swift), on made-up data only: no real tasks, timers, alarms,
 /// calendar, clipboard, meetings, location prompt or settings change.
 /// `--ask-tools-test`: every tool once, a source switched off, then the tool loop with canned model answers.
-/// `--ask-tools-snapshot <dir>`: the status line on a tool, and the receipts with Undo (status.png, receipts.png).
+/// `--ask-tools-snapshot <dir>`: the status line on a tool, and the receipts with Undo (status.png, receipts.png,
+/// event-receipts.png).
 /// `--ask-tools-live "question"`: one real question; prints only the tools it called and whether it answered.
 extension AppDelegate {
     func runAskToolsHook(_ args: [String]) -> Bool {
@@ -33,7 +34,7 @@ extension AppDelegate {
         Location.shared.useFake(.init(lat: 35.6580, lon: 139.7016, city: "Tokyo", area: "Shibuya", region: "Tokyo", country: "Japan",
                                       countryCode: "JP", zone: TimeZone(identifier: "Asia/Tokyo")))
         CalendarEvents.shared.useDemo(CalendarEvents.demoEvents())
-        Google.shared.useDemo(signedIn: true, email: "ben@example.com")
+        Google.shared.useDemo(signedIn: true)
         GoogleTasks.shared.useDemo()
         MeetingDoc.folderOverride = MeetingDoc.demoFolder()
         NoteBoard.shared.persist = false
@@ -67,6 +68,8 @@ extension AppDelegate {
             ("tasks_list", ["list": "Festival"]),
             ("add_task", ["title": "Call Ben about the stage", "due": tomorrow, "list": "My Tasks"]),
             ("add_task", ["title": "Nowhere", "list": "No such list"]),
+            ("add_event", ["title": "Lunch with Aki", "start": tomorrow + "T12:30", "minutes": 90]),
+            ("add_event", ["title": "No time", "start": tomorrow]),
             ("complete_task", ["id": "t3"]),
             ("create_timer", ["minutes": 10, "label": "Tea"]),
             ("set_alarm", ["time": "07:30", "label": "Wake up", "repeat": "weekdays"]),
@@ -159,6 +162,24 @@ extension AppDelegate {
         ], turn: t.id)
         launcher.snapshot(scope: .assistant, query: "", dark: true, to: dir + "/receipts.png")
 
+        // Events added through the real tool (into the made-up calendar), a long title among them.
+        a.reset()
+        let ev = Assistant.Turn(question: "Put lunch with Aki on Friday at 12:30 for an hour and a half, and the planning offsite on Monday at 10",
+                                answer: "Both are in your Work calendar.")
+        a.turns = [ev]
+        let day = { (w: String) in AskTools.show(QuickAdd.parse(w).day ?? Date(), time: false).split(separator: " ").last.map(String.init) ?? "" }
+        var added = false
+        Task {
+            _ = await AskTools.shared.run([
+                ["type": "tool_use", "id": "e1", "name": "add_event", "input": ["title": "Lunch with Aki", "start": day("fri") + "T12:30", "minutes": 90]],
+                ["type": "tool_use", "id": "e2", "name": "add_event",
+                 "input": ["title": "Quarterly planning offsite with the festival sponsors and the venue team", "start": day("mon") + "T10:00", "minutes": 240]],
+            ], turn: ev.id)
+            added = true
+        }
+        while !added { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        launcher.snapshot(scope: .assistant, query: "", dark: true, to: dir + "/event-receipts.png")
+
         // The Settings section on its own (it sits below the models in Settings › AI). Switches as saved.
         AskSource.testSources = nil
         let hv = NSHostingView(rootView: Form { AskSourcesSection(store: store) }.formStyle(.grouped).frame(width: 560, height: 520))
@@ -171,7 +192,7 @@ extension AppDelegate {
             hv.cacheDisplay(in: hv.bounds, to: rep)
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + "/settings.png"))
         }
-        print("wrote", dir + "/status.png", dir + "/receipts.png", dir + "/settings.png")
+        print("wrote", dir + "/status.png", dir + "/receipts.png", dir + "/event-receipts.png", dir + "/settings.png")
     }
 
     /// One real question on the user's Ask model, against the made-up data. Prints tool names and success only.

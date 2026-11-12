@@ -1,5 +1,6 @@
 import AppKit
 @preconcurrency import AVFoundation
+import AudioToolbox
 import CoreAudio
 import CoreLocation
 import CoreMediaIO
@@ -72,6 +73,30 @@ struct BatteryGlance: View {
     }
     private(set) var state: State?
     @ObservationIgnored private var source: CFRunLoopSource?
+    /// A change worth a note in the closed notch (`alert`).
+    @ObservationIgnored var onAlert: ((Alert) -> Void)?
+    @ObservationIgnored private var warned: Set<Int> = []
+
+    struct Alert { var title: String, detail: String, symbol: String, color: Color }
+
+    /// What changed between two readings that's worth a note: the charger in or out, 20% and 10% left (each once per
+    /// discharge: `warned` keeps them until it's plugged in again), fully charged.
+    static func alert(_ o: State?, _ n: State, warned: inout Set<Int>) -> Alert? {
+        if n.plugged { warned = [] }
+        guard let o else { return nil }
+        let pct = "\(n.pct)%"
+        if n.plugged != o.plugged {
+            if n.plugged { return Alert(title: pct, detail: n.charging ? "Charging" : "Plugged in", symbol: n.charging ? "bolt.fill" : "powerplug.portrait.fill", color: .green) }
+            let bars = [0, 25, 50, 75, 100].min { abs($0 - n.pct) < abs($1 - n.pct) } ?? 50
+            return Alert(title: pct, detail: "On battery", symbol: "battery.\(bars)percent", color: .white)
+        }
+        if n.plugged, n.charged, !o.charged { return Alert(title: pct, detail: "Fully charged", symbol: "battery.100percent.bolt", color: .green) }
+        guard !n.plugged else { return nil }
+        var hit: Int?
+        // Marked even when it wasn't crossed (already that low at launch), so it doesn't fire later on a wobble.
+        for t in [20, 10] where n.pct <= t && warned.insert(t).inserted && o.pct > t { hit = t }
+        return hit.map { Alert(title: pct, detail: "Battery low", symbol: $0 == 10 ? "battery.0percent" : "battery.25percent", color: .red) }
+    }
 
     private init() {
         read()
@@ -94,9 +119,12 @@ struct BatteryGlance: View {
                   let cur = d[kIOPSCurrentCapacityKey] as? Int, let max = d[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
             let charging = d[kIOPSIsChargingKey] as? Bool ?? false
             let mins = d[charging ? kIOPSTimeToFullChargeKey : kIOPSTimeToEmptyKey] as? Int
-            state = State(pct: Int((Double(cur) / Double(max) * 100).rounded()), charging: charging,
+            let n = State(pct: Int((Double(cur) / Double(max) * 100).rounded()), charging: charging,
                           plugged: d[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue,
                           lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, charged: d[kIOPSIsChargedKey] as? Bool ?? false, minutes: mins.flatMap { $0 > 0 ? $0 : nil })
+            let a = Self.alert(state, n, warned: &warned)
+            state = n
+            if let a { onAlert?(a) }
             return
         }
         state = nil
@@ -166,9 +194,9 @@ struct BandGlance: View {
     /// Bytes a second, short: "0K", "850K", "1.2M", "12M".
     static func rate(_ b: Double) -> String {
         let k = b / 1024
-        if k < 1000 { return "\(Int(k.rounded()))K" }
+        if k < 1000 { return "\(Int(k.rounded())) KB/s" }
         let m = k / 1024
-        return m < 10 ? String(format: "%.1fM", m) : "\(Int(m.rounded()))M"
+        return m < 10 ? String(format: "%.1f MB/s", m) : "\(Int(m.rounded())) MB/s"
     }
 }
 

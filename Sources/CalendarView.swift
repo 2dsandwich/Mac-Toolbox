@@ -66,7 +66,15 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
 @MainActor @Observable final class CalendarBoard {
     static let shared = CalendarBoard()
 
-    enum Focus: Equatable { case event(CalendarEvent), day(Date) }
+    enum Focus: Equatable { case event(CalendarEvent), day(Date), new }
+
+    /// A new event on its card: what the quick-add reader made of the bar, changed there as you like.
+    struct Draft: Equatable {
+        var title = ""
+        var start = Date()
+        var minutes = 60
+        var allDay = false
+    }
 
     var span = CalendarSpan.month
     var anchor = day(Date())
@@ -78,6 +86,9 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
     private(set) var tint = Color.clear
     private(set) var expanded = false
     var measured: CGFloat?
+    var draft = Draft()
+    private(set) var saving = false
+    private(set) var failure: String?
     /// The new period slides in from the side it came from.
     private(set) var slide: CGFloat = 0
     private(set) var entered = true
@@ -182,7 +193,7 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
 
     private func slideIn(_ direction: CGFloat) {
         load()
-        guard direction != 0, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        guard direction != 0, !Store.shared.settings.reduceMotion else { return }
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
@@ -221,14 +232,14 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
     /// Once the card knows its height, it springs out of the chip.
     func grow() {
         guard focus != nil, !expanded, !leaving else { return }
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { expanded = true; return }
+        if Store.shared.settings.reduceMotion { expanded = true; return }
         withAnimation(.interpolatingSpring(mass: 1, stiffness: 360, damping: 34)) { expanded = true }
     }
 
     func close() {
         guard focus != nil, !leaving else { return }
         leaving = true
-        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reduce = Store.shared.settings.reduceMotion
         withAnimation(reduce ? nil : .timingCurve(0.65, 0, 0.35, 1, duration: 0.22)) {
             expanded = false
         } completion: {
@@ -247,9 +258,50 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
         open(.event(next), from: chip ?? CGRect(x: area.width / 2 - 20, y: area.height / 2 - 10, width: 40, height: 20), tint: next.fill)
     }
 
-    /// The bar's keys: ↩ opens the next event (or joins / shows the open one), Esc closes it, Page Up/Down and ←→ move,
-    /// Tab goes Day → Week → Month.
-    func handle(_ sel: Selector, typing: Bool) -> Bool {
+    // MARK: Adding
+
+    /// Opens the new-event card from what's in the bar ("lunch with Aki fri 12:30 for 90m"), read by the same quick-add
+    /// reader as Tasks. No time given: the next whole hour on the day (or the day shown).
+    func compose(_ text: String) {
+        guard focus == nil else { return }
+        let typed = text.trimmingCharacters(in: .whitespaces)
+        let rect = frames["new"] ?? CGRect(x: area.width - 40, y: 0, width: 32, height: 32)
+        Task {
+            let p = await QuickAdd.final(typed, groups: [])
+            let now = Date()
+            let on = p.day ?? (span == .month || anchor == day(now) ? day(now) : anchor)
+            let hour = p.hour ?? (on == day(now) ? min(23, cal.component(.hour, from: now) + 1) : 9)
+            draft = Draft(title: typed.isEmpty ? "" : p.title, start: cal.date(bySettingHour: hour, minute: p.hour == nil ? 0 : p.minute, second: 0, of: on) ?? now,
+                          minutes: p.minutes ?? 60, allDay: !typed.isEmpty && p.day != nil && p.hour == nil) // "dentist fri": a day, no time
+            failure = nil
+            open(.new, from: rect, tint: Color.primary.opacity(0.1))
+        }
+    }
+
+    /// Saves the card's event, then shows it: the bar cleared (it was the event's words) and the grid on its day.
+    func save() {
+        let title = QuickAdd.formatTitle(draft.title)
+        guard focus == .new, !saving, !title.isEmpty else { return }
+        saving = true
+        failure = nil
+        Task {
+            defer { saving = false }
+            do {
+                let e = try await CalendarEvents.shared.add(title: title, start: draft.start, minutes: draft.minutes, allDay: draft.allDay)
+                (NSApp.delegate as? AppDelegate)?.launcher.model.setQuery("")
+                close()
+                anchor = day(e.start)
+                load(force: true)
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+    }
+
+    /// The bar's keys: ↩ opens the next event (or joins / shows the open one) or, with words typed, a new event from
+    /// them (↩ again adds it); Esc closes the card, Page Up/Down and ←→ move, Tab goes Day → Week → Month.
+    func handle(_ sel: Selector, query: String) -> Bool {
+        let typing = !query.isEmpty
         switch sel {
         case #selector(NSResponder.cancelOperation(_:)) where focus != nil: close()
         case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.moveDown(_:)): return focus != nil
@@ -263,8 +315,10 @@ enum CalendarSpan: String, CaseIterable { case day, week, month }
         case #selector(NSResponder.insertNewline(_:)):
             if case .event(let e)? = focus {
                 if let link = e.link { NSWorkspace.shared.open(link) } else { e.openInCalendar() }
+            } else if focus == .new {
+                save()
             } else if focus == nil {
-                openNext()
+                if typing { compose(query) } else { openNext() }
             }
         default: return false
         }
@@ -293,7 +347,7 @@ struct CalendarPanel: View {
         let blocked = !google.ready
         VStack(alignment: .leading, spacing: 0) {
             if blocked { GoogleBanner(service: "Google Calendar").padding(.bottom, Self.headerGap) }
-            CalendarHeader(board: board).frame(height: Self.header).padding(.bottom, Self.headerGap)
+            CalendarHeader(board: board, query: query).frame(height: Self.header).padding(.bottom, Self.headerGap)
             GeometryReader { g in
                 Group {
                     if board.span == .month {
@@ -335,6 +389,7 @@ struct Pill: View {
 
 private struct CalendarHeader: View {
     let board: CalendarBoard
+    let query: String
 
     var body: some View {
         let (title, year) = board.title
@@ -347,6 +402,8 @@ private struct CalendarHeader: View {
             Button { board.goToday() } label: { Pill(text: "Today") }.buttonStyle(Press())
             ClockButton(symbol: "chevron.left", help: "Previous") { board.shift(-1) }
             ClockButton(symbol: "chevron.right", help: "Next") { board.shift(1) }
+            ClockButton(symbol: "plus", help: "New event") { board.compose(query) }
+                .modifier(Tracked(key: "new", board: board))
         }
     }
 }
@@ -717,6 +774,7 @@ private struct FocusCard: View {
         switch board.focus {
         case .event(let e)?: EventDetail(event: e, radius: radius)
         case .day(let d)?: DayDetail(date: d, items: board.byDay[d] ?? [], radius: radius, board: board)
+        case .new?: NewEvent(board: board, radius: radius)
         case nil: EmptyView()
         }
     }
@@ -761,7 +819,8 @@ private struct FocusMorph<Content: View>: View, Animatable {
                 .overlay(shape.strokeBorder(Color.white.opacity(0.13 * solid), lineWidth: 0.5))
                 .frame(width: width, height: height)
                 .overlay(alignment: .topLeading) {
-                    content.frame(width: to.width, height: to.height).opacity(ramp(0.55, 1))
+                    // The surface is always dark, so its text and controls are too (in a light popup they were dark on dark).
+                    content.frame(width: to.width, height: to.height).opacity(ramp(0.55, 1)).environment(\.colorScheme, .dark)
                 }
                 .clipShape(shape)
                 .offset(x: lerp(from.minX, to.minX), y: lerp(from.minY, to.minY))
@@ -844,6 +903,76 @@ private struct DayDetail: View {
             }
         }
         .padding(pad)
+    }
+}
+
+/// The new-event card: the title, the day and time, how long, and the calendar it goes to.
+private struct NewEvent: View {
+    @Bindable var board: CalendarBoard
+    let radius: CGFloat
+    @State private var google = Google.shared
+    @FocusState private var titleFocused: Bool
+
+    var body: some View {
+        let pad = PanelLayout.inset
+        let lengths = Set([15, 30, 45, 60, 90, 120, 180, board.draft.minutes]).sorted()
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2).fill(Color.accentColor).frame(width: 4)
+                VStack(alignment: .leading, spacing: 4) {
+                    TextField("", text: $board.draft.title, axis: .vertical)
+                        .textFieldStyle(.plain).font(.system(size: 15.5, weight: .semibold)).lineLimit(1...3)
+                        .focused($titleFocused)
+                        .onSubmit { board.save() }
+                        .accessibilityLabel("Title")
+                    let end = board.draft.start.addingTimeInterval(Double(board.draft.minutes) * 60)
+                    Text(board.draft.allDay ? "\(longDate(board.draft.start)) · All day" : "\(longDate(board.draft.start)) · \(clock(board.draft.start)) – \(clock(end))").font(.system(size: 12)).foregroundStyle(.secondary)
+                    if let c = CalendarEvents.shared.newEventCalendar { Text(c).font(.system(size: 11.5)).foregroundStyle(tertiary) }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                DatePicker("Starts", selection: $board.draft.start, displayedComponents: board.draft.allDay ? [.date] : [.date, .hourAndMinute])
+                    .labelsHidden().datePickerStyle(.stepperField)
+                if !board.draft.allDay {
+                    Picker("Length", selection: $board.draft.minutes) {
+                        ForEach(lengths, id: \.self) { m in Text(m < 60 ? "\(m) min" : m % 60 == 0 ? "\(m / 60) h" : "\(m / 60) h \(m % 60) min").tag(m) }
+                    }
+                    .labelsHidden() // takes the room left, so the row fits the card
+                }
+                Spacer(minLength: 0)
+                Toggle("All day", isOn: $board.draft.allDay).toggleStyle(.switch).controlSize(.small).font(.system(size: 12.5))
+                    .fixedSize() // it broke onto two lines beside a time
+            }
+            .controlSize(.regular)
+            if let f = board.failure {
+                HStack(spacing: 8) {
+                    Text(f).font(.system(size: 12)).foregroundStyle(Color(red: 1, green: 107 / 255, blue: 107 / 255)).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    if let who = google.reauth.first {
+                        Button { google.signIn(hint: who) } label: { Pill(text: "Sign in again") }.buttonStyle(Press())
+                    }
+                }
+            }
+            HStack(spacing: 4) {
+                Spacer(minLength: 0)
+                Button { board.close() } label: { Pill(text: "Cancel") }.buttonStyle(Press())
+                Button { board.save() } label: {
+                    Text(board.saving ? "Adding" : "Add").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.black)
+                        .padding(.horizontal, 14).frame(height: 32)
+                        .background(Capsule().fill(Color.white.opacity(board.draft.title.trimmingCharacters(in: .whitespaces).isEmpty ? 0.4 : 1)))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(Press())
+                .disabled(board.saving)
+            }
+            // Concentric with the card's corner, as the detail card's buttons are.
+            .padding([.trailing, .bottom], radius - 16 - pad)
+        }
+        .padding(pad)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Nothing typed in the bar: straight into the title.
+        .onAppear { titleFocused = board.draft.title.isEmpty }
     }
 }
 

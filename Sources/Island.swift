@@ -34,7 +34,10 @@ struct IslandGeometry: Equatable {
         NSRect(x: centerX - panelSize.width / 2, y: screenFrame.maxY - panelSize.height, width: panelSize.width, height: panelSize.height)
     }
 
-    static func current() -> IslandGeometry {
+    /// Settings › Notch › Open width.
+    @MainActor static var extraWidth: CGFloat { Store.shared.settings.notchExtraWidth }
+
+    @MainActor static func current() -> IslandGeometry {
         if let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
             let frame = screen.frame
             let height = screen.safeAreaInsets.top
@@ -43,32 +46,37 @@ struct IslandGeometry: Equatable {
             let width = max(80, frame.width - left - right)
             return IslandGeometry(hasNotch: true, notchHeight: height, screenFrame: frame, centerX: frame.minX + left + width / 2, topInset: 0,
                                   seedSize: CGSize(width: width, height: height), compactSize: CGSize(width: width + 150, height: height),
-                                  expandedSize: CGSize(width: max(400, width + 200), height: height + 112))
+                                  expandedSize: CGSize(width: max(400, width + 200) + extraWidth, height: height + 112))
         }
         return plain((NSScreen.main ?? NSScreen.screens.first)?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900))
     }
 
     /// A screen without a notch: a pill just under the top edge.
-    static func plain(_ frame: NSRect) -> IslandGeometry {
+    @MainActor static func plain(_ frame: NSRect) -> IslandGeometry {
         IslandGeometry(hasNotch: false, notchHeight: 32, screenFrame: frame, centerX: frame.midX, topInset: 5,
                        seedSize: CGSize(width: 64, height: 32), compactSize: CGSize(width: 190, height: 32),
-                       expandedSize: CGSize(width: 380, height: 124))
+                       expandedSize: CGSize(width: 380 + extraWidth, height: 124))
     }
 }
 
 /// For opening: a light spring.
-let islandSpring = Animation.spring(response: 0.42, dampingFraction: 0.8)
+@MainActor var islandSpring: Animation { islandMotion(.spring(response: 0.42, dampingFraction: 0.8)) }
 /// For shrinking: critically damped, so the shape never dips below the physical notch and bounces back.
-let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
+@MainActor var islandSettle: Animation { islandMotion(.spring(response: 0.45, dampingFraction: 1)) }
+/// At the chosen speed; with Reduce Motion, a short ease with no bounce.
+@MainActor private func islandMotion(_ a: Animation) -> Animation {
+    let s = Store.shared.settings
+    return (s.reduceMotion ? .easeOut(duration: 0.2) : a).speed(s.animationSpeed)
+}
 
 @MainActor @Observable final class IslandModel {
-    enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media, event, agents }
+    enum Activity: Equatable { case alarm, dictation, toast, meeting, pomodoro, timer, stopwatch, media, event, agents, shelf, lesson }
 
     var stage = IslandStage.hidden {
         didSet {
             guard stage != oldValue else { return }
             // The camera and a tile brought to the front last only while it's open.
-            if stage != .expanded { camera = false; focus = nil; agentsOpen = false }
+            if stage != .expanded { camera = false; focus = nil; agentsOpen = false; shelfOpen = false }
             onStage?(stage)
         }
     }
@@ -76,6 +84,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var camera = false { didSet { if !camera { CameraMirror.shared.stop() } } }
     /// The agents button in the open notch: coding sessions take the main spot until it closes.
     var agentsOpen = false
+    /// The shelf button in the open notch: the shelf in front, empty or not, until it closes.
+    var shelfOpen = false
     /// The question last opened for, so each one opens the notch once.
     @ObservationIgnored private var askedFor: UUID?
     /// Opened by hovering the bare notch with nothing running: the idle home (time, next event, weather, quick starts).
@@ -89,8 +99,18 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var contentVisible = false
     var hovering = false
     var geometry = IslandGeometry.current()
-    /// A passing message. A `note` shows its words in the closed notch too (otherwise it's just its icon there).
-    var toast: (title: String, detail: String, symbol: String, color: Color, note: Bool)?
+    /// A passing message. A `note` shows its words in the closed notch too (otherwise it's just its icon there);
+    /// `alone` has the closed notch to itself while it lasts.
+    var toast: (title: String, detail: String, symbol: String, color: Color, note: Bool, alone: Bool)?
+    /// A file from another app is being dragged (the shelf shows where to drop it), and is over the notch now.
+    var fileDrag = false
+    /// The notch was opened by a file drag (not by you), so it closes again if the file is dropped elsewhere.
+    @ObservationIgnored var openedForDrag = false
+    var dropTargeted = false
+    /// The shelf's file under the pointer: its AirDrop, Share and Remove buttons show.
+    var shelfHover: URL?
+    /// The download the toast is showing: clicking or dragging the toast puts it on the shelf.
+    var downloaded: URL?
     /// Everything happening now, most urgent first. The notch widens for each one.
     var activities: [Activity] = []
     var activity: Activity? { activities.first }
@@ -123,7 +143,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
 
     /// The one order there is: alarms and dictation first, then what's playing, timers, meetings, focus, stopwatches,
     /// messages and events.
-    private static let order: [Activity] = [.alarm, .dictation, .media, .timer, .meeting, .pomodoro, .stopwatch, .agents, .toast, .event]
+    private static let order: [Activity] = [.alarm, .dictation, .media, .timer, .meeting, .pomodoro, .stopwatch, .agents, .toast, .lesson, .event, .shelf]
     /// A coding agent waiting on you comes just after a ringing alarm.
     private func rank(_ a: Activity) -> Int { a == .agents ? 1 : 2 * (Self.order.firstIndex(of: a) ?? 99) }
 
@@ -139,6 +159,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .media: .media
         case .event: .event
         case .agents: .agents
+        case .shelf: .shelf
+        case .lesson: .lesson
         }
     }
 
@@ -158,12 +180,15 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         return out
     }
 
-    /// Closed, at most three.
-    var compactShown: [Slot] { Array(compactOrder.prefix(Self.compactMax)) }
+    /// Closed, at most three (a toast that's `alone` by itself, unless an alarm rings).
+    var compactShown: [Slot] {
+        if toast?.alone == true, activities.contains(.toast), !activities.contains(.alarm) { return [.toast] }
+        return Array(compactOrder.prefix(Self.compactMax))
+    }
 
     /// One thing in the notch: each running timer and stopwatch gets its own.
     enum Slot: Hashable {
-        case alarm, dictation, toast, meeting, pomodoro, timer(UUID), stopwatch(UUID), media, event, agents
+        case alarm, dictation, toast, meeting, pomodoro, timer(UUID), stopwatch(UUID), media, event, agents, shelf, lesson
         var key: String {
             switch self {
             case .timer(let id): "timer-\(id)"
@@ -183,6 +208,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .media: .media
         case .event: .event
         case .agents: .agents
+        case .shelf: .shelf
+        case .lesson: .lesson
         case .timer: Timers.shared.next.map { .timer($0.id) } ?? .toast
         case .stopwatch: Stopwatches.shared.running.first.map { .stopwatch($0.id) } ?? .toast
         }
@@ -198,8 +225,13 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             out.removeAll { $0 == .agents }
             out.insert(.agents, at: 0)
         }
+        // A ringing alarm goes in front of that too (its snooze and stop), unless the agents button was pressed.
+        if activities.contains(.alarm), !agentsOpen {
+            out.removeAll { $0 == .alarm }
+            out.insert(.alarm, at: 0)
+        }
         if let focus, let k = out.firstIndex(of: focus) { out.insert(out.remove(at: k), at: 0) }
-        return Array(out.prefix(IslandGeometry.maxRows + 1))
+        return Array(out.prefix(1 + 2 * IslandGeometry.maxColumns)) // the first thing and a full grid of tiles
     }
 
     /// The icons drawn on their own over the notch, flying between their spots as it opens and closes: the closed
@@ -215,13 +247,17 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
 
     /// Open: the tiles beside the first thing.
-    var tiles: [Slot] { camera || agentsOpen ? [] : Array(slots.dropFirst()) }
+    var tiles: [Slot] { camera || agentsAlone || dropAlone || shelfOpen ? [] : Array(slots.dropFirst()) }
+    /// A file is being dragged and the shelf is in front: its drop area takes the whole notch.
+    var dropAlone: Bool { fileDrag && slots.first == .shelf }
+    /// The agents view (opened with its button, or a question waiting on you) stands alone: no player or tiles beside it.
+    var agentsAlone: Bool { agentsOpen || slots.first == .agents }
     /// One row for a lone tile, else two (as tall as the player), filling columns left to right.
     var tileRows: Int { tiles.count > 1 ? 2 : 1 }
     var tileColumns: Int { min(IslandGeometry.maxColumns, (tiles.count + tileRows - 1) / tileRows) }
     /// Width the columns of tiles add (counted even while the camera shows, so the notch doesn't jump sideways).
     var tilesWidth: CGFloat {
-        guard !agentsOpen else { return 0 } // the agents view stands alone
+        guard !agentsAlone, !dropAlone, !shelfOpen else { return 0 }
         let n = slots.count - 1, rows = n > 1 ? 2 : 1, cols = min(IslandGeometry.maxColumns, max(0, n + rows - 1) / rows)
         return CGFloat(cols) * (IslandGeometry.tileWidth + IslandGeometry.gap)
     }
@@ -231,14 +267,30 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     var sideInset: CGFloat { Self.expandedInset + (geometry.hasNotch ? 12 : 0) }
     /// The first thing's width in the open notch.
     var mainWidth: CGFloat { openWidth - 2 * sideInset }
+    /// The first thing's width. A short one (a line or two: a class, an event, a timer) takes what it needs and its tiles
+    /// sit right beside it, rather than it stretching across the notch with the tiles added on past it; it still fills
+    /// whatever the band's width leaves.
+    var firstWidth: CGFloat {
+        switch slots.first {
+        case .timer, .stopwatch, .pomodoro, .alarm, .toast, .event, .lesson, .meeting:
+            guard !tiles.isEmpty else { return mainWidth }
+            return max(min(mainWidth, Self.shortFirst), mainWidth - tilesWidth)
+        default: return mainWidth
+        }
+    }
+    static let shortFirst: CGFloat = 290
+    /// The agents view is wider than the rest: sessions with their stats beside them, or a question beside its answers.
+    var agentsWidth: CGFloat { max(mainWidth, 640) }
+    /// Its natural height, as the face measures it (rows wrap, subagents fold out).
+    var agentsHeight: CGFloat = IslandView.artBig
     /// Each side of the band: the room the buttons on the right or the glances on the left need, whichever is more.
     var bandLane: CGFloat {
         let items = bandItems
-        let glances = agentsFront ? AgentLimitGauges.width : items.map(\.width).reduce(0, +) + CGFloat(max(0, items.count - 1)) * Self.bandGap
-        return max(Self.bandButtons + (Agents.shared.known ? IslandView.rowButton + IslandGeometry.gap : 0), glances)
+        let glances = items.map(\.width).reduce(0, +) + CGFloat(max(0, items.count - 1)) * Self.bandGap
+        let extra = (Agents.shared.known ? 1 : 0) + (Store.shared.settings.notchShelf ? 1 : 0)
+        return max(Self.bandButtons + CGFloat(extra) * (IslandView.rowButton + IslandGeometry.gap), glances)
     }
     /// Coding sessions are the main thing in the open notch: the provider's limits take the glances' place.
-    var agentsFront: Bool { stage == .expanded && !camera && slots.first == .agents && Agents.shared.frontLimits != nil }
     /// The glances left of the notch (Settings › Notch).
     var bandItems: [BandItem] { bandOverride ?? Array(Store.shared.settings.notchBand.prefix(2)) }
     /// `--island-snapshot --band a,b`: other glances without touching the saved settings.
@@ -281,11 +333,15 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .pomodoro: 80
         case .meeting: 90
         case .alarm: 48
-        case .toast: 42
-        case .event: 46
-        case .agents: IslandView.artBig
+        case .toast: toast?.detail.isEmpty == false ? 42 : IslandView.rowButton // one line or two
+        case .event, .lesson: 46
+        case .agents: agentsHeight
+        case .shelf: shelfHeight
         case .dictation:
-            if case .failed = dictation.phase { 48 } else { dictationControls ? IslandView.rowButton : 0 }
+            if case .failed(let m) = dictation.phase {
+                // Two lines only when it wraps.
+                (m as NSString).size(withAttributes: [.font: Fonts.ns(.notch, 13)]).width > mainWidth - 60 ? 48 : IslandView.rowButton
+            } else { dictationControls ? IslandView.rowButton : 0 }
         case nil: IslandView.artBig // the idle home, opened with nothing running (as tall as the player)
         }
     }
@@ -312,7 +368,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         guard !shown.isEmpty else { return CompactLayout() }
         let pad = geometry.hasNotch ? Self.compactPad : 10, gap = Self.compactGap
         var L = CompactLayout()
-        L.text = shown.first { [.timer, .stopwatch, .pomodoro, .meeting, .event].contains(activity(for: $0)) && slotTextWidth($0) > 0 }
+        L.text = shown.first { [.timer, .stopwatch, .pomodoro, .meeting, .lesson, .event].contains(activity(for: $0)) && slotTextWidth($0) > 0 }
             ?? (slotTextWidth(shown[0]) > 0 ? shown[0] : nil)
         L.textWidth = L.text.map(slotTextWidth) ?? 0
         if shown.count == 1 {
@@ -331,8 +387,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             L.side = best.width
         }
         // Never more than twice the bare notch: with too much to fit, the last thing waits in the open notch
-        // (times never get cut); only a lone long time truncates.
-        let over = L.side - geometry.seedSize.width / 2
+        // (times never get cut); only a lone long time truncates. A toast on its own may go a little wider for a moment.
+        // Without a notch the bare pill is tiny: its closed width (`compactSize`) is the limit there.
+        let room = max(geometry.seedSize.width, geometry.compactSize.width - geometry.seedSize.width) / 2
+        let over = L.side - room - (shown == [.toast] ? Self.toastRoom : 0)
         if over > 0, shown.count > 1 { return layout(for: Array(shown.dropLast())) }
         if over > 0, L.text != nil {
             let cut = min(over, max(0, L.textWidth - 28))
@@ -402,7 +460,9 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .expanded:
             // The band, then the first thing with the tiles beside it (wider before taller), or the mirror.
             let content = camera ? cameraHeight : max(detailHeight, tilesHeight)
-            return CGSize(width: openWidth + (camera ? 0 : tilesWidth), height: contentTop + content + Self.expandedInset)
+            let wide = agentsAlone && !camera ? agentsWidth - mainWidth : 0
+            let row = camera ? mainWidth : firstWidth + tilesWidth // the first thing and its tiles
+            return CGSize(width: max(openWidth, 2 * sideInset + row) + wide, height: contentTop + content + Self.expandedInset)
         }
     }
 
@@ -418,7 +478,10 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         if !Timers.shared.running.isEmpty, s.notchTimers { list.append(.timer) }
         if !Stopwatches.shared.running.isEmpty, s.notchStopwatch { list.append(.stopwatch) }
         if s.notchEvents, CalendarEvents.shared.upcoming != nil { list.append(.event) }
+        if s.notchClasses, Timetables.shared.alert != nil { list.append(.lesson) }
         if s.notchAgents, Agents.shared.showsInNotch { list.append(.agents) }
+        // Only while a file is dragged or its button opened it: the shelf is no live activity of its own.
+        if s.notchShelf, fileDrag || shelfOpen { list.append(.shelf) }
         if !s.notchEnabled { list.removeAll() }
         list.sort { rank($0) < rank($1) }
         // Paused stays: the song goes away only when Music or Spotify is quit or stopped.
@@ -442,6 +505,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         // A coding agent asking something opens the notch for its options, once per question.
         if let q = Agents.shared.questions.first, list.contains(.agents), q.id != askedFor, next != .dictation {
             askedFor = q.id
+            agentsOpen = false // the question comes to the front, not the list
             after(0.3) { self.expand() }
         }
         // Hands-free dictation opens for its buttons, and a failure to explain itself; push-to-talk stays closed.
@@ -523,7 +587,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Closed, only times (and a few live marks) show as text; everything else is just its icon.
     func compactTrailingWidth(_ a: Activity) -> CGFloat {
         switch a {
-        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event, .agents: return trailingWidth(a)
+        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event, .agents, .shelf, .lesson: return trailingWidth(a)
         case .dictation:
             switch dictation.phase {
             case .starting, .listening, .processing: return 16
@@ -533,6 +597,8 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .alarm: return 0
         }
     }
+    /// The most a class's room takes in the closed notch (the rest is in the open notch).
+    static let lessonRoom: CGFloat = 64
     /// Space between the expanded notch's content and its sides and bottom (past the ears), all the same.
     static let expandedInset: CGFloat = 18
     static let iconSize: CGFloat = 18
@@ -546,7 +612,9 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     /// Width of the text (or mark) right of the notch for an activity.
     func trailingWidth(_ a: Activity) -> CGFloat {
         func w(_ s: String, _ size: CGFloat, mono: Bool = false) -> CGFloat {
-            let font = mono ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: .semibold) : NSFont.systemFont(ofSize: size, weight: .medium)
+            let plain = Fonts.ns(.notch, size, weight: mono ? .semibold : .medium)
+            let digits: [NSFontDescriptor.FeatureKey: Int] = [.typeIdentifier: kNumberSpacingType, .selectorIdentifier: kMonospacedNumbersSelector]
+            let font = mono ? NSFont(descriptor: plain.fontDescriptor.addingAttributes([.featureSettings: [digits]]), size: plain.pointSize) ?? plain : plain
             return ceil((s as NSString).size(withAttributes: [.font: font]).width)
         }
         switch a {
@@ -562,6 +630,14 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .agents:
             let p = Agents.shared.needy
             return w(p.isEmpty ? "Asks" : p, 12.5)
+        case .shelf:
+            let n = Shelf.shared.files.count
+            return n == 0 ? 0 : w("\(n)", 14, mono: true)
+        case .lesson:
+            // The room (up to a point) and the countdown.
+            guard let a = Timetables.shared.alert else { return 0 }
+            let room = a.live || a.occ.item.room.isEmpty ? 0 : min(Self.lessonRoom, w(a.occ.item.room, 12.5) + 6)
+            return room + w(Timetables.shared.countdown(a), 14, mono: true)
         }
     }
 
@@ -580,12 +656,14 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
         case .alarm: text = Alarms.shared.ringing.map { $0.label.isEmpty ? $0.time : $0.label } ?? ""
         default: text = ""
         }
-        return (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .medium)]).width
+        return (text as NSString).size(withAttributes: [.font: Fonts.ns(.notch, 12.5, weight: .medium)]).width
     }
 
-    func flash(_ title: String, _ detail: String = "", symbol: String = "checkmark.circle.fill", color: Color = .green, seconds: Double = 1.8, note: Bool = false) {
+    func flash(_ title: String, _ detail: String = "", symbol: String = "checkmark.circle.fill", color: Color = .green, seconds: Double = 1.8, note: Bool = false,
+               alone: Bool = false) {
         toastWork?.cancel()
-        withAnimation(islandSpring) { toast = (title, detail, symbol, color, note) }
+        downloaded = nil
+        withAnimation(islandSpring) { toast = (title, detail, symbol, color, note, alone) }
         refresh()
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
@@ -595,7 +673,85 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             }
         }
         toastWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds * Store.shared.settings.notchToastScale, execute: work)
+    }
+
+    /// How much wider than twice the notch a lone toast may go.
+    static let toastRoom: CGFloat = 60
+
+    // MARK: Glances in the closed notch (only while it's closed: open, the band and tiles already say so)
+
+    /// The charger plugged in or out, a low battery, fully charged (`Battery.alert`).
+    func showBattery(_ a: Battery.Alert, seconds: Double? = nil) {
+        guard Store.shared.settings.notchBattery, stage != .expanded else { return }
+        flash(a.title, a.detail, symbol: a.symbol, color: a.color, seconds: seconds ?? (a.color == .red ? 4 : 2.4), note: true, alone: true)
+    }
+
+    /// A file finished downloading: its name for a few seconds (click it, or drag it, to keep it on the shelf).
+    func showDownload(_ url: URL, seconds: Double = 4) {
+        guard Store.shared.settings.notchDownloads, stage != .expanded else { return }
+        flash(url.lastPathComponent, "Downloaded", symbol: "arrow.down.circle.fill", color: .blue, seconds: seconds, note: true, alone: true)
+        downloaded = url
+    }
+
+    // MARK: Shelf
+
+    /// The shelf's height open: a header, then its files two to a row (with the drop spot while a file is dragged).
+    var shelfHeight: CGFloat {
+        if fileDrag || Shelf.shared.files.isEmpty { return IslandView.dropHeight }
+        let cells = Shelf.shared.files.count, rows = CGFloat((cells + 1) / 2)
+        return IslandView.rowButton + (rows > 0 ? 10 + rows * IslandGeometry.tileHeight + (rows - 1) * IslandGeometry.gap : 0)
+    }
+
+    /// The notch on the screen, a little past its edges: a file dragged here opens it as a drop target.
+    var dropZone: NSRect {
+        let g = geometry, size = shapeSize
+        return NSRect(x: g.centerX - size.width / 2, y: g.screenFrame.maxY - g.topInset - size.height, width: size.width, height: size.height + g.topInset)
+            .insetBy(dx: -16, dy: -16)
+    }
+
+    /// A file dragged from another app came over the notch (or left it): the notch opens with the shelf in front.
+    func fileDragged(over: Bool) {
+        let s = Store.shared.settings
+        guard s.notchEnabled, s.notchShelf else { return }
+        if !fileDrag { fileDrag = true; refresh() }
+        guard over, activities.contains(.shelf) else { return }
+        if stage != .expanded { openedForDrag = true }
+        expand()
+        if stage == .expanded, focus != .shelf { withAnimation(islandSpring) { focus = .shelf } }
+    }
+
+    /// The drag ended, dropped or not.
+    func fileDragEnded() {
+        guard fileDrag else { return }
+        fileDrag = false
+        dropTargeted = false
+        refresh()
+        // Dropped somewhere else: the notch it opened for the drag closes again.
+        if openedForDrag { openedForDrag = false; collapse() }
+    }
+
+    /// Files dropped on the notch go on the shelf, which comes to the front.
+    func drop(_ urls: [URL]) -> Bool {
+        let files = urls.filter(\.isFileURL)
+        guard !files.isEmpty, Store.shared.settings.notchShelf else { return false }
+        Shelf.shared.add(files)
+        openedForDrag = false
+        expand(haptic: false)
+        if stage == .expanded { focus = .shelf }
+        return true
+    }
+
+    /// The download toast was clicked (or dragged): the file goes on the shelf, which opens.
+    @discardableResult func shelveDownload() -> Bool {
+        guard let url = downloaded, toast != nil, Store.shared.settings.notchShelf else { return false }
+        downloaded = nil
+        toastWork?.cancel()
+        withAnimation(islandSettle) { toast = nil }
+        Shelf.shared.add([url])
+        expand(haptic: false)
+        if stage == .expanded { focus = .shelf }
+        return true
     }
 
     /// Closing all the way is under way: asking again doesn't restart it (the pointer check asks 20 times a second,
@@ -679,7 +835,7 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
     }
 
     /// The bare notch was hovered with nothing running: it opens straight from the notch's own shape.
-    func openIdle(hover: Bool = false) {
+    func openIdle() {
         guard stage == .hidden, activities.isEmpty, Store.shared.settings.notchEnabled else { return }
         generation += 1
         idleOpen = true
@@ -696,8 +852,6 @@ let islandSettle = Animation.spring(response: 0.45, dampingFraction: 1)
             withAnimation(islandSpring) {
                 self.stage = .expanded
                 self.contentVisible = true
-                // Hovered over a terminal or an editor: the coding sessions first.
-                if hover, Store.shared.settings.notchAgents, Agents.shared.codingInFront { self.agentsOpen = true }
             }
         }
     }
@@ -758,9 +912,11 @@ final class IslandPanel: NSPanel {
         // Above the menu bar (24), so clicks in the band at menu-bar height land here. No `isFloatingPanel`: setting
         // it puts the level back to floating (3), under the menu bar, which then takes those clicks.
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
-        // On one Space at a time, so it slides away with the desktop when you swipe; on arrival it's brought over to the
-        // new Space and fades in (on every Space at once, it stood still while the desktop moved under it).
-        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
+        // Fixed to the notch like the hardware: on every Space and over full-screen apps, so it stays put while the
+        // desktop slides under it on a swipe, and `.stationary` keeps Mission Control and App Exposé from moving it.
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        // Even on every Space a window slides with the desktop on a swipe: its own top Space holds it still.
+        NotchSpace.pin(panel)
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.isReleasedWhenClosed = false
@@ -787,7 +943,6 @@ final class IslandPanel: NSPanel {
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.followSpaceSoon()
                     self?.checkFullScreen()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { MainActor.assumeIsolated { self?.checkFullScreen() } }
                 }
@@ -795,19 +950,32 @@ final class IslandPanel: NSPanel {
         }
     }
 
-    private func checkFullScreen() {
-        let full = Self.frontIsFullScreen(on: model.geometry.screenFrame)
-        guard full != model.fullScreen else { return }
-        model.fullScreen = full
-        model.refresh()
+    /// Asked off the main thread (a slow app can take a quarter second per question), one at a time so answers land in
+    /// order; only while the notch hides for full screen, the one thing it changes.
+    func checkFullScreen() {
+        guard Store.shared.settings.notchHideInFullScreen else {
+            if model.fullScreen { model.fullScreen = false }
+            return
+        }
+        let screen = model.geometry.screenFrame, top = NSScreen.screens.first?.frame.maxY ?? screen.maxY
+        Self.fullScreenQueue.async { [weak self] in
+            let full = Self.frontIsFullScreen(on: screen, top: top)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, full != self.model.fullScreen else { return }
+                    self.model.fullScreen = full
+                    self.model.refresh()
+                }
+            }
+        }
     }
+    private static let fullScreenQueue = DispatchQueue(label: "money.fullscreen", qos: .userInitiated)
 
     /// Whether the app in front is full screen on this screen: Accessibility says so (it has its own Space), or one of
-    /// its windows covers the whole screen (games and video players that skip the Space).
-    static func frontIsFullScreen(on screen: NSRect) -> Bool {
+    /// its windows covers the whole screen (games and video players that skip the Space). `top` is the main screen's top.
+    nonisolated static func frontIsFullScreen(on screen: NSRect, top: CGFloat) -> Bool {
         guard let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() else { return false }
         // Window server coordinates start at the top left of the main screen.
-        let top = NSScreen.screens.first?.frame.maxY ?? screen.maxY
         let cg = CGRect(x: screen.minX, y: top - screen.maxY, width: screen.width, height: screen.height)
         if AXIsProcessTrusted() {
             let ax = AXUIElementCreateApplication(app.processIdentifier)
@@ -872,22 +1040,8 @@ final class IslandPanel: NSPanel {
         panel.setFrame(g.panelFrame, display: true)
     }
 
-    /// A new Space came in: the notch, left behind on the old one, comes over and fades in.
-    private func followSpace() {
-        guard !frozen, model.stage != .hidden, !panel.isOnActiveSpace else { return }
-        panel.alphaValue = 0
-        panel.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
-    }
-
-    /// The Space notification can come before the switch settles (or not at all, e.g. into a full-screen app):
-    /// looked at again shortly after, and on every pointer check, so the notch is never left on another Space.
-    private func followSpaceSoon() {
-        followSpace()
-        for d in [0.15, 0.5] { DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in MainActor.assumeIsolated { self?.followSpace() } } }
-    }
-
     private func stageChanged(_ stage: IslandStage) {
+        NowPlaying.shared.watched = stage == .expanded
         if stage == .hidden {
             panel.ignoresMouseEvents = true
             panel.orderOut(nil)
@@ -895,12 +1049,15 @@ final class IslandPanel: NSPanel {
             tracker?.invalidate()
             tracker = nil
             setTracking(fast: false)
-        } else if !panel.isVisible || !panel.isOnActiveSpace {
+        } else if !panel.isVisible {
             layout()
             panel.orderFrontRegardless()
             setTracking(fast: true)
         }
     }
+
+    /// Display asleep or screen locked: no pointer checks until it's back.
+    func pause(_ on: Bool) { tracker?.fireDate = on ? .distantFuture : Date() }
 
     /// Near the notch the pointer is checked 20 times a second. Farther off, there's only a check a second plus a
     /// look at each pointer move, which brings back the fast checks the moment it comes near (so hovering isn't slower).
@@ -949,7 +1106,6 @@ final class IslandPanel: NSPanel {
     private func track() {
         guard !frozen else { return }
         let mouse = mouseOverride ?? NSEvent.mouseLocation
-        if model.stage != .hidden { followSpace() }
         if model.stage == .hidden {
             // Nothing running: hovering the notch itself for a moment opens it.
             let s = Store.shared.settings
@@ -958,7 +1114,7 @@ final class IslandPanel: NSPanel {
                 if hoverSince == nil { hoverSince = Date() }
                 if let since = hoverSince, Date().timeIntervalSince(since) > s.notchHoverDelay {
                     hoverSince = nil
-                    model.openIdle(hover: true)
+                    model.openIdle()
                 }
             } else {
                 hoverSince = nil
@@ -983,13 +1139,13 @@ final class IslandPanel: NSPanel {
             if let since = hoverSince, Date().timeIntervalSince(since) > s.notchHoverDelay {
                 hoverSince = nil
                 model.expand()
-                if Store.shared.settings.notchAgents, Agents.shared.codingInFront { model.agentsOpen = true }
             }
         } else {
             hoverSince = nil
         }
         if model.stage == .expanded {
-            if inside || model.swiping {
+            // A file being dragged keeps it open: the pointer is still back at the file, on its way to the shelf.
+            if inside || model.swiping || model.fileDrag {
                 model.lastInteraction = Date()
             } else if Date().timeIntervalSince(model.lastInteraction) > s.notchCollapseDelay,
                       !(model.activity == .dictation && (model.dictationWantsRoom || model.dictation.phase == .processing)) {
@@ -1056,7 +1212,7 @@ struct IslandShape: Shape {
 private let focusColor = Color(red: 0xFF / 255, green: 0x6A / 255, blue: 0x55 / 255)
 private let breakColor = Color(red: 0x4C / 255, green: 0xD0 / 255, blue: 0x7D / 255)
 
-private struct ProgressRing: View {
+struct ProgressRing: View {
     var progress: Double
     var color: Color
     var size: CGFloat
@@ -1154,6 +1310,8 @@ struct IslandView: View {
                 // Size and position follow what's inside: a spring when it opens, no bounce otherwise.
                 .animation(model.stage == .expanded ? islandSpring : islandSettle, value: size)
                 .onTapGesture { model.expand(haptic: false) }
+                // Files dropped on it, closed or open, go on the shelf.
+                .dropDestination(for: URL.self) { urls, _ in model.drop(urls) } isTargeted: { model.dropTargeted = $0 }
                 .scaleEffect((model.hovering ? 1.05 : 1) * (1 + min(0, model.pull.height) / 350), anchor: .top)
                 .opacity(model.stage == .hidden ? 0 : 1)
                 .padding(.top, model.geometry.topInset)
@@ -1176,7 +1334,9 @@ struct IslandView: View {
                     .animation(model.stage == .expanded ? islandSpring : islandSettle, value: model.stage)
                     .animation(islandSpring, value: model.lyricsFace)
                     .animation(islandSpring, value: model.focus)
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+                    // Open, an icon comes and goes with its face, on the face's own fade: shrinking on the shape's spring,
+                    // the album art hung over the agents view (and popped back over the player) each time it was toggled.
+                    .transition(model.stage == .expanded ? Self.faceFade : .scale(scale: 0.5).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1189,6 +1349,7 @@ struct IslandView: View {
         let g = model.geometry
         return closedContent(model.compactLayout)
             .frame(height: g.compactSize.height)
+            .overlay { downloadDrag }
         .frame(maxHeight: .infinity, alignment: .top)
         .animation(islandSettle, value: model.compactLayout.keys)
     }
@@ -1207,7 +1368,7 @@ struct IslandView: View {
             Color.clear.frame(width: g.seedSize.width)
             HStack(spacing: IslandModel.compactGap) {
                 if L.textApart, let t = L.text {
-                    slotText(t).lineLimit(1).truncationMode(.tail).frame(width: L.textWidth, alignment: .trailing)
+                    slotText(t).lineLimit(1).truncationMode(t == .toast ? .middle : .tail).frame(width: L.textWidth, alignment: .trailing)
                         .transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
                 ForEach(L.right, id: \.self) { s in closedItem(s, L) }
@@ -1233,11 +1394,11 @@ struct IslandView: View {
         case .timer(let id):
             let t = Timers.shared
             let clock = Pomodoro.clock(t.list.first { $0.id == id }?.remaining(t.now) ?? 0)
-            Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock, down: true)
+            Text(clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock, down: true)
         case .stopwatch(let id):
             let w = Stopwatches.shared
             let clock = Stopwatch.format(w.list.first { $0.id == id }?.elapsed(w.now) ?? 0, hundredths: false)
-            Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
+            Text(clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
         default: compactTrailing(model.activity(for: s))
         }
     }
@@ -1263,6 +1424,8 @@ struct IslandView: View {
         case .media: leading(.media)
         case .event: leading(.event)
         case .agents: leading(.agents)
+        case .shelf: leading(.shelf)
+        case .lesson: leading(.lesson)
         }
     }
 
@@ -1297,6 +1460,16 @@ struct IslandView: View {
             Image(systemName: "calendar").font(.system(size: 13, weight: .semibold)).foregroundStyle(.red)
         case .agents:
             AgentStateIcon(state: .needsYou, size: 15).symbolEffect(.bounce, options: .repeating)
+        case .shelf:
+            Image(systemName: model.fileDrag ? "tray.and.arrow.down.fill" : "tray.full.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
+        case .lesson:
+            // Under way: how far through it is; before: the cap, in the class's colour.
+            let t = Timetables.shared
+            if let a = t.alert, a.live {
+                ProgressRing(progress: t.now.timeIntervalSince(a.occ.start) / max(60, a.occ.end.timeIntervalSince(a.occ.start)), color: a.occ.item.tint, size: 16, lineWidth: 3)
+            } else {
+                Image(systemName: "graduationcap.fill").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(t.alert?.occ.item.tint ?? .teal)
+            }
         case nil:
             EmptyView()
         }
@@ -1304,7 +1477,7 @@ struct IslandView: View {
 
     @ViewBuilder private func compactTrailing(_ a: IslandModel.Activity?) -> some View {
         switch a {
-        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event, .agents: trailing(a)
+        case .pomodoro, .meeting, .timer, .stopwatch, .media, .event, .agents, .shelf, .lesson: trailing(a)
         case .dictation:
             switch model.dictation.phase {
             case .processing: PolishSpinner(size: 14, line: 2).frame(width: 16, height: 16)
@@ -1326,39 +1499,55 @@ struct IslandView: View {
         case .pomodoro:
             let p = model.pomodoro
             Text(p.clock)
-                .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                .font(.app(.notch, 15, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white.opacity(p.paused ? 0.6 : 1))
                 .rolling(p.clock, down: true)
         case .meeting:
-            Text(model.meeting.clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(model.meeting.clock)
+            Text(model.meeting.clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(model.meeting.clock)
         case .dictation:
             switch model.dictation.phase {
-            case .done(let msg): Text(msg).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+            case .done(let msg): Text(msg).font(.app(.notch, 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
             case .processing: PolishSpinner(size: 14, line: 2).frame(width: 16, height: 16)
-            case .failed: Text("Couldn't dictate").font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+            case .failed: Text("Couldn't dictate").font(.app(.notch, 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
             default: Image(systemName: model.dictation.mode == .command ? "wand.and.stars" : "mic.fill").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
             }
         case .toast:
-            if let t = model.toast { Text(t.title).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.9)).lineLimit(1) }
+            if let t = model.toast {
+                Text(t.title).font(.app(.notch, 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.9)).lineLimit(1).truncationMode(.middle)
+            }
         case .alarm:
-            Text(Alarms.shared.ringing.map { $0.label.isEmpty ? $0.time : $0.label } ?? "").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+            Text(Alarms.shared.ringing.map { $0.label.isEmpty ? $0.time : $0.label } ?? "").font(.app(.notch, 12.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
         case .stopwatch:
             let s = Stopwatches.shared
             let clock = Stopwatch.format(s.running.first?.elapsed(s.now) ?? 0, hundredths: false)
-            Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
+            Text(clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
         case .timer:
             let t = Timers.shared
             let clock = t.next.map { Pomodoro.clock($0.remaining(t.now)) } ?? ""
-            Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock, down: true)
+            Text(clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock, down: true)
         case .media:
             EqualizerBars(playing: NowPlaying.shared.playing, color: ArtTint.color(NowPlaying.shared.artwork))
         case .event:
             let c = CalendarEvents.shared
-            Text(c.upcoming?.countdown(c.now) ?? "").font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+            Text(c.upcoming?.countdown(c.now) ?? "").font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
         case .agents:
             // Whose input is needed.
             let p = Agents.shared.needy
-            Text(p.isEmpty ? "Asks" : p).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.orange).lineLimit(1)
+            Text(p.isEmpty ? "Asks" : p).font(.app(.notch, 12.5, weight: .medium)).foregroundStyle(.orange).lineLimit(1)
+        case .shelf:
+            let n = Shelf.shared.files.count
+            if n > 0 { Text("\(n)").font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white) }
+        case .lesson:
+            let t = Timetables.shared
+            if let a = t.alert {
+                HStack(spacing: 6) {
+                    if !a.live, !a.occ.item.room.isEmpty {
+                        Text(a.occ.item.room).font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.75)).lineLimit(1).truncationMode(.middle)
+                            .frame(maxWidth: IslandModel.lessonRoom - 6, alignment: .trailing)
+                    }
+                    Text(t.countdown(a)).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).fixedSize()
+                }
+            }
         case nil:
             EmptyView()
         }
@@ -1379,13 +1568,15 @@ struct IslandView: View {
                 HStack(alignment: .center, spacing: IslandGeometry.gap) {
                     if let first = slots.first {
                         detail(first)
-                            .frame(width: model.mainWidth)
+                            // Centred in the height it was given: a one-line note no longer sits on a gap.
+                            .frame(width: first == .agents ? model.agentsWidth : model.firstWidth)
+                            .frame(minHeight: model.detailHeight)
                             .offset(x: first == .media ? model.pull.width : 0)
-                            .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.08)), removal: .opacity.animation(.easeOut(duration: 0.1))))
+                            .transition(Self.faceFade)
                     } else {
                         // Something starting from here (dictation from its button) takes over without the two overlapping.
                         idleHome.frame(width: model.mainWidth)
-                            .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.08)), removal: .opacity.animation(.easeOut(duration: 0.1))))
+                            .transition(Self.faceFade)
                     }
                     if !model.tiles.isEmpty { tileGrid }
                 }
@@ -1411,19 +1602,27 @@ struct IslandView: View {
             TimelineView(.everyMinute) { ctx in
                 HStack(alignment: .center, spacing: 12) {
                     Text(ctx.date, format: .dateTime.hour().minute())
-                        .font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .font(.app(.notch, 34, weight: .semibold, design: .rounded)).monospacedDigit()
                         .foregroundStyle(.white)
                         .contentTransition(.numericText())
                     VStack(alignment: .leading, spacing: 3) {
                         Text(ctx.date, format: .dateTime.weekday(.wide).month(.wide).day())
-                            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+                            .font(.app(.notch, 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.6))
                         if let e = BandData.nextToday {
                             HStack(spacing: 6) {
                                 Circle().fill(Color(nsColor: e.color)).frame(width: 7, height: 7)
                                 Text(e.title).foregroundStyle(.white.opacity(0.85))
                                 Text(e.start > ctx.date ? e.start.formatted(date: .omitted, time: .shortened) : "Now").foregroundStyle(.white.opacity(0.55))
                             }
-                            .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+                            .font(.app(.notch, 12.5, weight: .medium).monospacedDigit())
+                        } else if Store.shared.settings.notchClasses, let c = Timetables.shared.nextToday {
+                            // No event left today: the next class and its room.
+                            HStack(spacing: 6) {
+                                Image(systemName: "graduationcap.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(c.item.tint)
+                                Text(c.item.name + (c.item.room.isEmpty ? "" : " · " + c.item.room)).foregroundStyle(.white.opacity(0.85))
+                                Text(c.start.formatted(date: .omitted, time: .shortened)).foregroundStyle(.white.opacity(0.55))
+                            }
+                            .font(.app(.notch, 12.5, weight: .medium).monospacedDigit())
                         }
                     }
                     .lineLimit(1)
@@ -1432,10 +1631,10 @@ struct IslandView: View {
                         VStack(alignment: .trailing, spacing: 1) {
                             HStack(spacing: 6) {
                                 Image(systemName: w.symbol).font(.system(size: 15, weight: .medium))
-                                Text("\(w.temp)°").font(.system(size: 20, weight: .semibold, design: .rounded))
+                                Text("\(w.temp)°").font(.app(.notch, 20, weight: .semibold, design: .rounded))
                             }
                             .foregroundStyle(.white)
-                            Text("\(w.hi)° / \(w.lo)°").font(.system(size: 10.5, weight: .medium).monospacedDigit()).foregroundStyle(.white.opacity(0.55))
+                            Text("\(w.hi)° / \(w.lo)°").font(.app(.notch, 10.5, weight: .medium).monospacedDigit()).foregroundStyle(.white.opacity(0.55))
                         }
                         .transition(.opacity)
                     }
@@ -1475,8 +1674,8 @@ struct IslandView: View {
                         Image(systemName: "play.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
                     }
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(s.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white)
-                    Text(s.artist).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                    Text(s.title).font(.app(.notch, 12.5, weight: .semibold)).foregroundStyle(.white)
+                    Text(s.artist).font(.app(.notch, 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.55))
                 }
                 .lineLimit(1)
             }
@@ -1494,7 +1693,7 @@ struct IslandView: View {
             ForEach(Array(tiles.prefix(rows * IslandGeometry.maxColumns).enumerated()), id: \.element) { k, slot in
                 tile(slot)
                     .contentShape(RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
-                    .onTapGesture { withAnimation(islandSpring) { model.focus = slot } }
+                    .onTapGesture { if slot != .toast || !model.shelveDownload() { withAnimation(islandSpring) { model.focus = slot } } }
                     .padding(.leading, CGFloat(k / rows) * (w + gap))
                     .padding(.top, CGFloat(k % rows) * (h + gap))
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
@@ -1513,15 +1712,17 @@ struct IslandView: View {
         let polishing = d.phase == .processing
         return HStack(spacing: 0) {
             ZStack(alignment: .leading) {
-                if !dictating, model.agentsFront, let l = Agents.shared.frontLimits {
-                    AgentLimitGauges(limits: l).transition(.opacity)
-                } else if !dictating {
+                if !dictating {
                     HStack(spacing: IslandModel.bandGap) {
                         ForEach(model.bandItems) { BandGlance(item: $0) }
                     }
                     .transition(.opacity)
                 } else if polishing {
-                    PolishSpinner().transition(.scale(scale: 0.4).combined(with: .opacity))
+                    HStack(spacing: 6) {
+                        PolishSpinner()
+                        Text("Polishing").font(.app(.notch, 11.5, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                    }
+                    .transition(.opacity)
                 } else {
                     Waveform(levels: Array(d.levels.suffix(Int((lane + 2.5) / 5.5))), active: d.phase == .listening)
                         .transition(.scale(scale: 0.6, anchor: .leading).combined(with: .opacity))
@@ -1532,16 +1733,32 @@ struct IslandView: View {
             ZStack(alignment: .trailing) {
                 if !dictating {
                     HStack(spacing: IslandGeometry.gap) {
-                        RoundButton(symbol: "gearshape", tint: nil, size: Self.rowButton) {
-                            model.collapse()
-                            (NSApp.delegate as? AppDelegate)?.showSettings(pane: .notch)
-                        }
-                        .help("Settings")
                         if Agents.shared.known {
                             RoundButton(symbol: model.agentsOpen ? "terminal.fill" : "terminal", tint: model.agentsOpen ? .white : nil, size: Self.rowButton) {
                                 withAnimation(islandSpring) { model.camera = false; model.agentsOpen.toggle() }
                             }
-                            .help(model.agentsOpen ? "Close Coding Agents" : "Coding Agents")
+                            // How many sessions are working, so running agents show without opening the view.
+                            .overlay(alignment: .topTrailing) {
+                                let n = Agents.shared.live.count
+                                if n > 0, !model.agentsOpen {
+                                    Text("\(n)").font(.app(.notch, 9.5, weight: .bold).monospacedDigit()).foregroundStyle(.black)
+                                        .frame(minWidth: 14, minHeight: 14).padding(.horizontal, n > 9 ? 3 : 0)
+                                        .background(Capsule().fill(Color.white)).offset(x: 3, y: -3)
+                                }
+                            }
+                            .help(model.agentsOpen ? "Close coding agents" : "Coding agents")
+                        }
+                        if Store.shared.settings.notchShelf {
+                            RoundButton(symbol: model.shelfOpen ? "tray.full.fill" : "tray.full", tint: model.shelfOpen ? .white : nil, size: Self.rowButton) {
+                                withAnimation(islandSpring) {
+                                    model.camera = false
+                                    model.agentsOpen = false
+                                    model.shelfOpen.toggle()
+                                    model.refresh()
+                                    model.focus = model.shelfOpen ? .shelf : nil
+                                }
+                            }
+                            .help(model.shelfOpen ? "Close shelf" : "Shelf")
                         }
                         if CameraMirror.available {
                             RoundButton(symbol: model.camera ? "web.camera.fill" : "web.camera", tint: model.camera ? .white : nil, size: Self.rowButton) {
@@ -1549,6 +1766,12 @@ struct IslandView: View {
                             }
                             .help(model.camera ? "Close Mirror" : "Mirror")
                         }
+                        // Settings last, at the band's far right.
+                        RoundButton(symbol: "gearshape", tint: nil, size: Self.rowButton) {
+                            model.collapse()
+                            (NSApp.delegate as? AppDelegate)?.showSettings(pane: .notch)
+                        }
+                        .help("Settings")
                     }
                     .transition(.opacity)
                 } else if !polishing {
@@ -1577,7 +1800,10 @@ struct IslandView: View {
         case .dictation: dictationDetail
         case .pomodoro: HStack(alignment: .top, spacing: 12) { spot(slot, size: 24).padding(.top, 2); pomodoroDetail }
         case .meeting: HStack(alignment: .top, spacing: 12) { spot(slot, size: 24).padding(.top, 2); meetingDetail }
-        case .agents: AgentsFace()
+        // The agents button over a waiting question shows the sessions (pressed again, the question).
+        case .agents: AgentsFace(asks: !model.agentsOpen) { model.agentsHeight = $0 }.frame(height: model.detailHeight, alignment: .top)
+        case .shelf: shelfDetail
+        case .lesson: lessonDetail
         case .event: AnyView(eventDetail) // spelled out: inferred, it trips the compiler's opaque-type check with the swipe offset
         }
     }
@@ -1588,9 +1814,9 @@ struct IslandView: View {
         return VStack(spacing: 12) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(p.status).font(.system(size: 12, weight: .semibold)).foregroundStyle(p.paused ? Color.white.opacity(0.55) : color)
+                    Text(p.status).font(.app(.notch, 12, weight: .semibold)).foregroundStyle(p.paused ? Color.white.opacity(0.55) : color)
                     Text(p.clock)
-                        .font(.system(size: 40, weight: .semibold).monospacedDigit())
+                        .font(.app(.notch, 40, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.white.opacity(p.paused ? 0.65 : 1))
                         .lineLimit(1).minimumScaleFactor(0.6)
                         .rolling(p.clock, down: true)
@@ -1611,11 +1837,8 @@ struct IslandView: View {
         return VStack(spacing: 12) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 6) {
-                        PulsingDot(active: m.phase == .recording)
-                        Text(m.phase == .paused ? "Meeting paused" : "Recording meeting").font(.system(size: 12, weight: .semibold)).foregroundStyle(.red)
-                    }
-                    Text(m.clock).font(.system(size: 40, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6).rolling(m.clock)
+                    Text(m.phase == .paused ? "Meeting paused" : "Recording meeting").font(.app(.notch, 12, weight: .semibold)).foregroundStyle(.red)
+                    Text(m.clock).font(.app(.notch, 40, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6).rolling(m.clock)
                 }
                 Spacer(minLength: 0)
                 HStack(spacing: 10) {
@@ -1625,7 +1848,7 @@ struct IslandView: View {
                 }
             }
             Text(m.lines.last?.text ?? "Listening…")
-                .font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(1).truncationMode(.head)
+                .font(.app(.notch, 12.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(1).truncationMode(.head)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -1637,7 +1860,7 @@ struct IslandView: View {
         return HStack(spacing: 12) {
             if case .failed(let msg) = d.phase {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
-                Text(msg).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineLimit(2)
+                Text(msg).font(.app(.notch, 13)).foregroundStyle(.white.opacity(0.9)).lineLimit(2)
             }
             Spacer(minLength: 0)
             if model.dictationControls {
@@ -1656,8 +1879,8 @@ struct IslandView: View {
         return HStack(spacing: 12) {
             spot(.alarm, size: 24)
             VStack(alignment: .leading, spacing: 1) {
-                Text(a.ringing?.label.isEmpty == false ? a.ringing!.label : "Alarm").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                Text(a.ringing?.time ?? "").font(.system(size: 26, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
+                Text(a.ringing?.label.isEmpty == false ? a.ringing!.label : "Alarm").font(.app(.notch, 14, weight: .semibold)).foregroundStyle(.white)
+                Text(a.ringing?.time ?? "").font(.app(.notch, 26, weight: .semibold).monospacedDigit()).foregroundStyle(.white)
             }
             Spacer(minLength: 0)
             RoundButton(symbol: "zzz", tint: nil) { a.snooze() }
@@ -1671,8 +1894,8 @@ struct IslandView: View {
             HStack(spacing: 12) {
                 spot(.stopwatch(id), size: 24)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(w.laps.isEmpty ? "Stopwatch" : "Stopwatch · lap \(w.laps.count + 1)").font(.system(size: 12, weight: .semibold)).foregroundStyle(.orange)
-                    Text(Stopwatch.format(w.elapsed(s.now))).font(.system(size: 34, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6)
+                    Text(w.laps.isEmpty ? "Stopwatch" : "Stopwatch · lap \(w.laps.count + 1)").font(.app(.notch, 12, weight: .semibold)).foregroundStyle(.orange)
+                    Text(Stopwatch.format(w.elapsed(s.now))).font(.app(.notch, 34, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6)
                 }
                 Spacer(minLength: 0)
                 RoundButton(symbol: "flag.fill", tint: nil) { s.lap(w) }
@@ -1688,9 +1911,9 @@ struct IslandView: View {
                 HStack(spacing: 12) {
                     spot(.timer(id), size: 24)
                     VStack(alignment: .leading, spacing: 0) {
-                        Text(n.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(.orange).lineLimit(1)
+                        Text(n.name).font(.app(.notch, 12, weight: .semibold)).foregroundStyle(.orange).lineLimit(1)
                         let clock = Pomodoro.clock(n.remaining(t.now))
-                        Text(clock).font(.system(size: 34, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6).rolling(clock, down: true)
+                        Text(clock).font(.app(.notch, 34, weight: .semibold).monospacedDigit()).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.6).rolling(clock, down: true)
                     }
                     Spacer(minLength: 0)
                     RoundButton(symbol: "goforward.60", tint: nil) { t.extend(n, 60) }
@@ -1717,7 +1940,9 @@ struct IslandView: View {
         let trioWidth = 3 * b + 2 * gap
         let trioX = on ? w - b - gap - trioWidth : textX + (w - textX - trioWidth) / 2
         let rowY = on ? 0 : big - b
-        let titleWidth = max(0, on ? trioX - gap - textX : w - textX - 24)
+        // The heart: at the row's start under the song; on the lyrics face, just before the controls.
+        let heartX = on ? trioX - gap - b : textX
+        let titleWidth = max(0, on ? (m.canLike ? heartX : trioX) - gap - textX : w - textX - 24)
         let tint = ArtTint.color(m.artwork)
         return ZStack(alignment: .topLeading) {
             // Under everything, so lines still fading out never draw over the art growing back.
@@ -1735,10 +1960,13 @@ struct IslandView: View {
                 .onTapGesture { m.openPlayer() }
                 .help("Open \(m.appName)")
             VStack(alignment: .leading, spacing: 1) {
-                Marquee(text: m.songTitle, font: .system(size: 15, weight: .semibold), color: .white)
-                Marquee(text: m.artistLine, font: .system(size: 12.5), color: .white.opacity(0.6))
+                Marquee(text: m.songTitle, font: .app(.notch, 15, weight: .semibold), color: .white)
+                Marquee(text: m.artistLine, font: .app(.notch, 12.5), color: .white.opacity(0.6))
             }
             .frame(width: titleWidth, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { m.openPlayer() }
+            .help("Open \(m.appName)")
             .offset(x: textX)
             EqualizerBars(playing: m.playing && !on, color: tint) // hidden on the lyrics face: resting, not animating
                 .frame(width: w - textX, alignment: .trailing)
@@ -1757,6 +1985,11 @@ struct IslandView: View {
                 RoundButton(symbol: "forward.fill", tint: nil, size: b) { m.next() }
             }
             .offset(x: trioX, y: rowY)
+            if m.canLike {
+                RoundButton(symbol: m.liked == true ? "heart.fill" : "heart", tint: m.liked == true ? .pink : nil, size: b) { m.toggleLike() }
+                    .help(m.liked == true ? (m.appID == "com.spotify.client" ? "Remove from Liked Songs" : "Unfavorite") : (m.appID == "com.spotify.client" ? "Add to Liked Songs" : "Favorite"))
+                    .offset(x: heartX, y: rowY)
+            }
             if Lyrics.shared.hasLines { lyricsButton.offset(x: w - b, y: rowY) }
         }
         .frame(width: w, height: on ? Self.lyricsHeight : big, alignment: .topLeading)
@@ -1791,10 +2024,10 @@ struct IslandView: View {
             HStack(spacing: 12) {
                 spot(.event, size: 24)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(e.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                    Text(e.title).font(.app(.notch, 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                     HStack(spacing: 6) {
                         Circle().fill(Color(nsColor: e.color)).frame(width: 7, height: 7)
-                        Text(e.timeRange + " · " + (e.start > c.now ? "in " : "") + e.countdown(c.now)).font(.system(size: 12.5).monospacedDigit()).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                        Text(e.timeRange + " · " + (e.start > c.now ? "in " : "") + e.countdown(c.now)).font(.app(.notch, 12.5).monospacedDigit()).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)
@@ -1812,18 +2045,169 @@ struct IslandView: View {
         }
     }
 
+    /// The class coming up (or under way): its name, room, times and countdown, with Join for an online one and
+    /// dismiss.
+    @ViewBuilder private var lessonDetail: some View {
+        let t = Timetables.shared
+        if let a = t.alert {
+            let item = a.occ.item
+            HStack(spacing: 12) {
+                spot(.lesson, size: 24)
+                VStack(alignment: .leading, spacing: 3) {
+                    Marquee(text: item.name, font: .system(size: 14, weight: .semibold), color: .white)
+                    HStack(spacing: 0) {
+                        if !item.room.isEmpty { Text(item.room).foregroundStyle(.white.opacity(0.85)).lineLimit(1).truncationMode(.middle).layoutPriority(-1) }
+                        Text((item.room.isEmpty ? "" : " · ") + a.occ.timeRange + " · " + (a.live ? t.countdown(a) + " left" : a.occ.start > t.now ? "in " + t.countdown(a) : "now"))
+                            .foregroundStyle(.white.opacity(0.65)).lineLimit(1).fixedSize()
+                    }
+                    .font(.system(size: 12.5).monospacedDigit())
+                }
+                Spacer(minLength: 0)
+                if let url = URL(string: item.link), url.scheme?.hasPrefix("http") == true {
+                    RoundButton(symbol: "video.fill", tint: .green) { NSWorkspace.shared.open(url) }.help("Join")
+                }
+                RoundButton(symbol: "xmark", tint: nil) { t.dismiss() }.help("Dismiss")
+            }
+        }
+    }
+
     private var toastDetail: some View {
         HStack(spacing: 12) {
             if let t = model.toast {
                 spot(.toast, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(t.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                    if !t.detail.isEmpty { Text(t.detail).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.65)).lineLimit(2) }
+                    Text(t.title).font(.app(.notch, 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1).truncationMode(.middle)
+                    if !t.detail.isEmpty { Text(t.detail).font(.app(.notch, 12.5)).foregroundStyle(.white.opacity(0.65)).lineLimit(2) }
                 }
             }
             Spacer(minLength: 0)
         }
+        .overlay { downloadDrag }
     }
+
+    /// Over a download's toast: a click puts the file on the shelf, a drag takes it out to anywhere (and keeps it there too).
+    @ViewBuilder private var downloadDrag: some View {
+        if let url = model.downloaded, model.toast != nil {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { model.shelveDownload() }
+                .onDrag {
+                    Shelf.shared.add([url])
+                    return NSItemProvider(contentsOf: url) ?? NSItemProvider()
+                }
+                .help("Keep on the shelf")
+        }
+    }
+
+    /// The shelf: what was dropped on the notch, two to a row (one on its own takes the row). Click a file to open it,
+    /// drag it out to anywhere; pointing at it shows AirDrop, Share and Remove. While a file is being dragged, the last
+    /// spot says where to drop it.
+    private var shelfDetail: some View {
+        let files = Shelf.shared.files
+        let rows = stride(from: 0, to: files.count, by: 2).map { Array(files[$0..<min($0 + 2, files.count)]) }
+        return Group {
+            // Being dragged to, or empty (opened with its button): where to drop.
+            if model.fileDrag || files.isEmpty {
+                dropArea
+            } else {
+                VStack(spacing: 10) {
+                    HStack(spacing: 12) {
+                        spot(.shelf, size: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Shelf").font(.app(.notch, 14, weight: .semibold)).foregroundStyle(.white)
+                            Text(files.isEmpty ? "No files" : files.count == 1 ? "1 file" : "\(files.count) files")
+                                .font(.app(.notch, 12.5)).foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer(minLength: 0)
+                        if !files.isEmpty { RoundButton(symbol: "trash", tint: nil) { Shelf.shared.clear() }.help("Clear") }
+                    }
+                    .frame(height: Self.rowButton)
+                    if !rows.isEmpty {
+                        VStack(spacing: IslandGeometry.gap) {
+                            ForEach(rows.indices, id: \.self) { r in
+                                HStack(spacing: IslandGeometry.gap) { ForEach(rows[r], id: \.self) { shelfFile($0) } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(height: model.shelfHeight, alignment: .top)
+        .animation(islandSpring, value: files)
+        .animation(islandSpring, value: model.fileDrag)
+    }
+
+    private func shelfFile(_ url: URL) -> some View {
+        let card = RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous)
+        let pointed = model.shelfHover == url
+        // The icon and name stay; pointing at it slides its buttons in beside them (the name gives way, cut in the middle).
+        return HStack(spacing: 8) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: Self.rowButton, height: Self.rowButton)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(url.lastPathComponent).font(.app(.notch, 12.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1).truncationMode(.middle)
+                caption(url.deletingLastPathComponent().lastPathComponent)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if pointed {
+                HStack(spacing: 6) {
+                    airDropButton(Self.rowButton) { Shelf.airDrop([url]) }
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                            .frame(width: Self.rowButton, height: Self.rowButton).background(Circle().fill(Color.white.opacity(0.14)))
+                    }
+                    .buttonStyle(PressStyle())
+                    .help("Share")
+                    RoundButton(symbol: "xmark", tint: nil) { Shelf.shared.remove(url) }.help("Remove")
+                }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: pointed)
+        .padding(.horizontal, Self.rowPad)
+        .frame(maxWidth: .infinity)
+        .frame(height: IslandGeometry.tileHeight)
+        .background(card.fill(Color.white.opacity(0.07)))
+        .contentShape(card)
+        .onHover { model.shelfHover = $0 ? url : model.shelfHover == url ? nil : model.shelfHover }
+        .onTapGesture { NSWorkspace.shared.open(url) }
+        .onDrag { NSItemProvider(contentsOf: url) ?? NSItemProvider() }
+        .help(url.lastPathComponent)
+        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+    }
+
+    /// While a file is dragged, the whole shelf is where to drop it: one large outlined area, brighter once the file is over it.
+    private var dropArea: some View {
+        let on = model.dropTargeted
+        let shape = RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous)
+        // The shelf's own icon (it flies here as the notch opens) in the middle.
+        return spot(.shelf, size: 30)
+            .opacity(on ? 1 : 0.7)
+            .scaleEffect(on ? 1.1 : 1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(shape.fill(Color.white.opacity(on ? 0.12 : 0.05)))
+            .overlay(shape.strokeBorder(Color.white.opacity(on ? 0.5 : 0.22), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
+            .animation(.easeOut(duration: 0.15), value: on)
+            .transition(.opacity)
+            .accessibilityLabel("Drop files to keep them on the shelf")
+    }
+
+    static let dropHeight: CGFloat = 132
+
+    /// A round button for AirDrop.
+    private func airDropButton(_ size: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            // White like the other buttons: a dot with waves rising from it, as AirDrop's mark (the SF Symbols have none).
+            Image(systemName: "dot.radiowaves.up.forward").font(.system(size: 12.5, weight: .bold)).foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Circle().fill(Color.white.opacity(0.14)))
+            .contentShape(Circle())
+        }
+        .buttonStyle(PressStyle())
+        .help("AirDrop")
+    }
+
+    /// One face of the open notch giving way to another: the old one goes quickly, the new one comes in just after.
+    static let faceFade = AnyTransition.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.08)), removal: .opacity.animation(.easeOut(duration: 0.1)))
 
     /// The 32 pt round buttons everywhere in the open notch except the first thing's own big ones.
     static let rowButton: CGFloat = 32
@@ -1853,14 +2237,14 @@ struct IslandView: View {
                 let t = Timers.shared
                 if let n = t.list.first(where: { $0.id == id }) {
                     let clock = Pomodoro.clock(n.remaining(t.now))
-                    Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(n.paused ? 0.6 : 1)).rolling(clock, down: true)
+                    Text(clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(n.paused ? 0.6 : 1)).rolling(clock, down: true)
                     caption(n.name)
                 }
             case .stopwatch(let id):
                 let s = Stopwatches.shared
                 if let w = s.list.first(where: { $0.id == id }) {
                     let clock = Stopwatch.format(w.elapsed(s.now), hundredths: false)
-                    Text(clock).font(.system(size: 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
+                    Text(clock).font(.app(.notch, 14, weight: .semibold).monospacedDigit()).foregroundStyle(.white).rolling(clock)
                 }
             case .pomodoro:
                 trailing(.pomodoro)
@@ -1870,10 +2254,10 @@ struct IslandView: View {
                 caption(CalendarEvents.shared.upcoming?.title ?? "")
             case .media:
                 let m = NowPlaying.shared
-                Marquee(text: m.songTitle, font: .system(size: 12.5, weight: .semibold), color: .white)
+                Marquee(text: m.songTitle, font: .app(.notch, 12.5, weight: .semibold), color: .white)
                 caption(m.artistLine)
             case .dictation:
-                Text("Listening").font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                Text("Listening").font(.app(.notch, 12.5)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
             case .toast:
                 trailing(.toast)
                 caption(model.toast?.detail ?? "")
@@ -1883,12 +2267,24 @@ struct IslandView: View {
                 let a = Agents.shared
                 trailing(.agents)
                 caption(a.asking ? "Asks you" : "Needs you")
+            case .shelf:
+                let files = Shelf.shared.files
+                Text(files.count == 1 ? "1 file" : "\(files.count) files").font(.app(.notch, 14, weight: .semibold)).foregroundStyle(.white)
+                caption(files.last?.lastPathComponent ?? "")
+            case .lesson:
+                let t = Timetables.shared
+                if let a = t.alert {
+                    // The class and room first; the countdown is beside the notch already.
+                    Marquee(text: a.occ.item.name, font: .app(.notch, 12.5, weight: .semibold), color: .white)
+                    Marquee(text: (a.occ.item.room.isEmpty ? "" : a.occ.item.room + " · ") + (a.live ? t.countdown(a) + " left" : "in " + t.countdown(a)),
+                            font: .app(.notch, 10.5, weight: .medium), color: .white.opacity(0.55))
+                }
             }
         }
     }
 
     @ViewBuilder private func caption(_ s: String) -> some View {
-        if !s.isEmpty { Text(s).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.55)).lineLimit(1) }
+        if !s.isEmpty { Text(s).font(.app(.notch, 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.55)).lineLimit(1) }
     }
 
     /// A tile's one control (the rest are a tap away, with the tile at the front).
@@ -1915,6 +2311,15 @@ struct IslandView: View {
             }
         case .alarm:
             RoundButton(symbol: "stop.fill", tint: .orange, size: b) { Alarms.shared.dismiss() }
+        case .shelf:
+            let files = Shelf.shared.files
+            if !files.isEmpty { airDropButton(b) { Shelf.airDrop(files) }.help("AirDrop all") }
+        case .lesson:
+            let t = Timetables.shared
+            if let a = t.alert {
+                if let url = URL(string: a.occ.item.link), url.scheme?.hasPrefix("http") == true { RoundButton(symbol: "video.fill", tint: .green, size: b) { NSWorkspace.shared.open(url) }.help("Join") }
+                else { RoundButton(symbol: "xmark", tint: nil, size: b) { t.dismiss() }.help("Dismiss") }
+            }
         case .toast, .dictation, .agents:
             EmptyView()
         }
@@ -1986,7 +2391,7 @@ struct Marquee: View {
 /// Album art as a square, whatever shape the picture is (it's cropped to fill), its corners in step with its size so it
 /// can grow from the closed notch into the player. A new cover fades in over the last one with a slight settle; the
 /// note shows only for a song known to have none.
-private struct AlbumArt: View {
+struct AlbumArt: View {
     let image: NSImage?
     var missing = true
     /// The cover being replaced, held under the new one until it has faded in.
@@ -2057,7 +2462,7 @@ private struct PlayerTimeline: View {
                 }
                 Text("-" + IslandView.songClock(m.duration - at)).frame(width: 38, alignment: .trailing)
             }
-            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+            .font(.app(.notch, 10.5, weight: .medium).monospacedDigit())
             .foregroundStyle(.white.opacity(0.5))
         }
     }
@@ -2066,7 +2471,7 @@ private struct PlayerTimeline: View {
 /// A little equalizer beside the notch while music plays, in the album art's colour; resting while paused. Core
 /// Animation moves the bars (a made-up level five times a second, eased, on an 8 s loop), so the app does no work per
 /// frame for it.
-private struct EqualizerBars: NSViewRepresentable {
+struct EqualizerBars: NSViewRepresentable {
     let playing: Bool
     var color: Color = .pink
 
@@ -2194,7 +2599,7 @@ struct PolishSpinner: View {
     }
 }
 
-private struct MiniWave: View {
+struct MiniWave: View {
     let levels: [Float]
 
     var body: some View {

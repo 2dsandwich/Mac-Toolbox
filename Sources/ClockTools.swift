@@ -387,6 +387,8 @@ struct AlarmDraft: Equatable {
     private static let key = "alarms"
 
     var list: [Alarm] = [] { didSet { save(); schedule() } }
+    /// Off in the snapshots, so made-up alarms never replace the real ones.
+    @ObservationIgnored var persist = true
     var ringing: Alarm?
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var checker: Timer?
@@ -426,6 +428,7 @@ struct AlarmDraft: Equatable {
     }
 
     private func save() {
+        guard persist else { return }
         if let data = try? JSONEncoder().encode(list) { UserDefaults.standard.set(data, forKey: Self.key) }
     }
 
@@ -628,6 +631,10 @@ struct AlarmDraft: Equatable {
     @ObservationIgnored private var stream = false
     @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var poller: Timer?
+    /// The notch is open (its player or lyrics face may show the position).
+    @ObservationIgnored var watched = false
+    /// Polls skipped since the player was last asked.
+    @ObservationIgnored private var skipped = 0
     /// Snapshots and tests: keep the demo song (the player's answers are ignored).
     @ObservationIgnored var frozen = false
     /// Dev snapshots: the same as `frozen` (the notch's hooks set this one).
@@ -738,13 +745,21 @@ struct AlarmDraft: Equatable {
     nonisolated private static let spotifyID = "com.spotify.client", musicID = "com.apple.Music"
 
     /// Every 3 s while playing (keeps lyrics right after a seek), every 15 s while paused, none with both apps closed.
+    /// While playing with nothing showing the position (the notch closed, no lyric line under it), the player is only
+    /// asked every fifth tick: the players announce plays, pauses and new songs on their own.
     private func schedulePoll(open: Bool) {
         let every: TimeInterval? = !open ? nil : playing ? 3 : 15
         guard every != poller?.timeInterval || (every == nil) != (poller == nil) else { return }
         poller?.invalidate()
         poller = nil
         guard let every else { return }
-        let t = Timer(timeInterval: every, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
+        let t = Timer(timeInterval: every, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.skipped = !self.playing || self.watched || Lyrics.shared.closedLine || self.skipped >= 4 ? 0 : self.skipped + 1
+                if self.skipped == 0 { self.refresh() }
+            }
+        }
         t.tolerance = every / 4
         RunLoop.main.add(t, forMode: .common)
         poller = t
@@ -789,6 +804,7 @@ struct AlarmDraft: Equatable {
 
     /// Each field on its own `try` (as 2dle reads them), so one the player can't give (a stream's length, a local
     /// file's cover) doesn't lose the rest. state || name || artist || album || cover URL || position || length || id || stream title
+    /// (|| favorited, Music only)
     nonisolated private static func read(spotify: Bool, music: Bool) -> ([String]?, String?) {
         var info: [String]?
         var source: String?
@@ -830,7 +846,7 @@ struct AlarmDraft: Equatable {
               tell application "Music"
                 if player state is stopped then return ""
                 set t to current track
-                set {n, ar, al, i, d, p, s} to {"", "", "", "", 0, 0, ""}
+                set {n, ar, al, i, d, p, s, fv} to {"", "", "", "", 0, 0, "", ""}
                 try
                   set n to name of t
                 end try
@@ -855,7 +871,10 @@ struct AlarmDraft: Equatable {
                   set s to current stream title
                 end try
                 if s is missing value then set s to ""
-                return (player state as string) & "||" & n & "||" & ar & "||" & al & "||" & "" & "||" & (p as string) & "||" & (d as string) & "||" & i & "||" & s
+                try
+                  set fv to favorited of t as string
+                end try
+                return (player state as string) & "||" & n & "||" & ar & "||" & al & "||" & "" & "||" & (p as string) & "||" & (d as string) & "||" & i & "||" & s & "||" & fv
               end tell
             end timeout
             """), m.first == "playing" || info == nil {
@@ -902,6 +921,12 @@ struct AlarmDraft: Equatable {
                 if appID != source { appID = source }
                 loadArtwork(url: f[4], source: source)
                 lookUpCredits()
+                if source == Self.musicID {
+                    let fav: Bool? = !stream && f.count > 9 && !f[9].isEmpty ? f[9] == "true" : nil
+                    if !held, liked != fav { liked = fav }
+                } else if newSong {
+                    checkSpotifyLike()
+                }
                 // Spotify can announce a song while its cover is still the last one's: asked again shortly (2dle does too).
                 if newSong { refresh(after: [0.7, 2.2]) }
             } else if !title.isEmpty || playing || appID != nil || last != nil {
@@ -919,6 +944,7 @@ struct AlarmDraft: Equatable {
                 artKey = "" // the same song coming back shows its (kept) cover again
                 trackID = ""
                 appID = nil
+                liked = nil
             }
         }
         // Starting or stopping changes what the notch shows: animate that; ordinary updates just apply.
@@ -1125,6 +1151,44 @@ struct AlarmDraft: Equatable {
         control("playpause", key: 16)
     }
     func next() { control("next track", key: 17) }
+
+    // MARK: Liking
+
+    /// In Liked Songs (Spotify, once signed in) or favorited (Music); nil while that isn't known.
+    var liked: Bool?
+
+    /// The heart shows for a Spotify track or episode, and a Music song that can be favorited (not a stream).
+    var canLike: Bool {
+        appID == Self.spotifyID ? trackID.hasPrefix("spotify:track:") || trackID.hasPrefix("spotify:episode:") : liked != nil
+    }
+
+    func checkSpotifyLike() {
+        liked = nil
+        let id = trackID
+        guard Spotify.shared.ready, canLike else { return }
+        Task {
+            let v = await Spotify.shared.isSaved(id)
+            if self.trackID == id { self.liked = v }
+        }
+    }
+
+    /// Adds the song to Liked Songs (or favorites it in Music), or takes it out again. Shown at once; put back if the
+    /// player or Spotify refused. Signed out of Spotify: Settings, to sign in.
+    func toggleLike() {
+        let id = trackID, on = !(liked ?? false)
+        if appID == Self.spotifyID {
+            guard Spotify.shared.ready else { return Spotify.shared.showSettings() }
+            liked = on
+            if fakePlayer != nil { return send("spotify like \(on) \(id)", key: nil) }
+            Task {
+                if !(await Spotify.shared.save(id, on)), self.trackID == id { self.liked = !on }
+            }
+        } else {
+            liked = on
+            hold = Date().addingTimeInterval(1.5)
+            send("tell application \"Music\" to set favorited of current track to \(on)", key: nil)
+        }
+    }
     func previous() { control("previous track", key: 18) }
 
     /// Moves the song to a time: the bar goes there at once and the player follows (`set player position`, which

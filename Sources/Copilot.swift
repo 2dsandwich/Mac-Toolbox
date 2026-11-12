@@ -256,7 +256,7 @@ struct CopilotView: View {
                 shape.fill(Color(white: 0.11))
             } else {
                 shape.fill(.clear).glassEffect(.regular.tint(Color.black.opacity(0.35)), in: shape)
-                shape.fill(Color.black.opacity(store.settings.darkness * 0.8))
+                shape.fill(Color.black.opacity(store.settings.shade * 0.8))
             }
         }
         .clipShape(shape)
@@ -305,7 +305,7 @@ struct CopilotView: View {
             if let e = CalendarEvents.shared.current() {
                 Text(e.title).font(.system(size: 17, weight: .semibold)).lineLimit(2).multilineTextAlignment(.center)
             }
-            PillButton(title: "Start Recording", symbol: "record.circle", tint: .red) { newMeeting() }
+            PillButton(title: "New meeting", symbol: "record.circle", tint: .red) { newMeeting() }
         }
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

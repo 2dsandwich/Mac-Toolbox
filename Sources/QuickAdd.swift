@@ -1,7 +1,7 @@
 import Foundation
 
-/// Moneybag's quick-add reading of a one-line task: "call Ben tomorrow 3pm // bring the contract in Work" → the title
-/// "Call Ben", due tomorrow, a note, and the list it names. Local rules first; Claude only for date words the rules
+/// Moneybag's quick-add reading of a one-line task or event: "call Ben tomorrow 3pm // bring the contract in Work" → the
+/// title "Call Ben", due tomorrow, a note, and the list it names; "lunch with Aki fri 12:30 for 90m" an event's length too. Local rules first; Claude only for date words the rules
 /// couldn't place (as in Moneybag).
 struct QuickAdd: Equatable {
     enum Kind { case when, note, group }
@@ -16,6 +16,8 @@ struct QuickAdd: Equatable {
     /// Read so it leaves the title; Google Tasks keeps dates only.
     var hour: Int?
     var minute = 0
+    /// "for 90m", "for 1.5 hours" or a range ("2-3pm"): an event's length.
+    var minutes: Int?
     var note: String?
     var group: String?
 
@@ -133,7 +135,14 @@ struct QuickAdd: Equatable {
         scan(#"(\d{1,2})月(\d{1,2})日"#) { p, _ in dated(Int(p[1]!)!, Int(p[2]!)!) }
 
         scan(#"\b(?:from |at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|to|until|till)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b"#) { p, _ in
-            clock(p[1], p[2], p[3] ?? p[6], bare: p[2] == nil && p[3] == nil)
+            // The end first, then the start over it (the start is what's kept).
+            let before = (out.hour, out.minute)
+            guard clock(p[4], p[5], p[6], bare: p[5] == nil && p[6] == nil) else { return false }
+            let end = out.hour! * 60 + out.minute
+            guard clock(p[1], p[2], p[3] ?? p[6], bare: p[2] == nil && p[3] == nil) else { (out.hour, out.minute) = before; return false }
+            let length = end - (out.hour! * 60 + out.minute)
+            out.minutes = length > 0 ? length : length + 1440
+            return true
         }
         scan(#"(\d{1,2})時(半|(\d{1,2})分)?"#) { p, _ in clock(p[1], p[2] == "半" ? "30" : p[3], nil, bare: false) }
         scan(#"\b(?:at )?(\d{1,2}):(\d{2})\s*(am|pm)?\b"#) { p, _ in clock(p[1], p[2], p[3], bare: false) }
@@ -141,7 +150,10 @@ struct QuickAdd: Equatable {
         scan(#"\bat (\d{1,2})\b(?![/:])"#) { p, _ in clock(p[1], nil, nil, bare: true) }
         scan(#"\b(noon|midday)\b"#) { _, _ in out.hour = 12; return true }
         scan(#"\bmidnight\b"#) { _, _ in out.hour = 0; return true }
-        scan(#"\bfor (\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b"#) { _, _ in true }
+        scan(#"\bfor (\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b"#) { p, _ in
+            out.minutes = Int(Double(p[1]!)! * (p[2]!.lowercased().hasPrefix("h") ? 60 : 1))
+            return true
+        }
         if out.hour == nil {
             // A bare hour right after a date ("tomorrow 3").
             scan(#"\b(\d{1,2})\b(?![/:.\d]|\s*(?:st|nd|rd|th|月|日|days?|weeks?)\b)"#) { p, r in

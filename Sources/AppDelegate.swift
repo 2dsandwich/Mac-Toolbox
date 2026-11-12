@@ -14,12 +14,15 @@ import SwiftUI
     var island: IslandModel!
     private(set) var islandController: IslandController!
     private let fnKeys = FnKeyMonitor()
+    private var fileDrags: FileDragWatch?
+    private let downloads = FolderWatch(FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0])
     private var copilot: MeetingCopilot!
     private var copilotWindow: CopilotWindow!
     private var meetingWasRunning = false
     var statusItem: NSStatusItem?
     var settingsWindow: NSWindow?
     private var registered = ""
+    private var away = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -59,6 +62,12 @@ import SwiftUI
         NowPlaying.shared.onChange = { [weak self] in self?.island.refresh() }
         CalendarEvents.shared.onChange = { [weak self] in self?.island.refresh() }
         Agents.shared.onChange = { [weak self] in self?.island.refresh() }
+        Shelf.shared.onChange = { [weak self] in self?.island.refresh() }
+        // A session finished: a brief check and its name on the closed notch only (open, the list already shows it).
+        Agents.shared.onFinish = { [weak self] s in
+            guard let self, self.store.settings.notchEnabled, self.store.settings.notchAgents, self.island.stage != .expanded else { return }
+            self.island.flash(s.short, s.name, symbol: "checkmark.circle.fill", color: .green, seconds: 3, note: true)
+        }
         NowPlaying.shared.start()
         _ = AudioMixer.shared // re-applies saved per-app levels
         pomodoro.announce = { [weak self] title, detail in
@@ -72,12 +81,19 @@ import SwiftUI
 
         if runDevHook(CommandLine.arguments) { return }
         Lyrics.shared.start()
+        // The closed notch's glances: the battery, new downloads; and files dragged over it for the shelf.
+        Battery.shared.onAlert = { [weak self] in self?.island.showBattery($0) }
+        downloads.onFile = { [weak self] in self?.island.showDownload($0) }
+        downloads.start()
+        fileDrags = FileDragWatch(island: island)
+        fileDrags?.start()
 
         // Every launch starts hidden from screen sharing; turning it off only lasts until Halo quits.
         if !store.settings.hideFromScreenShare { store.settings.hideFromScreenShare = true }
         HotKeyCenter.shared.reload = { [weak self] in self?.registerHotKeys(force: true) }
         store.onChange = { [weak self] old in self?.apply(old) }
         apply(nil)
+        pauseWhileAway()
         if !UserDefaults.standard.bool(forKey: "welcomed") {
             UserDefaults.standard.set(true, forKey: "welcomed")
             showSettings()
@@ -105,11 +121,37 @@ import SwiftUI
         if s.dictationEnabled && s.fnDictation { fnKeys.start() } else { fnKeys.stop() }
         launcher.panel.sharingType = s.hideFromScreenShare ? .none : .readOnly
         islandController.setSharing(!s.notchInCaptures)
-        if let old, old.notchHideInFullScreen != s.notchHideInFullScreen { island.refresh() }
+        if let old, old.notchHideInFullScreen != s.notchHideInFullScreen { islandController.checkFullScreen(); island.refresh() }
+        if let old, old.notchShelf != s.notchShelf { island.refresh() }
+        if let old, old.translateTarget != s.translateTarget { Translator.shared.target = s.translateTarget }
         copilotWindow.applyPrivacy()
         if old == nil || old?.notchEvents != s.notchEvents || old?.eventCalendarsOff != s.eventCalendarsOff { CalendarEvents.shared.apply(s) }
         if old?.notchEventLead != s.notchEventLead { island.refresh() }
         if old?.notchAgents != s.notchAgents || old?.notchEnabled != s.notchEnabled { Agents.shared.run(s.notchAgents && s.notchEnabled) }
+    }
+
+    /// The background checks (mixer, clipboard, agents' files, the notch's pointer, the calendar) stop while the display
+    /// sleeps, the screen is locked or another user is in, and start again on any sign of being back.
+    private func pauseWhileAway() {
+        let ws = NSWorkspace.shared.notificationCenter, dnc = DistributedNotificationCenter.default()
+        let signs: [(NotificationCenter, Notification.Name, Bool)] = [
+            (ws, NSWorkspace.screensDidSleepNotification, true), (ws, NSWorkspace.screensDidWakeNotification, false),
+            (ws, NSWorkspace.sessionDidResignActiveNotification, true), (ws, NSWorkspace.sessionDidBecomeActiveNotification, false),
+            (dnc, Notification.Name("com.apple.screenIsLocked"), true), (dnc, Notification.Name("com.apple.screenIsUnlocked"), false),
+        ]
+        for (center, name, away) in signs {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.away != away else { return }
+                    self.away = away
+                    AudioMixer.shared.pause(away)
+                    self.clipboard.pause(away)
+                    Agents.shared.pause(away)
+                    self.islandController.pause(away)
+                    CalendarEvents.shared.pause(away)
+                }
+            }
+        }
     }
 
     // MARK: Hotkeys
@@ -200,18 +242,20 @@ import SwiftUI
 
     func showSettings(pane: Pane = .general) {
         if settingsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 580),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 640),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
             w.title = "MONEY! Settings"
             w.isReleasedWhenClosed = false
-            w.minSize = NSSize(width: 680, height: 460)
+            w.minSize = NSSize(width: 720, height: 520)
+            // Dark like the search bar and the notch it sets up, whatever the system look.
+            w.appearance = NSAppearance(named: .darkAqua)
             let hc = NSHostingController(rootView: SettingsView(store: store, clipboard: clipboard, launcher: launcher, pane: pane)
-                .frame(minWidth: 680, maxWidth: .infinity, minHeight: 460, maxHeight: .infinity))
+                .frame(minWidth: 720, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity))
             // The window keeps its size when switching sections; each page scrolls inside it.
             hc.sizingOptions = []
             w.contentViewController = hc
-            w.setContentSize(NSSize(width: 760, height: 580))
+            w.setContentSize(NSSize(width: 820, height: 640))
             w.center()
             w.delegate = self
             settingsWindow = w

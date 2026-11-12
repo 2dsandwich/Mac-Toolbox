@@ -350,9 +350,9 @@ struct CopyMenu: View {
 
     var body: some View {
         Menu {
-            Button("Copy Notes") { doc.copy(.notes) }
-            Button("Copy Transcript") { doc.copy(.transcript) }
-            Button("Copy Everything") { doc.copy(.all) }
+            Button("Copy notes") { doc.copy(.notes) }
+            Button("Copy transcript") { doc.copy(.transcript) }
+            Button("Copy everything") { doc.copy(.all) }
         } label: {
             MeetingIcon(symbol: "doc.on.doc")
         }

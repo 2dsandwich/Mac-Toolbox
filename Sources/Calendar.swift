@@ -34,7 +34,8 @@ struct CalendarEvent: Identifiable, Equatable {
 
     /// "10:00 – 10:30".
     var timeRange: String {
-        start.formatted(date: .omitted, time: .shortened) + " – " + end.formatted(date: .omitted, time: .shortened)
+        if allDay { return "All day" }
+        return start.formatted(date: .omitted, time: .shortened) + " – " + end.formatted(date: .omitted, time: .shortened)
     }
 
     /// A video-call link in the event's URL, location or notes (in that order).
@@ -77,6 +78,8 @@ struct CalendarEvent: Identifiable, Equatable {
     @ObservationIgnored private var asking = false
     @ObservationIgnored private var demo = false
     @ObservationIgnored private var fetched = Date.distantPast
+    /// Events added while showing made-up ones (snapshots and tests).
+    @ObservationIgnored private var added: [CalendarEvent] = []
 
     private var eventStore: EKEventStore {
         if let store { return store }
@@ -175,6 +178,16 @@ struct CalendarEvent: Identifiable, Equatable {
         }
     }
 
+    /// Display asleep or screen locked: no minute ticks until it's back, then a catch-up and ticks on the minute again.
+    func pause(_ on: Bool) {
+        guard let t = ticker else { return }
+        if on { return t.fireDate = .distantFuture }
+        t.invalidate()
+        ticker = nil
+        startTicker()
+        reload()
+    }
+
     private func stop() {
         ticker?.invalidate()
         ticker = nil
@@ -190,7 +203,9 @@ struct CalendarEvent: Identifiable, Equatable {
         access = EKEventStore.authorizationStatus(for: .event)
         if google {
             let g = GoogleCalendar.shared
-            let list = g.calendars.map { Info(id: $0.id, title: $0.name, source: "", color: NSColor(hex: $0.color) ?? .systemBlue) }
+            // Each calendar's account only once there's more than one.
+            let many = Google.shared.emails.count > 1
+            let list = g.calendars.map { Info(id: $0.id, title: $0.name, source: many ? $0.account ?? "" : "", color: NSColor(hex: $0.color) ?? .systemBlue) }
             if list != calendars { calendars = list }
             let today = Calendar.current.startOfDay(for: now)
             let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today) ?? now
@@ -250,7 +265,10 @@ struct CalendarEvent: Identifiable, Equatable {
 
     /// Every event overlapping from..<to (all-day ones too) in the calendars switched on, for the Calendar mode.
     func range(from: Date, to: Date) -> [CalendarEvent] {
-        if demo { return Self.demoRange(from: from, to: to) }
+        if demo {
+            return (Self.demoRange(from: from, to: to) + added.filter { $0.start < to && $0.end > from })
+                .sorted { ($0.start, $0.allDay ? 0 : 1) < ($1.start, $1.allDay ? 0 : 1) }
+        }
         if google {
             return GoogleCalendar.shared.events(from: from, to: to, maxAge: 120)
                 .sorted { ($0.start, $0.allDay ? 0 : 1) < ($1.start, $1.allDay ? 0 : 1) }
@@ -301,12 +319,74 @@ struct CalendarEvent: Identifiable, Equatable {
         return list.sorted { ($0.start, $0.allDay ? 0 : 1) < ($1.start, $1.allDay ? 0 : 1) }
     }
 
+    // MARK: Adding
+
+    /// Where a new event goes: the first Google account's main calendar, else the Mac's default one.
+    var newEventCalendar: String? {
+        if demo { return "Work" }
+        if google { return GoogleCalendar.shared.home?.name }
+        return access == .fullAccess ? eventStore.defaultCalendarForNewEvents?.title : nil
+    }
+
+    /// Adds a timed event (only ever from a click or an Ask request). Without Google, the Mac's calendar asks for
+    /// access here the first time, never before.
+    func add(title: String, start: Date, minutes: Int, allDay: Bool = false) async throws -> CalendarEvent {
+        // All day: the whole of that day (its end is the day's last second, as events read back from calendars have).
+        let day = Calendar.current.startOfDay(for: start), nextDay = Calendar.current.date(byAdding: .day, value: 1, to: day)!
+        let start = allDay ? day : start
+        let end = allDay ? nextDay.addingTimeInterval(-1) : start.addingTimeInterval(Double(max(5, minutes)) * 60)
+        if demo {
+            let e = CalendarEvent(id: "demo-new-\(UUID().uuidString)", title: title, start: start, end: end, color: .systemBlue, allDay: allDay, calendar: "Work")
+            added.append(e)
+            if e.end > now, e.start < now.addingTimeInterval(86_400) { events = (events + [e]).sorted { $0.start < $1.start } }
+            CalendarBoard.shared.load(force: true)
+            return e
+        }
+        if google { return try await GoogleCalendar.shared.add(title, start: start, end: end, allDay: allDay) }
+        if access == .notDetermined {
+            _ = try? await eventStore.requestFullAccessToEvents()
+            store = nil
+            access = EKEventStore.authorizationStatus(for: .event)
+        }
+        guard access == .fullAccess || access == .writeOnly else {
+            throw AskTools.Problem("MONEY! can't add to the calendar (System Settings › Privacy & Security › Calendars, or sign in to Google in Settings).")
+        }
+        let e = EKEvent(eventStore: eventStore)
+        e.title = title
+        e.startDate = start
+        e.endDate = end
+        e.isAllDay = allDay
+        e.calendar = eventStore.defaultCalendarForNewEvents
+        try eventStore.save(e, span: .thisEvent)
+        reload()
+        CalendarBoard.shared.load(force: true)
+        return Self.make(e)
+    }
+
+    /// Takes an added event back off (Ask's Undo).
+    func remove(_ e: CalendarEvent) {
+        if demo {
+            added.removeAll { $0.id == e.id }
+            events.removeAll { $0.id == e.id }
+            CalendarBoard.shared.load(force: true)
+        } else if google {
+            Task { await GoogleCalendar.shared.remove(e.id) }
+        } else if let ek = eventStore.event(withIdentifier: e.id) {
+            try? eventStore.remove(ek, span: .thisEvent)
+            reload()
+            CalendarBoard.shared.load(force: true)
+        }
+    }
+
     /// Made-up events in place of EventKit, for the off-screen snapshots.
     func useDemo(_ list: [CalendarEvent]) {
         demo = true
         stop()
         now = Date()
         events = list
+        calendars = [Info(id: "demo-work", title: "Work", source: "ben@example.com", color: .systemBlue),
+                     Info(id: "demo-personal", title: "Personal", source: "ben@example.com", color: .systemGreen),
+                     Info(id: "demo-festival", title: "Festival crew", source: "ben@festival.example", color: .systemOrange)]
         onChange?()
     }
 

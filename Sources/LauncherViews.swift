@@ -42,7 +42,7 @@ struct LauncherRoot: View {
         let open = model.presented
         let base = scoped ? s.scopedCornerRadius : s.cornerRadius
         // With result rows showing, the card's corners follow the rows' curve (concentric), so they line up.
-        let rowRadius = max(4, min(base - listInset, s.rowHeight / 2))
+        let rowRadius = max(4, min(base - listInset, s.rowSize / 2))
         let listed = !model.items.isEmpty && !model.scope.isPanel && model.scope != .clipboard
         let radius = listed ? min(base, rowRadius + listInset) : base
         let fullWidth = model.width(s)
@@ -53,7 +53,7 @@ struct LauncherRoot: View {
         let width = tabs ? max(s.barHeight * 2, fullWidth - tabsRoom) : fullWidth
         let height = model.cardHeight(s)
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let resize: Animation? = s.animations ? .smooth(duration: 0.24) : nil
+        let resize: Animation? = s.animations ? .smooth(duration: 0.24 / s.animationSpeed) : nil
         VStack(spacing: 0) {
             SearchBar(model: model, s: s, onTab: onTab, textActions: textActions, meetingActions: meetingActions, onPomodoro: onPomodoro, onAnswerAction: onAnswerAction,
                       onTimerStart: onTimerStart)
@@ -79,6 +79,9 @@ struct LauncherRoot: View {
                 } else if model.scope == .agents {
                     AgentsPanel(radius: radius)
                         .transition(.opacity)
+                } else if model.scope == .timetable {
+                    TimetablePanel(radius: radius)
+                        .transition(.opacity)
                 } else if model.scope == .dictation {
                     DictationPanel(model: model, s: s, radius: radius)
                         .transition(.opacity)
@@ -101,7 +104,7 @@ struct LauncherRoot: View {
                         .frame(height: Metrics.clipboardList(s))
                         .transition(.opacity)
                 } else if model.scope == .meeting, model.meetingListMode {
-                    MeetingHome(model: model, s: s, radius: max(4, min(radius - listInset, s.rowHeight / 2)), onActivate: onActivate)
+                    MeetingHome(model: model, s: s, radius: max(4, min(radius - listInset, s.rowSize / 2)), onActivate: onActivate)
                         .transition(.opacity)
                 } else if model.scope == .meeting, let meeting = model.meeting {
                     MeetingView(meeting: meeting, query: model.query, s: s, chat: model.meetingCopilot)
@@ -110,8 +113,10 @@ struct LauncherRoot: View {
                     LibraryGrid(model: model, s: s, radius: max(8, min(radius - listInset, 18)), onActivate: onActivate)
                         .transition(.opacity)
                 } else if !model.items.isEmpty {
-                    ResultList(model: model, s: s, radius: max(4, min(radius - listInset, s.rowHeight / 2)), onActivate: onActivate, onAction: onAnswerAction)
+                    ResultList(model: model, s: s, radius: max(4, min(radius - listInset, s.rowSize / 2)), onActivate: onActivate, onAction: onAnswerAction)
                         .transition(.opacity)
+                } else if model.noMatches {
+                    EmptyLine(text: "No matches")
                 }
             }
         }
@@ -157,7 +162,7 @@ private struct CardBackground: View {
                 Color.clear.glassEffect((s.glass == .clear ? Glass.clear : Glass.regular).tint(tint(dark)), in: shape)
             }
             // "Darkness": black over the glass (lighter touch in light mode so dark text stays readable).
-            shape.fill(Color.black.opacity(dark ? s.darkness : s.darkness * 0.25))
+            shape.fill(Color.black.opacity(dark ? s.shade : s.shade * 0.25))
             shape.fill(scopeShade).opacity(scoped && s.shadeScopes ? 1 : 0)
         }
     }
@@ -223,22 +228,25 @@ private struct SearchBar: View {
     var body: some View {
         let chipHeight = min(44, s.barHeight - 16)
         let chipPad = (s.barHeight - chipHeight) / 2
-        let showChip = [.switcher, .web, .library, .clipboard, .weather, .assistant].contains(model.scope) || model.scope.isPanel
+        let extra = LauncherModel.extraScopes.contains(model.scope)
+        let showChip = [.switcher, .web, .library, .clipboard, .weather, .assistant].contains(model.scope) || model.scope.isPanel || extra
+        // Web and Menu name the app they belong to.
+        let menuApp = model.scope == .menu ? MenuCommands.shared.label(model.frontApp) : nil
         HStack(spacing: 12) {
             if showChip {
                 ScopeChip(scope: model.scope, height: chipHeight, radius: max(4, s.scopedCornerRadius - chipPad),
-                          title: model.scope == .web ? model.browser?.name : nil,
-                          icon: model.scope == .web ? model.browser.map { IconCache.icon(forPath: $0.path) } : nil)
+                          title: model.scope == .web ? model.browser?.name : menuApp?.0,
+                          icon: model.scope == .web ? model.browser.map { IconCache.icon(forPath: $0.path) } : menuApp?.1)
             }
             ZStack(alignment: .leading) {
-                SearchField(model: model, fontSize: s.fontSize, placeholder: model.placeholder(s))
+                SearchField(model: model, font: Fonts.ns(.bar, s.fontSize), placeholder: model.placeholder(s))
                 if !model.ghost.isEmpty {
                     // The typed part is laid out invisibly so the ghost starts exactly where the text ends.
                     HStack(spacing: 0) {
                         Text(model.query).hidden()
                         Text(model.ghost).foregroundStyle(Color(nsColor: .tertiaryLabelColor))
                     }
-                    .font(.system(size: s.fontSize))
+                    .font(.app(.bar, s.fontSize))
                     .lineLimit(1)
                     .fixedSize()
                     .offset(x: fieldTextInset)
@@ -271,6 +279,9 @@ private struct SearchBar: View {
                     }
                 }
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["panel"] = $0 }
+            } else if extra {
+                BarControls { ExtraControls(model: model) }
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.controlFrames["panel"] = $0 }
             } else if let timer = timerAnswer {
                 BarControls {
                     PillButton(title: "Start", symbol: "play.fill", tint: .orange, help: "Start the timer (↩)") { onAnswerAction(timer.action) }
@@ -279,13 +290,48 @@ private struct SearchBar: View {
             }
         }
         .padding(.leading, showChip ? chipPad : textLeft - fieldTextInset)
-        .padding(.trailing, model.scope.isPanel || model.scope == .assistant || timerAnswer != nil ? chipPad : textLeft)
+        .padding(.trailing, model.scope.isPanel || model.scope == .assistant || timerAnswer != nil || extra ? chipPad : textLeft)
         .frame(height: s.barHeight)
         .contentShape(Rectangle())
         .onHover { model.hoverTabs("bar", $0) }
         .onChange(of: model.presented) { _, open in
             if !open { model.resetTabHover() } // the pointer may leave while the popup is hidden
         }
+    }
+}
+
+/// The newer list scopes' buttons, each naming its key: they do what ↩ and ⌘↩ do to the selected row.
+private struct ExtraControls: View {
+    let model: LauncherModel
+
+    var body: some View {
+        // Only with a row they can act on (no matches, "No app in front" or the save-snippet row have none).
+        let row = model.selected.map { !["snip-add", "menu-none", "menu-ax"].contains($0.id) } ?? false
+        switch model.scope {
+        case .files where row:
+            PillButton(title: nil, symbol: "eye", help: "Quick Look (Space after ↑↓, or ⌘Y)") { run(look: true) }
+            PillButton(title: "Show in Finder", symbol: "folder", help: "Show in Finder (⌘↩)") { run(.command) }
+        case .processes where row:
+            PillButton(title: "Quit", symbol: "xmark", help: "Quit (↩)") { run() }
+            PillButton(title: "Force Quit", symbol: "xmark.octagon.fill", tint: .red, help: "Force quit (⌘↩)") { run(.command) }
+        case .snippets where row:
+            PillButton(title: nil, symbol: "doc.on.doc", help: "Copy (⌘↩)") { run(.command) }
+            PillButton(title: "Paste", symbol: "arrow.turn.down.left", help: "Paste into the app you were in (↩)") { run() }
+        case .menu where row:
+            PillButton(title: "Run", symbol: "arrow.turn.down.left", help: "Run the command (↩)") { run() }
+        case .colors:
+            PillButton(title: "Pick", symbol: "eyedropper", tint: .pink, help: "Pick a color from the screen and copy its HEX (↩ on Pick a color)") {
+                if let i = model.items.firstIndex(where: { $0.id == "pick" }) { model.selection = i }
+                run()
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private func run(_ flags: NSEvent.ModifierFlags = [], look: Bool = false) {
+        guard let launcher = (NSApp.delegate as? AppDelegate)?.launcher, let item = model.selected else { return }
+        if look, let url = item.url { QuickLook.shared.show(url, above: launcher.panel.level) } else { launcher.activate(item, flags: flags) }
     }
 }
 
@@ -377,7 +423,7 @@ private struct ScopeChip: View {
 
 struct SearchField: NSViewRepresentable {
     let model: LauncherModel
-    let fontSize: Double
+    let font: NSFont
     let placeholder: String
 
     func makeNSView(context: Context) -> NSTextField {
@@ -398,12 +444,10 @@ struct SearchField: NSViewRepresentable {
     }
 
     func updateNSView(_ f: NSTextField, context: Context) {
-        let font = NSFont.systemFont(ofSize: fontSize)
         if f.font != font { f.font = font }
         let ph = NSAttributedString(string: placeholder, attributes: [.font: font, .foregroundColor: placeholderInk])
-        if f.placeholderAttributedString?.string != placeholder || f.placeholderAttributedString?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont != font {
-            f.placeholderAttributedString = ph
-        }
+        // Compared whole: reading the font at index 0 of the scopes' empty placeholder threw (⌘E on a task crashed the app).
+        if f.placeholderAttributedString != ph { f.placeholderAttributedString = ph }
         if f.stringValue != model.query { f.stringValue = model.query }
         model.field = f
     }
@@ -434,6 +478,8 @@ struct ResultList: View {
     let radius: CGFloat
     let onActivate: (Int) -> Void
     var onAction: (Answer.Action) -> Void = { _ in }
+    /// The room it has, when that's set by its container rather than by how many rows there are.
+    var height: CGFloat?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -453,7 +499,7 @@ struct ResultList: View {
                 .padding(.horizontal, listInset)
             }
             .scrollIndicators(.never)
-            .frame(height: model.visibleListHeight(s))
+            .frame(height: height ?? model.visibleListHeight(s), alignment: .top)
             .padding(.bottom, listInset - rowGap)
             .onChange(of: model.selection) { _, i in proxy.scrollTo(i) }
         }
@@ -482,9 +528,9 @@ private struct ResultRow: View {
         HStack(spacing: 11) {
             if s.showIcons { ItemIcon(item: item, size: iconSize, corner: max(4, radius - iconInset)) }
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.title).font(.system(size: 15)).lineLimit(1)
-                if let sub = item.subtitle, s.rowHeight >= 38 {
-                    Text(sub).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                Text(item.title).font(.app(.rows, 15)).lineLimit(1)
+                if let sub = item.subtitle, s.rowSize >= 38 {
+                    Text(sub).font(.app(.rows, 11.5)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             Spacer(minLength: 8)
@@ -493,22 +539,22 @@ private struct ResultRow: View {
             }
             if s.showHints {
                 if let word = item.keyword {
-                    Text(word).font(.system(size: 11.5, weight: .medium)).foregroundStyle(.tertiary)
+                    Text(word).font(.app(.rows, 11.5, weight: .medium)).foregroundStyle(.tertiary)
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Capsule().fill(Color.primary.opacity(0.07)))
                 }
             }
         }
         .padding(.horizontal, s.showIcons ? iconInset : 13)
-        .frame(height: s.rowHeight)
+        .frame(height: s.rowSize)
         .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(selected ? selectedFill : hovered ? hoverFill : .clear))
         .contentShape(Rectangle())
     }
 
     /// The icon sits the same distance from the row's top, bottom and leading edge, and its corners follow the row's.
-    private var iconInset: CGFloat { (s.rowHeight - iconSize) / 2 }
+    private var iconInset: CGFloat { (s.rowSize - iconSize) / 2 }
 
-    private var iconSize: CGFloat { min(36, max(16, s.rowHeight * 0.62)) }
+    private var iconSize: CGFloat { min(36, max(16, s.rowSize * 0.62)) }
 
     private var hint: String {
         switch item.kind {
@@ -603,10 +649,7 @@ private struct LibraryGrid: View {
 
     var body: some View {
         if model.items.isEmpty {
-            Text("No apps match.")
-                .font(.system(size: 13)).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 26)
-                .frame(height: 44)
+            EmptyLine(text: "No matches")
         } else {
             let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: model.libraryColumns)
             ScrollViewReader { proxy in
@@ -651,7 +694,7 @@ private struct LibraryTile: View {
             }
             .frame(width: 56, height: 56)
             Text(item.title)
-                .font(.system(size: 11.5))
+                .font(.app(.rows, 11.5))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .padding(.horizontal, 6)
@@ -665,6 +708,28 @@ private struct LibraryTile: View {
     }
 }
 
+/// A list with nothing to show: one line under the bar, lined up with the typed text, and the obvious action if there is one.
+struct EmptyLine<Action: View>: View {
+    let text: String
+    @ViewBuilder var action: () -> Action
+
+    var body: some View {
+        HStack {
+            Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            action()
+        }
+        .padding(.leading, textLeft)
+        .padding(.trailing, listInset)
+        .frame(height: 32) // a button's height, then the card's inset under it
+        .padding(.bottom, listInset)
+    }
+}
+
+extension EmptyLine where Action == EmptyView {
+    init(text: String) { self.init(text: text) { EmptyView() } }
+}
+
 // MARK: Clipboard
 
 private struct ClipboardArea: View {
@@ -676,35 +741,39 @@ private struct ClipboardArea: View {
 
     var body: some View {
         let height = Metrics.clipboardList(s) - (listInset - rowGap)
-        let radius = max(4, min(s.scopedCornerRadius - listInset, s.rowHeight / 2))
+        let radius = max(4, min(s.scopedCornerRadius - listInset, s.rowSize / 2))
+        if model.items.isEmpty {
+            EmptyLine(text: !clipboard.clips.isEmpty ? "No matches" : s.clipboardEnabled ? "Nothing copied yet" : "Clipboard history is off") {
+                if !s.clipboardEnabled { PillButton(title: "Turn On", symbol: "power") { Store.shared.settings.clipboardEnabled = true } }
+            }
+        } else {
+            list(height: height, radius: radius)
+        }
+    }
+
+    private func list(height: CGFloat, radius: CGFloat) -> some View {
         HStack(spacing: 0) {
             Group {
-                if model.items.isEmpty {
-                    Text(clipboard.clips.isEmpty ? (s.clipboardEnabled ? "Nothing copied yet" : "Clipboard history is off in Settings") : "No matches")
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView(.vertical) {
-                            LazyVStack(spacing: 0) {
-                                ForEach(model.items.indices, id: \.self) { i in
-                                    if case .clip(let c) = model.items[i].kind {
-                                        ClipRow(clip: c, clipboard: clipboard, selected: i == model.selection, hovered: i == model.hovered,
-                                                s: s, radius: radius, onDelete: { actions.delete(c.id) })
-                                            .padding(.vertical, rowGap)
-                                            .id(i)
-                                            .onTapGesture { actions.copy(c.id) } // a click copies it (↩ still pastes)
-                                            .onHover { inside in
-                                                if inside { model.hovered = i } else if model.hovered == i { model.hovered = nil }
-                                            }
-                                    }
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(model.items.indices, id: \.self) { i in
+                                if case .clip(let c) = model.items[i].kind {
+                                    ClipRow(clip: c, clipboard: clipboard, selected: i == model.selection, hovered: i == model.hovered,
+                                            s: s, radius: radius, onDelete: { actions.delete(c.id) })
+                                        .padding(.vertical, rowGap)
+                                        .id(i)
+                                        .onTapGesture { actions.copy(c.id) } // a click copies it (↩ still pastes)
+                                        .onHover { inside in
+                                            if inside { model.hovered = i } else if model.hovered == i { model.hovered = nil }
+                                        }
                                 }
                             }
-                            .padding(.horizontal, listInset)
                         }
-                        .scrollIndicators(.never)
-                        .onChange(of: model.selection) { _, i in proxy.scrollTo(i) }
+                        .padding(.horizontal, listInset)
                     }
+                    .scrollIndicators(.never)
+                    .onChange(of: model.selection) { _, i in proxy.scrollTo(i) }
                 }
             }
             .frame(width: s.showPreview ? model.width(s) * 0.44 : nil)
@@ -738,7 +807,7 @@ private struct ClipRow: View {
     var body: some View {
         HStack(spacing: 10) {
             if s.showIcons { icon.frame(width: iconSize, height: iconSize) }
-            Text(clip.title.isEmpty ? " " : clip.title).font(.system(size: 14)).lineLimit(1)
+            Text(clip.title.isEmpty ? " " : clip.title).font(.app(.rows, 14)).lineLimit(1)
             Spacer(minLength: 6)
             if clip.pinned { Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(.secondary) }
             if hovered {
@@ -753,16 +822,16 @@ private struct ClipRow: View {
                 .buttonStyle(.plain)
                 .help("Delete from history (⌘⌫)")
             } else {
-                Text(shortAge(clip.date)).font(.system(size: 11.5)).foregroundStyle(.tertiary)
+                Text(shortAge(clip.date)).font(.app(.rows, 11.5)).foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 12)
-        .frame(height: s.rowHeight)
+        .frame(height: s.rowSize)
         .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(selected ? selectedFill : hovered ? hoverFill : .clear))
         .contentShape(Rectangle())
     }
 
-    private var iconSize: CGFloat { min(30, max(14, s.rowHeight * 0.5)) }
+    private var iconSize: CGFloat { min(30, max(14, s.rowSize * 0.5)) }
 
     @ViewBuilder private var icon: some View {
         if clip.kind == .image, let img = clipboard.thumbnail(clip) {

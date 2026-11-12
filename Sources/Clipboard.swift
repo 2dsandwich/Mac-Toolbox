@@ -36,6 +36,8 @@ struct Clip: Codable, Identifiable, Equatable {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var lastChange = NSPasteboard.general.changeCount
     @ObservationIgnored private var saveScheduled = false
+    /// Off in the snapshots, so made-up clips never reach the real history.
+    @ObservationIgnored private var persist = true
     @ObservationIgnored let dir: URL
     @ObservationIgnored private let thumbs = NSCache<NSString, NSImage>()
 
@@ -106,7 +108,7 @@ struct Clip: Codable, Identifiable, Equatable {
         if store.settings.clipboardEnabled {
             if timer == nil {
                 lastChange = NSPasteboard.general.changeCount
-                schedule(every: 0.5)
+                schedule(every: 1)
             }
         } else {
             timer?.invalidate()
@@ -115,7 +117,7 @@ struct Clip: Codable, Identifiable, Equatable {
         prune()
     }
 
-    /// Copies only happen while you're using the Mac, so the watch is quick then (every 0.5 s) and slow after 30 s
+    /// Copies only happen while you're using the Mac, so the watch is quick then (every second) and slow after 30 s
     /// with no keyboard or mouse (every 3 s, for apps that copy on their own). Opening the popup checks at once.
     private func schedule(every interval: TimeInterval) {
         timer?.invalidate()
@@ -127,11 +129,14 @@ struct Clip: Codable, Identifiable, Equatable {
         timer = t
     }
 
+    /// Display asleep or screen locked: no watching until it's back, then a look at once (for anything copied meanwhile).
+    func pause(_ on: Bool) { timer?.fireDate = on ? .distantFuture : Date() }
+
     func poll() {
         let pb = NSPasteboard.general
         if let t = timer {
             let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
-            let want: TimeInterval = idle > 30 ? 3 : 0.5
+            let want: TimeInterval = idle > 30 ? 3 : 1
             if t.timeInterval != want { schedule(every: want) }
         }
         guard pb.changeCount != lastChange else { return }
@@ -291,12 +296,23 @@ struct Clip: Codable, Identifiable, Equatable {
         saveScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, self.persist else { return }
                 self.saveScheduled = false
                 let data = try? JSONEncoder().encode(self.clips)
                 let url = self.indexURL
                 DispatchQueue.global(qos: .utility).async { try? data?.write(to: url, options: .atomic) }
             }
+        }
+    }
+
+    /// Made-up clips for the snapshots (`empty`: none yet); never saved.
+    func useDemo(empty: Bool) {
+        persist = false
+        let demo = [("Room 4B, the code is 2580", "com.apple.Notes"), ("https://example.com/tickets/spring-tour", "com.apple.Safari"),
+                    ("Sponsor deck: logos due Friday", "com.apple.mail"), ("ben@example.com", "com.apple.Notes"),
+                    ("let total = items.reduce(0, +)", "com.apple.dt.Xcode"), ("1-2-3 Jingumae, Shibuya, Tokyo", "com.apple.Maps")]
+        clips = empty ? [] : demo.enumerated().map { n, c in
+            Clip(kind: .text, text: c.0, hash: "demo\(n)", date: Date().addingTimeInterval(Double(-n) * 1500 - 60), sourceBundleID: c.1, pinned: n == 3)
         }
     }
 

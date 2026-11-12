@@ -29,6 +29,8 @@ import Observation
     @ObservationIgnored private var watchers = 0
     /// Keeps checking in the background while some app is turned down, so it applies when that app starts playing.
     @ObservationIgnored private var keeper: Timer?
+    /// The display is asleep or the screen locked: the keeper waits (`pause`).
+    @ObservationIgnored private var paused = false
 
     init() {
         let d = UserDefaults.standard
@@ -49,7 +51,7 @@ import Observation
     }
 
     private func keepApplying() {
-        let needed = !volumes.isEmpty || !muted.isEmpty
+        let needed = !paused && (!muted.isEmpty || volumes.values.contains { !Self.isDefault($0) })
         if needed, keeper == nil {
             let t = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
@@ -64,6 +66,12 @@ import Observation
             keeper?.invalidate()
             keeper = nil
         }
+    }
+
+    /// Display asleep or screen locked: no background checks until it's back.
+    func pause(_ on: Bool) {
+        paused = on
+        keepApplying()
     }
 
     // MARK: Watching (while the mixer is on screen)
@@ -89,13 +97,18 @@ import Observation
         masterMuted = Self.outputMuted()
         var byApp: [String: App] = [:]
         let own = Bundle.main.bundleIdentifier ?? ""
-        let regular = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+        let all = NSWorkspace.shared.runningApplications
+        let regular = all.filter { $0.activationPolicy == .regular }
+        // The workspace's own app objects (their details are kept), and the icons already made: building them again
+        // every refresh was most of its cost.
+        let byPID = Dictionary(all.map { ($0.processIdentifier, $0) }) { a, _ in a }
+        let icons = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0.icon) })
         for obj in Self.processObjects() {
             guard let bundle = Self.string(obj, kAudioProcessPropertyBundleID), !bundle.isEmpty, bundle != own else { continue }
             let pid: pid_t = Self.value(obj, kAudioProcessPropertyPID) ?? 0
             let running: UInt32 = Self.value(obj, kAudioProcessPropertyIsRunningOutput) ?? 0
             // Helpers ("com.google.Chrome.helper") belong to the app whose id they start with.
-            let owner = NSRunningApplication(processIdentifier: pid).flatMap { $0.activationPolicy == .regular ? $0 : nil }
+            let owner = byPID[pid].flatMap { $0.activationPolicy == .regular ? $0 : nil }
                 ?? regular.first { bundle.hasPrefix(($0.bundleIdentifier ?? "\u{0}") + ".") }
             guard let app = owner, let id = app.bundleIdentifier else { continue }
             if var a = byApp[id] {
@@ -103,15 +116,15 @@ import Observation
                 a.playing = a.playing || running != 0
                 byApp[id] = a
             } else {
-                byApp[id] = App(id: id, name: app.localizedName ?? id, icon: app.icon ?? NSImage(), processes: [obj], playing: running != 0)
+                byApp[id] = App(id: id, name: app.localizedName ?? id, icon: icons[id] ?? app.icon ?? NSImage(), processes: [obj], playing: running != 0)
             }
         }
         // Every open app, even quiet ones: a level set now applies once it makes sound.
         for app in regular {
             guard let id = app.bundleIdentifier, id != own, byApp[id] == nil else { continue }
-            byApp[id] = App(id: id, name: app.localizedName ?? id, icon: app.icon ?? NSImage(), processes: [], playing: false)
+            byApp[id] = App(id: id, name: app.localizedName ?? id, icon: icons[id] ?? app.icon ?? NSImage(), processes: [], playing: false)
         }
-        func rank(_ a: App) -> Int { a.playing ? 0 : (volumes[a.id] != nil || muted.contains(a.id)) ? 1 : 2 }
+        func rank(_ a: App) -> Int { a.playing ? 0 : (volume(a.id) != 1 || muted.contains(a.id)) ? 1 : 2 }
         apps = byApp.values.sorted { (rank($0), $0.name.lowercased()) < (rank($1), $1.name.lowercased()) }
         for a in apps where !a.processes.isEmpty {
             let wanted = muted.contains(a.id) || abs(volume(a.id) - 1) > 0.001
@@ -128,10 +141,15 @@ import Observation
     /// An app can be boosted to twice its own level.
     static let maxVolume: Float = 2
 
-    func volume(_ id: String) -> Float { volumes[id] ?? 1 }
+    /// A level this close to 100% is 100%: a slider seldom lands on it exactly, and anything kept here keeps a tap and
+    /// the background keeper going. Levels saved like that before count as none too.
+    static func isDefault(_ v: Float) -> Bool { abs(v - 1) < 0.02 }
+
+    func volume(_ id: String) -> Float { volumes[id].flatMap { Self.isDefault($0) ? nil : $0 } ?? 1 }
 
     func setVolume(_ v: Float, for id: String) {
-        volumes[id] = min(Self.maxVolume, max(0, v))
+        let v = min(Self.maxVolume, max(0, v))
+        volumes[id] = Self.isDefault(v) ? nil : v
         apply(id)
         keepApplying()
     }

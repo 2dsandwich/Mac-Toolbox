@@ -299,7 +299,7 @@ import Observation
     }
 
     /// Made-up meetings for the off-screen snapshots.
-    static func demoFolder() -> URL {
+    static func demoFolder(many: Bool = false) -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("money-demo-meetings")
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -316,7 +316,13 @@ import Observation
             (-122, "Artist call", ["Gaku Ono"], "## Summary\n- Set length is 45 minutes\n- 来週リハーサルの日程を決める",
              "**Others** (01:00): Forty five minutes works."),
         ]
-        for (hours, title, people, notes, transcript) in samples {
+        // `--many`: a long list (a fortnight of syncs), to see it scroll.
+        var extra: [(Double, String, [String], String, String)] = []
+        for n in 1...16 where many {
+            let title = n % 2 == 0 ? "Daily standup" : "Production check-in"
+            extra.append((Double(-130 - n * 20), title, ["Chris Park"], "## Done\n- Item \(n)", "**Others** (00:05): Fine."))
+        }
+        for (hours, title, people, notes, transcript) in samples + extra {
             let date = now.addingTimeInterval(hours * 3600)
             let doc = "---\nduration: 30 min\nattendees: \(people.joined(separator: ", "))\n---\n\n# \(title)\n\n\(notes)\n\n---\n\n## Transcript\n\n\(transcript)\n"
             try? doc.write(to: dir.appendingPathComponent("\(f.string(from: date)) \(title).md"), atomically: true, encoding: .utf8)

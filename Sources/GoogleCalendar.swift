@@ -1,7 +1,8 @@
 import AppKit
 
-// Events from the Google calendars you show (all-day ones, colours, people, places, Meet links), kept on disk so the
-// notch and the Calendar mode start at once and work offline. CalendarEvents reads from here while you're signed in.
+// Events from the Google calendars you show, every account's together (all-day ones, colours, people, places, Meet
+// links), kept on disk so the notch and the Calendar mode start at once and work offline. CalendarEvents reads from here
+// while you're signed in.
 
 @MainActor final class GoogleCalendar {
     static let shared = GoogleCalendar()
@@ -11,6 +12,8 @@ import AppKit
         var name: String
         var color: String
         var primary = false
+        /// The account it's listed in (nil in caches from before there were several: the first account).
+        var account: String?
     }
 
     /// An event as cached (colours as hex, so it can go to disk).
@@ -138,19 +141,25 @@ import AppKit
         }
         // Offline (nothing came back): keep what's cached.
         guard results.contains(where: { $0 != nil }) else { return }
-        let found = results.compactMap { $0 }.flatMap { $0 }
+        // An event both accounts are invited to comes once.
+        var seen = Set<String>()
+        let found = results.compactMap { $0 }.flatMap { $0 }.filter { seen.insert("\($0.id)@\($0.start.timeIntervalSince1970)").inserted }
         events.removeAll { $0.start < to && $0.end > from }
         events += found
         spans.removeAll { $0.from >= from && $0.to <= to }
         spans.append(Span(from: from, to: to, at: Date()))
-        save()
-        CalendarEvents.shared.reload()
-        CalendarBoard.shared.load(force: true)
+        changed()
     }
 
+    /// Every account's calendars, a calendar shared with two of them listed once.
     private func listCalendars() async throws {
-        let json = try await Google.shared.json(URL(string: "https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader&maxResults=250")!)
-        calendars = Self.calendars(json)
+        var all: [Cal] = []
+        for email in Google.shared.emails {
+            let json = try await Google.shared.json(URL(string: "https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader&maxResults=250")!,
+                                                    account: email)
+            all += Self.calendars(json).filter { c in !all.contains { $0.id == c.id } }.map { var c = $0; c.account = email; return c }
+        }
+        calendars = all
         listedAt = Date()
     }
 
@@ -170,11 +179,11 @@ import AppKit
         var page = ""
         let iso = ISO8601DateFormatter()
         repeat {
-            var u = URLComponents(string: "https://www.googleapis.com/calendar/v3/calendars/\(c.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/@#"))) ?? c.id)/events")!
+            var u = URLComponents(url: eventsURL(c.id), resolvingAgainstBaseURL: false)!
             u.queryItems = [.init(name: "timeMin", value: iso.string(from: from)), .init(name: "timeMax", value: iso.string(from: to)),
                             .init(name: "singleEvents", value: "true"), .init(name: "orderBy", value: "startTime"), .init(name: "maxResults", value: "250")]
             if !page.isEmpty { u.queryItems?.append(.init(name: "pageToken", value: page)) }
-            guard let url = u.url, let data = try? await Google.shared.call(url), let r = try? JSONDecoder().decode(Page.self, from: data) else { return nil }
+            guard let url = u.url, let data = try? await Google.shared.call(url, account: c.account), let r = try? JSONDecoder().decode(Page.self, from: data) else { return nil }
             out += r.items.compactMap { map($0, c) }
             page = r.nextPageToken ?? ""
         } while !page.isEmpty && out.count < 2000
@@ -182,6 +191,52 @@ import AppKit
     }
 
     private struct Page: Decodable { var items: [GEvent] = []; var nextPageToken: String? }
+
+    private static func eventsURL(_ calendar: String) -> URL {
+        URL(string: "https://www.googleapis.com/calendar/v3/calendars/\(calendar.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/@#"))) ?? calendar)/events")!
+    }
+
+    /// The calendar new events go to: the first account's main one.
+    var home: Cal? { calendars.first(where: \.primary) ?? calendars.first }
+
+    /// Adds a timed event to the first account's main calendar. A 403 means that account signed in before MONEY!
+    /// asked to add events: it's flagged to sign in again (Settings › Google), never signed out.
+    func add(_ title: String, start: Date, end: Date, allDay: Bool = false) async throws -> CalendarEvent {
+        if calendars.isEmpty { try? await listCalendars() }
+        guard let c = home else { throw Google.Failure.signedOut }
+        let iso = ISO8601DateFormatter()
+        // All day: dates only, the end being the day after (Google's end date is exclusive).
+        let day = DateFormatter()
+        day.dateFormat = "yyyy-MM-dd"
+        let body: [String: Any] = allDay
+            ? ["summary": title, "start": ["date": day.string(from: start)], "end": ["date": day.string(from: end.addingTimeInterval(1))]]
+            : ["summary": title, "start": ["dateTime": iso.string(from: start)], "end": ["dateTime": iso.string(from: end)]]
+        let data: Data
+        do {
+            data = try await Google.shared.call(Self.eventsURL(c.id), method: "POST", body: body, account: c.account)
+        } catch Google.Failure.http(403) {
+            Google.shared.needsSignIn(c.account ?? Google.shared.emails.first ?? "")
+            throw Google.Failure.denied("Google needs you to sign in again before MONEY! can add events.")
+        }
+        guard let e = try? JSONDecoder().decode(GEvent.self, from: data), let made = Self.map(e, c) else { throw Google.Failure.http(0) }
+        events.append(made)
+        changed()
+        return made.event
+    }
+
+    /// Takes an event back off its calendar (Ask's Undo).
+    func remove(_ id: String) async {
+        guard let e = events.first(where: { $0.id == id }), let c = calendars.first(where: { $0.id == e.calendarId }) else { return }
+        _ = try? await Google.shared.call(Self.eventsURL(c.id).appendingPathComponent(id), method: "DELETE", account: c.account)
+        events.removeAll { $0.id == id }
+        changed()
+    }
+
+    private func changed() {
+        save()
+        CalendarEvents.shared.reload()
+        CalendarBoard.shared.load(force: true)
+    }
 
     /// Google's event → MONEY!'s. Skips cancelled and declined ones and working-location markers.
     static func map(_ e: GEvent, _ c: Cal) -> Stored? {

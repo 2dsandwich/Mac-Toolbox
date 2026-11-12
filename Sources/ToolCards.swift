@@ -586,9 +586,10 @@ private struct ColorCard: View {
                     .font(.system(size: 15, weight: .semibold))
                 }
                 .frame(width: 120, height: 86)
-            VStack(alignment: .leading, spacing: 6) {
+            // HEX and RGB side by side, then HSL and the long SwiftUI value on rows of their own (it was cut off), as tall as the swatch.
+            VStack(alignment: .leading, spacing: 5) {
                 ChipRow(chips: Array(chips.prefix(2)), onAction: onAction)
-                ChipRow(chips: Array(chips.dropFirst(2)), onAction: onAction)
+                ForEach(chips.indices.dropFirst(2), id: \.self) { ChipRow(chips: [chips[$0]], onAction: onAction) }
             }
         }
     }

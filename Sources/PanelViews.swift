@@ -55,7 +55,7 @@ struct TextControls: View {
         if let c = codes.first {
             PillButton(title: c.url != nil ? "Open QR link" : "Copy QR", symbol: "qrcode", tint: .green, help: c.payload) { actions.code(c) }
         }
-        PillButton(title: "Copy All", symbol: "doc.on.doc", help: "Copy every word (↩)") { actions.copyAll() }
+        PillButton(title: "Copy all", symbol: "doc.on.doc", help: "Copy every word (↩)") { actions.copyAll() }
         PillButton(title: nil, symbol: "viewfinder", help: "Capture another area (⌘3)") { actions.retake() }
     }
 }
@@ -196,10 +196,10 @@ struct MeetingControls: View {
 
     var body: some View {
         if let opened = model.openedMeeting {
-            PillButton(title: "All Meetings", symbol: "chevron.left", help: "Back to the list (⌫)") { onBack() }
+            PillButton(title: "All meetings", symbol: "chevron.left", help: "Back to the list (⌫)") { onBack() }
             documentButtons(opened)
         } else if model.meetingListMode {
-            PillButton(title: "New Meeting", symbol: "record.circle", tint: .red, help: "Start recording") { onNew() }
+            PillButton(title: "New meeting", symbol: "record.circle", tint: .red, help: "Start recording") { onNew() }
         } else {
             live
         }
@@ -295,23 +295,116 @@ struct MeetingHome: View {
     let onActivate: (Int) -> Void
 
     var body: some View {
+        // Nothing to list (or to chat about): one line, and New meeting in the bar.
+        if model.items.isEmpty {
+            EmptyLine(text: model.query.isEmpty ? "No meetings yet" : "No meetings match")
+        } else {
+            list
+        }
+    }
+
+    private var list: some View {
         let room = ExpandingChat.buttonSize(outerRadius: s.scopedCornerRadius, inset: PanelLayout.inset) + PanelLayout.inset
-        ZStack(alignment: .topLeading) {
-            if model.items.isEmpty {
-                Text(model.query.isEmpty ? "No meetings yet" : "No meetings match")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 26)
-                    .frame(height: Metrics.slot(s))
-            } else {
-                ResultList(model: model, s: s, radius: radius, onActivate: onActivate)
-                    .padding(.bottom, room)
+        // As tall as there's room for above the chat button: sized by its rows, a long list overflowed the
+        // panel and was centred, pushing the first rows up under the search bar.
+        let labels = Self.labels(model.items)
+        return MeetingList(model: model, s: s, radius: radius, labels: labels, onActivate: onActivate,
+                           height: min(model.visibleListHeight(s) + CGFloat(labels.count) * Self.labelHeight,
+                                       Metrics.clipboardList(s) - room - (Metrics.listInset - Metrics.rowGap)))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .overlay(alignment: .bottomTrailing) {
+                if let chat = model.allChat { ExpandingChat(copilot: chat, title: chat.title, outerRadius: s.scopedCornerRadius, inset: PanelLayout.inset) }
             }
+            .frame(height: Metrics.clipboardList(s))
+    }
+
+    static let labelHeight: CGFloat = 24
+
+    /// "Today" over the events still to come and "Recorded" over the saved meetings, when both are listed.
+    static func labels(_ items: [ResultItem]) -> [Int: String] {
+        guard let first = items.firstIndex(where: { if case .meetingFile = $0.kind { true } else { false } }), first > 0 else { return [:] }
+        return [0: "Today", first: "Recorded"]
+    }
+}
+
+/// The meetings as rows like the search bar's results, with the section labels between them.
+private struct MeetingList: View {
+    let model: LauncherModel
+    let s: Settings
+    let radius: CGFloat
+    let labels: [Int: String]
+    let onActivate: (Int) -> Void
+    let height: CGFloat
+    @State private var moreBelow = false
+
+    var body: some View {
+        let icon = min(36, max(16, s.rowSize * 0.62)), inset = (s.rowSize - icon) / 2
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.items.indices, id: \.self) { i in
+                        if let label = labels[i] {
+                            Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.primary.opacity(0.35))
+                                .padding(.horizontal, s.showIcons ? inset : 13).padding(.bottom, 3)
+                                .frame(height: MeetingHome.labelHeight, alignment: .bottom)
+                        }
+                        row(model.items[i], i, icon: icon, inset: inset)
+                            .padding(.vertical, Metrics.rowGap)
+                            .id(i)
+                            .onTapGesture { onActivate(i) }
+                            .onHover { inside in
+                                if inside { model.hovered = i } else if model.hovered == i { model.hovered = nil }
+                            }
+                    }
+                }
+                .padding(.horizontal, Metrics.listInset)
+            }
+            .scrollIndicators(.never)
+            .frame(height: height, alignment: .top)
+            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height < g.contentSize.height - 2 } action: { _, more in
+                moreBelow = more
+            }
+            // Fades out at the bottom while there's more below, as Tasks does.
+            .mask {
+                VStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: moreBelow ? 30 : 0)
+                }
+            }
+            .padding(.bottom, Metrics.listInset - Metrics.rowGap)
+            .onChange(of: model.selection) { _, i in proxy.scrollTo(i) }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay(alignment: .bottomTrailing) {
-            if let chat = model.allChat { ExpandingChat(copilot: chat, title: chat.title, outerRadius: s.scopedCornerRadius, inset: PanelLayout.inset) }
+    }
+
+    private func row(_ item: ResultItem, _ i: Int, icon: CGFloat, inset: CGFloat) -> some View {
+        let tile = RoundedRectangle(cornerRadius: max(4, radius - inset), style: .continuous)
+        return HStack(spacing: 11) {
+            if s.showIcons {
+                Group {
+                    if case .meetingEvent(let e) = item.kind {
+                        tile.fill(Color(nsColor: e.color).gradient)
+                            .overlay(Image(systemName: e.link != nil ? "video.fill" : "calendar").font(.system(size: icon * 0.4, weight: .semibold)))
+                    } else {
+                        tile.fill(Color.red.opacity(0.85).gradient)
+                            .overlay(Image(systemName: "waveform").font(.system(size: icon * 0.45, weight: .semibold)))
+                    }
+                }
+                .foregroundStyle(.white)
+                .frame(width: icon, height: icon)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.title).font(.system(size: 15)).lineLimit(1)
+                if let sub = item.subtitle, s.rowSize >= 38 {
+                    Text(sub).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
         }
-        .frame(height: Metrics.clipboardList(s))
+        .padding(.horizontal, s.showIcons ? inset : 13)
+        .frame(height: s.rowSize)
+        .background(RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(i == model.selection ? selectedFill : i == model.hovered ? hoverFill : .clear))
+        .contentShape(Rectangle())
     }
 }
 
@@ -356,7 +449,7 @@ struct NotesView: View, Animatable {
     @ViewBuilder private func text(_ md: String, shown: Double) -> some View {
         // One text for the whole thing, so a selection can run across every line.
         let text = Text(Self.attributed(md, mine: mine, spaced: spaced))
-            .font(.system(size: 13.5))
+            .font(.app(.answers, 13.5))
             .lineSpacing(5)
             .textRenderer(FadeIn(shown: shown))
             .contentTransition(.identity) // new text fades in by `shown`, never by cross-fading the whole thing
@@ -408,11 +501,11 @@ struct NotesView: View, Animatable {
                 out += faint("│\u{2002}") + inline(String(t.dropFirst(2)))
             } else if t.hasPrefix("# ") {
                 var h = Self.inline(String(t.dropFirst(2)))
-                h.font = .system(size: 18, weight: .semibold)
+                h.font = .app(.answers, 18, weight: .semibold)
                 out += h
             } else if t.hasPrefix("## ") || t.hasPrefix("### ") {
                 var h = Self.inline(String(t.drop { $0 == "#" }.dropFirst()))
-                h.font = .system(size: 12, weight: .semibold)
+                h.font = .app(.answers, 12, weight: .semibold)
                 h.foregroundColor = .secondary
                 out += h
             } else if t.hasPrefix("- [ ] ") || t.hasPrefix("- [x] ") || t.hasPrefix("- [X] ") {

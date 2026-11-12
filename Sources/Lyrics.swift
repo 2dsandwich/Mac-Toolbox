@@ -387,7 +387,7 @@ import SwiftUI
     /// off (under a second) eases there over half a second rather than jumping the words; a seek jumps.
     func playhead(_ date: Date) -> Double {
         let m = NowPlaying.shared
-        func at(_ r: Reading) -> Double { r.playing ? r.position + date.timeIntervalSince(r.updated) + Self.lead : r.position }
+        func at(_ r: Reading) -> Double { r.playing ? r.position + date.timeIntervalSince(r.updated) + Self.lead - Store.shared.settings.lyricsOffset : r.position }
         let now = Reading(position: m.position, updated: m.updated, playing: m.playing)
         if now != reading {
             let off = reading.map(at).map { $0 - at(now) } ?? 0
@@ -483,9 +483,9 @@ private struct LyricClock: Hashable {
 private let lyricMove = Animation.spring(response: 0.5, dampingFraction: 0.82)
 
 /// The closed notch's lyric line, or dots for a break.
-@ViewBuilder private func lyricText(_ cue: Lyrics.Cue, size: CGFloat = 12.5) -> some View {
+@MainActor @ViewBuilder private func lyricText(_ cue: Lyrics.Cue, size: CGFloat = 12.5) -> some View {
     if let text = cue.text {
-        Text(text).font(.system(size: size, weight: size > 13 ? .semibold : .medium)).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
+        Text(text).font(.app(.lyrics, size, weight: size > 13 ? .semibold : .medium)).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
     } else {
         Image(systemName: "ellipsis").font(.system(size: size - 1.5, weight: .bold)).foregroundStyle(.white.opacity(0.6))
     }
@@ -575,9 +575,10 @@ extension LyricLines {
         guard let text = cue.text, width > 0 else { return cue }
         var parts = cue.words.isEmpty ? [text] : cue.words.map(\.text)
         let joined = parts.joined()
-        let key = "\(Int(width))|\(joined)"
+        let font = Fonts.ns(.lyrics, size, weight: .bold)
+        let key = "\(Int(width))|\(font.fontName)|\(font.pointSize)|\(joined)"
         let found = breaks[key] ?? {
-            let s = NSAttributedString(string: joined, attributes: [.font: NSFont.systemFont(ofSize: size, weight: .bold)])
+            let s = NSAttributedString(string: joined, attributes: [.font: font])
             let frame = CTFramesetterCreateFrame(CTFramesetterCreateWithAttributedString(s), CFRange(location: 0, length: 0),
                                                  CGPath(rect: CGRect(x: 0, y: 0, width: width - 2, height: 10_000), transform: nil), nil)
             let starts = (CTFrameGetLines(frame) as? [CTLine] ?? []).dropFirst().map { CTLineGetStringRange($0).location }
@@ -654,7 +655,7 @@ private struct LyricFont: ViewModifier, Animatable {
         set { size = newValue }
     }
 
-    func body(content: Content) -> some View { content.font(.system(size: size, weight: .bold)).environment(\.lyricSize, size) }
+    func body(content: Content) -> some View { content.font(.app(.lyrics, size, weight: .bold)).environment(\.lyricSize, size) }
 }
 
 extension EnvironmentValues {
@@ -760,7 +761,7 @@ private struct KaraokeLine: View {
                 if active && fill {
                     let words = sung, on = live && NowPlaying.shared.playing, tint = tint, size = size
                     Isolated(content: TimelineView(Frames(on: on)) { ctx in
-                        words.font(.system(size: size, weight: .bold))
+                        words.font(.app(.lyrics, size, weight: .bold))
                             .foregroundStyle(.white)
                             .fixedSize(horizontal: false, vertical: true)
                             .textRenderer(Karaoke(t: Lyrics.shared.playhead(ctx.date), tint: tint, on: true))
@@ -857,6 +858,6 @@ struct ClosedLyricLine: View {
 
     private static func width(_ cue: Lyrics.Cue) -> CGFloat {
         guard let text = cue.text else { return 16 }
-        return min(340, ceil((text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .medium)]).width))
+        return min(340, ceil((text as NSString).size(withAttributes: [.font: Fonts.ns(.lyrics, 12.5, weight: .medium)]).width))
     }
 }

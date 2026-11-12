@@ -5,3 +5,5 @@ xcuserdata/
 .swiftpm/
 .build/
 .claude/
+# The owner's own school preset: kept local (bundled into local builds), not published.
+Resources/Timetable/y5-2026-late.json

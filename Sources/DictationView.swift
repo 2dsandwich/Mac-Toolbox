@@ -14,14 +14,11 @@ struct DictationPanel: View {
     var body: some View {
         let list = history.search(model.query)
         let current = history.current(in: list)
+        let empty = list.isEmpty && history.job == nil
         VStack(spacing: PanelLayout.gap) {
-            header
+            header(empty ? (history.entries.isEmpty ? "No dictations yet" + Self.howTo(s) : "No matches") : nil)
             ForEach(DictationSetup.missing(), id: \.self) { SetupRow(need: $0) }
-            if list.isEmpty, history.job == nil {
-                Text(history.entries.isEmpty ? "No dictations yet" : "No matches")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
+            if !empty {
                 HStack(spacing: 0) {
                     rows(list, current)
                         .frame(width: model.width(s) * 0.4)
@@ -36,7 +33,7 @@ struct DictationPanel: View {
             }
         }
         .padding(PanelLayout.edges)
-        .frame(height: Metrics.clipboardList(s))
+        .frame(height: Self.height(model, s))
         .overlay {
             if dropping {
                 RoundedRectangle(cornerRadius: PanelLayout.inner(radius), style: .continuous)
@@ -54,10 +51,26 @@ struct DictationPanel: View {
         }
     }
 
-    private var header: some View {
+    /// Nothing to list: just the header row (saying so) and anything dictation still needs.
+    static func height(_ model: LauncherModel, _ s: Settings) -> CGFloat {
+        let h = DictationHistory.shared
+        guard h.search(model.query).isEmpty, h.job == nil else { return Metrics.clipboardList(s) }
+        return PanelLayout.vertical + 32 + CGFloat(DictationSetup.missing().count) * (34 + PanelLayout.gap)
+    }
+
+    /// How to start, from the keys set in Settings › Dictation.
+    static func howTo(_ s: Settings) -> String {
+        let keys = (s.fnDictation ? ["hold Fn"] : []) + (s.dictationHotKey.isEmpty ? [] : ["press \(s.dictationHotKey.display)"])
+        return !s.dictationEnabled || keys.isEmpty ? "" : ". To dictate, " + keys.joined(separator: " or ") + "."
+    }
+
+    /// This week's numbers, or `message` when there's nothing to list.
+    private func header(_ message: String?) -> some View {
         let sum = history.summary
         return HStack(spacing: 18) {
-            if sum.words > 0 {
+            if let message {
+                Text(message).font(.system(size: 13)).foregroundStyle(.secondary)
+            } else if sum.words > 0 {
                 stat(sum.words.formatted(), "words this week")
                 stat("\(sum.wpm)", "wpm")
                 stat("\(sum.streak)", "day streak")
@@ -80,13 +93,13 @@ struct DictationPanel: View {
     }
 
     private func rows(_ list: [DictationEntry], _ current: DictationEntry?) -> some View {
-        let rowRadius = max(4, min(radius - PanelLayout.inset, s.rowHeight / 2))
+        let rowRadius = max(4, min(radius - PanelLayout.inset, s.rowSize / 2))
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(spacing: Metrics.rowGap * 2) {
-                    if let job = history.job { JobRow(name: job.name, progress: job.progress, height: s.rowHeight, radius: rowRadius) }
+                    if let job = history.job { JobRow(name: job.name, progress: job.progress, height: s.rowSize, radius: rowRadius) }
                     ForEach(list) { e in
-                        EntryRow(entry: e, selected: e.id == current?.id, height: s.rowHeight, radius: rowRadius)
+                        EntryRow(entry: e, selected: e.id == current?.id, height: s.rowSize, radius: rowRadius)
                             .id(e.id)
                             .onTapGesture(count: 2) { (NSApp.delegate as? AppDelegate)?.launcher.pasteDictation(e.text) }
                             .onTapGesture { history.selected = e.id; history.showRaw = false }
@@ -172,8 +185,8 @@ private struct EntryRow: View {
     var body: some View {
         HStack(spacing: 10) {
             EntryIcon(entry: entry).frame(width: 20, height: 20)
-            Text(entry.kind == .file ? entry.app : entry.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? entry.text)
-                .font(.system(size: 13.5)).lineLimit(1)
+            Text(entry.kind == .file ? entry.app : entry.text.split(whereSeparator: \.isNewline).joined(separator: " "))
+                .font(.system(size: 13.5)).lineLimit(2)
             Spacer(minLength: 4)
             Text(shortAge(entry.date)).font(.system(size: 11.5)).foregroundStyle(.tertiary)
         }

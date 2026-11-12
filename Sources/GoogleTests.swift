@@ -45,6 +45,12 @@ import Foundation
         check("12月24日", r.day == on(12, 24, 2026) && r.title == "プレゼント")
         r = p("finish slides in 3 days", [])
         check("in 3 days", r.title == "finish slides" && r.day == day(3))
+        r = p("lunch with Aki fri 12:30 for 90m", [])
+        check("event length", r.title == "lunch with Aki" && r.day == day(2) && r.hour == 12 && r.minute == 30 && r.minutes == 90)
+        r = p("venue walkthrough tomorrow 2-3pm", [])
+        check("time range", r.title == "venue walkthrough" && r.hour == 14 && r.minutes == 60)
+        r = p("late show 11pm-1am", [])
+        check("range past midnight", r.hour == 23 && r.minutes == 120)
         check("needs model", p("dinner next month", []).needsModel && !p("Buy milk", []).needsModel)
         check("spans", p("call Ben tomorrow // x", []).spans.map(\.kind) == [.when, .note])
         check("capital", QuickAdd.formatTitle("call Ben") == "Call Ben" && QuickAdd.formatTitle("iPhone case") == "iPhone case"

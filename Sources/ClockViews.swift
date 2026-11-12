@@ -25,7 +25,7 @@ struct ClockHub: View {
 
     var body: some View {
         VStack(spacing: gap) {
-            ClockTabs(model: model, pomodoro: pomodoro, radius: radius)
+            ClockTabs(model: model, pomodoro: pomodoro)
                 .frame(height: Self.tabsHeight)
             Group {
                 switch model.clockMode {
@@ -46,10 +46,8 @@ struct ClockHub: View {
 private struct ClockTabs: View {
     let model: LauncherModel
     let pomodoro: Pomodoro
-    let radius: CGFloat
 
     var body: some View {
-        let outer = PanelLayout.inner(radius)
         HStack(spacing: 4) {
             ForEach(ClockMode.allCases) { m in
                 let on = model.clockMode == m
@@ -61,14 +59,14 @@ private struct ClockTabs: View {
                     }
                     .foregroundStyle(on ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(RoundedRectangle(cornerRadius: PanelLayout.inner(outer, by: 4), style: .continuous).fill(Color.primary.opacity(on ? 0.16 : 0)))
+                    .background(Capsule().fill(Color.primary.opacity(on ? 0.16 : 0)))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(4)
-        .background(RoundedRectangle(cornerRadius: outer, style: .continuous).fill(cardFill))
+        .background(Capsule().fill(cardFill))
     }
 
     private func running(_ m: ClockMode) -> Bool {
@@ -381,8 +379,14 @@ struct AlarmsView: View {
                     .frame(height: Self.editorHeight)
             } else if alarms.list.isEmpty {
                 Block(radius: radius) {
-                    Image(systemName: "alarm").font(.system(size: 22)).foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HStack {
+                        Text("No alarms").font(.system(size: 13)).foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        PillButton(title: "New Alarm", symbol: "plus") { model.newAlarm() }
+                    }
+                    .padding(.leading, cardPadding)
+                    .padding(.trailing, 16)
+                    .frame(maxHeight: .infinity)
                 }
                 .frame(height: 64)
             } else {
@@ -393,7 +397,7 @@ struct AlarmsView: View {
                         ForEach(up) { a in row(a, past: false) }
                         if !past.isEmpty {
                             HStack {
-                                Text("Past").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                                Text("Off").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
                                 Spacer()
                                 Button("Clear") { alarms.clearPast() }.buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(orange)
                             }

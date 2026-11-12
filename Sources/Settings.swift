@@ -237,7 +237,7 @@ enum BandItem: String, Codable, CaseIterable, Identifiable {
         case .weather: 46
         case .event: 64
         case .cpu, .memory: 58
-        case .network: 56
+        case .network: 74
         case .wifi: 84
         case .privacy: 36
         case .disk: 70
@@ -303,6 +303,28 @@ struct Snippet: Codable, Equatable, Identifiable, Hashable {
     var text = ""
 }
 
+/// A keyword that opens a web address with what you type after it in place of {query}.
+struct Quicklink: Codable, Equatable, Identifiable, Hashable {
+    var id = UUID()
+    var keyword = ""
+    var name = ""
+    var url = ""
+
+    static let defaults = [
+        Quicklink(keyword: "yt", name: "YouTube", url: "https://www.youtube.com/results?search_query={query}"),
+        Quicklink(keyword: "gh", name: "GitHub", url: "https://github.com/search?q={query}"),
+        Quicklink(keyword: "maps", name: "Maps", url: "https://maps.apple.com/?q={query}"),
+        Quicklink(keyword: "g", name: "Google", url: "https://www.google.com/search?q={query}"),
+        Quicklink(keyword: "wiki", name: "Wikipedia", url: "https://en.wikipedia.org/w/index.php?search={query}"),
+    ]
+
+    /// The address with `text` filled in, or nil when it isn't one.
+    func link(_ text: String) -> URL? {
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return URL(string: url.replacingOccurrences(of: "{query}", with: text.addingPercentEncoding(withAllowedCharacters: safe) ?? text))
+    }
+}
+
 struct Settings: Codable, Equatable {
     /// 2: per-app hotkeys replaced custom shortcuts; empty search shows running apps.
     var version = 4
@@ -348,6 +370,10 @@ struct Settings: Codable, Equatable {
     var ghostCompletion = true
     var builtinsInResults = true
     var searchSettingsPages = true
+    /// A few matching files under the apps (all of them in the Files scope).
+    var filesInResults = true
+    /// "yt cats" opens a YouTube search: a keyword, then what to look for.
+    var quicklinks = Quicklink.defaults
 
     // Tools: instant answers while you type (weather, calculator, units, currency, time zones…)
     var instantAnswers = true
@@ -387,10 +413,27 @@ struct Settings: Codable, Equatable {
     var notchEvents = true
     /// Coding agents (Claude Code, Codex): sessions, questions to answer and usage limits.
     var notchAgents = true
+    /// Classes from the timetable: an alert before each one, and the one under way.
+    var notchClasses = true
+    /// Minutes before a class that its alert shows.
+    var notchClassLead = 10
+    /// The class under way, with its time left.
+    var notchClassLive = true
+    /// Files dropped on the notch wait on its shelf (referenced, not copied).
+    var notchShelf = true
+    /// A brief note in the closed notch: the charger plugged in or out, 20% and 10% left, fully charged.
+    var notchBattery = true
+    /// The closed notch shows the volume as it changes.
+    /// The closed notch shows a file that just finished downloading.
+    var notchDownloads = true
     /// Minutes before an event starts that it shows in the notch.
     var notchEventLead = 15
-    /// Calendars left out of the notch and the search bar (by identifier, so new ones show).
+    /// Calendars left out of the notch, the search bar and the Calendar mode (by identifier, so new ones show).
     var eventCalendarsOff: [String] = []
+    /// Google task lists left out the same way (Settings › Google).
+    var taskListsOff: [String] = []
+    /// A button in the open notch for what's left of today and the open tasks.
+    var notchAgenda = true
     var notchHoverExpand = true
     var notchHoverDelay: Double = 0.3
     var notchCollapseDelay: Double = 0.7
@@ -494,6 +537,41 @@ struct Settings: Codable, Equatable {
     var showPreview = true
     var ignoredApps = ["com.1password.1password", "com.agilebits.onepassword7", "com.apple.keychainaccess", "com.apple.Passwords", "com.bitwarden.desktop"]
 
+    // Text (Settings › Appearance › Text): "system", "rounded", "serif", "monospaced" or an installed font family.
+    var fontFamily = "system"
+    /// Per area (TextArea raw values): only the ones changed from the usual look.
+    var textStyles: [String: TextStyle] = [:]
+    /// Scale text with the system's text size (Accessibility › Display).
+    var followTextSize = true
+
+    // More control
+    /// Speed of the bar's and the notch's animations (2 = twice as fast).
+    var animationSpeed: Double = 1
+    /// How long notes in the notch stay, times their usual time.
+    var notchToastScale: Double = 1
+    /// Extra width for the open notch, in points.
+    var notchExtraWidth: Double = 0
+    /// Lyrics earlier (minus) or later (plus), in seconds.
+    var lyricsOffset: Double = 0
+    /// How many matching files show under the apps.
+    var fileResults = 3
+    /// What "tr …" translates into ("Auto": Japanese and English both ways).
+    var translateTarget = "Auto"
+
+    // Accessibility
+    /// Quieter motion while Reduce Motion is on in System Settings.
+    var followReduceMotion = true
+    /// A darker bar behind the text (also on when Increase Contrast is on in System Settings).
+    var moreContrast = false
+    /// Taller rows, easier to point at.
+    var largerTargets = false
+
+    /// Motion is calmed: Reduce Motion is on and followed.
+    var reduceMotion: Bool { followReduceMotion && NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// The row height in use (larger targets make rows at least 52 pt).
+    var rowSize: Double { largerTargets ? max(rowHeight, 52) : rowHeight }
+    /// The darkness in use (more contrast makes it at least 80%).
+    var shade: Double { moreContrast || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? max(darkness, 0.8) : darkness }
 }
 
 @MainActor @Observable final class Store {
@@ -509,6 +587,8 @@ struct Settings: Codable, Equatable {
     }
 
     @ObservationIgnored var onChange: ((Settings) -> Void)?
+    /// Off for off-screen snapshots: they may change settings to draw them, never the saved ones.
+    @ObservationIgnored var persist = true
 
     private init() {
         settings = Store.load()
@@ -555,9 +635,11 @@ struct Settings: Codable, Equatable {
     }
 
     private func save() {
+        guard persist else { return }
         if let data = try? JSONEncoder().encode(settings) { UserDefaults.standard.set(data, forKey: Store.key) }
     }
 
+    /// The search bar's look (Settings › Appearance), text included, back to how it started.
     func resetAppearance() {
         let d = Settings()
         var s = settings
@@ -566,6 +648,7 @@ struct Settings: Codable, Equatable {
         s.maxRows = d.maxRows; s.glass = d.glass; s.tintStrength = d.tintStrength; s.darkness = d.darkness; s.customTint = d.customTint
         s.tintHex = d.tintHex; s.appearance = d.appearance; s.shadeScopes = d.shadeScopes; s.showIcons = d.showIcons
         s.showHints = d.showHints; s.showTabs = d.showTabs; s.animations = d.animations
+        s.fontFamily = d.fontFamily; s.textStyles = d.textStyles; s.animationSpeed = d.animationSpeed
         settings = s
     }
 }

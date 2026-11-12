@@ -138,7 +138,7 @@ struct AskChatList: View {
             Text(chatAge(chat.date)).font(.system(size: 11.5)).foregroundStyle(.tertiary).monospacedDigit()
         }
         .padding(.horizontal, 13)
-        .frame(height: s.rowHeight)
+        .frame(height: s.rowSize)
         .background(RoundedRectangle(cornerRadius: radius, style: .continuous)
             .fill(selected ? selectedFill : hovered == chat.id ? hoverFill : .clear))
         .contentShape(Rectangle())
@@ -172,16 +172,16 @@ struct AskChatsSection: View {
             }
             if !chats.all.isEmpty {
                 HStack {
-                    if chats.all.count > 5 { Button(showAll ? "Show Fewer" : "Show All \(chats.all.count)") { showAll.toggle() } }
+                    if chats.all.count > 5 { Button(showAll ? "Show fewer" : "Show all \(chats.all.count)") { showAll.toggle() } }
                     Spacer()
-                    Button("Delete All Chats…", role: .destructive) { confirmClear = true }
+                    Button("Delete all chats…", role: .destructive) { confirmClear = true }
                 }
             }
         } header: {
             Text("Ask chats")
         }
         .confirmationDialog("Delete all \(chats.all.count) chats?", isPresented: $confirmClear) {
-            Button("Delete All", role: .destructive) { chats.clear() }
+            Button("Delete all", role: .destructive) { chats.clear() }
         }
     }
 }

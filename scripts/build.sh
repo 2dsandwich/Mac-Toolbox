@@ -6,6 +6,8 @@ APP="build/MONEY!.app"
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -swift-version 5 -target arm64-apple-macos27.0 -o "$APP/Contents/MacOS/MONEY" Sources/*.swift
 cp Resources/Info.plist "$APP/Contents/"
+# School presets for the timetable (data files: add a school without code).
+cp -R Resources/Timetable "$APP/Contents/Resources/"
 if [[ ! -f build/AppIcon.icns || scripts/make-icon.swift -nt build/AppIcon.icns ]]; then
   rm -rf build/AppIcon.iconset
   mkdir -p build/AppIcon.iconset

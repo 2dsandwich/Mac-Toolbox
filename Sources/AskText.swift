@@ -60,15 +60,15 @@ struct SelectableNotes: NSViewRepresentable {
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 5
         for run in a.runs {
-            var font = NSFont.systemFont(ofSize: 13.5)
+            var font = Fonts.ns(.answers, 13.5)
             if let intent = run.inlinePresentationIntent {
                 if intent.contains(.code) { font = .monospacedSystemFont(ofSize: 12.5, weight: .regular) }
-                if intent.contains(.stronglyEmphasized) { font = .systemFont(ofSize: font.pointSize, weight: .bold) }
+                if intent.contains(.stronglyEmphasized) { font = Fonts.ns(.answers, 13.5, weight: .bold) }
                 if intent.contains(.emphasized) { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
             }
             // A run with its own font is a heading (the only place the notes set one besides code).
             if run.swiftUI.font != nil, run.inlinePresentationIntent?.contains(.code) != true {
-                font = .systemFont(ofSize: 15, weight: .semibold)
+                font = Fonts.ns(.answers, 15, weight: .semibold)
             }
             var attrs: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: para,
                                                          .foregroundColor: run.swiftUI.foregroundColor == nil ? NSColor.labelColor : NSColor.secondaryLabelColor]
